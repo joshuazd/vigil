@@ -2,7 +2,7 @@ import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
-from vigil.pr_status import _fetch_unresolved_threads, _get_nwo, _parse_checks, fetch
+from vigil.pr_status import _fetch_review_threads, _get_nwo, _parse_checks, fetch
 
 
 class TestParseChecks:
@@ -84,7 +84,7 @@ class TestFetch:
         "mergeable": "MERGEABLE",
     })
 
-    @patch("vigil.pr_status._fetch_unresolved_threads", return_value=1)
+    @patch("vigil.pr_status._fetch_review_threads", return_value=(1, []))
     @patch("vigil.pr_status._run_with_retry")
     def test_valid_json_returns_pr_status(self, mock_retry, mock_threads):
         mock_retry.return_value = MagicMock(returncode=0, stdout=self._VALID_GH_JSON)
@@ -116,7 +116,7 @@ class TestFetch:
 
 
 class TestFetchUnresolvedThreads:
-    """Tests for _fetch_unresolved_threads with mocked GraphQL."""
+    """Tests for _fetch_review_threads with mocked GraphQL."""
 
     _GRAPHQL_RESPONSE = json.dumps({
         "data": {
@@ -124,10 +124,32 @@ class TestFetchUnresolvedThreads:
                 "pullRequest": {
                     "reviewThreads": {
                         "nodes": [
-                            {"isResolved": False, "isOutdated": False},
-                            {"isResolved": True, "isOutdated": False},
-                            {"isResolved": False, "isOutdated": True},
-                            {"isResolved": False, "isOutdated": False},
+                            {
+                                "isResolved": False, "isOutdated": False,
+                                "path": "a.py",
+                                "comments": {"nodes": [
+                                    {"author": {"login": "bob"}, "body": "fix"},
+                                ]},
+                            },
+                            {
+                                "isResolved": True, "isOutdated": False,
+                                "path": "b.py",
+                                "comments": {"nodes": [
+                                    {"author": {"login": "alice"}, "body": "done"},
+                                ]},
+                            },
+                            {
+                                "isResolved": False, "isOutdated": True,
+                                "path": "c.py",
+                                "comments": {"nodes": []},
+                            },
+                            {
+                                "isResolved": False, "isOutdated": False,
+                                "path": "d.py",
+                                "comments": {"nodes": [
+                                    {"author": {"login": "carol"}, "body": "also"},
+                                ]},
+                            },
                         ],
                     },
                 },
@@ -139,14 +161,18 @@ class TestFetchUnresolvedThreads:
     @patch("vigil.pr_status._run_with_retry")
     def test_counts_unresolved_non_outdated(self, mock_retry, mock_nwo):
         mock_retry.return_value = MagicMock(returncode=0, stdout=self._GRAPHQL_RESPONSE)
-        assert _fetch_unresolved_threads("/repo", 42) == 2
+        count, comments = _fetch_review_threads("/repo", 42)
+        assert count == 2
+        assert len(comments) == 3  # all non-empty comment nodes (resolved + unresolved)
+        assert comments[0]["author"] == "bob"
+        assert comments[0]["path"] == "a.py"
 
     @patch("vigil.pr_status._get_nwo", return_value=None)
     def test_no_nwo_returns_zero(self, mock_nwo):
-        assert _fetch_unresolved_threads("/repo", 42) == 0
+        assert _fetch_review_threads("/repo", 42) == (0, [])
 
     @patch("vigil.pr_status._get_nwo", return_value=("octocat", "hello-world"))
     @patch("vigil.pr_status._run_with_retry")
     def test_graphql_failure_returns_zero(self, mock_retry, mock_nwo):
         mock_retry.return_value = MagicMock(returncode=1, stderr="error")
-        assert _fetch_unresolved_threads("/repo", 42) == 0
+        assert _fetch_review_threads("/repo", 42) == (0, [])

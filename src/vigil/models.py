@@ -50,6 +50,9 @@ class GitStatus:
             return f"↻ {self.rebase_age_seconds // 3600}h"
         return f"↻ {self.rebase_age_seconds // 86400}d"
 
+    def is_stale(self, threshold: int) -> bool:
+        return self.rebase_age_seconds is not None and self.rebase_age_seconds > threshold
+
     def display(self) -> str:
         parts = []
         if self.modified:
@@ -79,6 +82,9 @@ class PRStatus:
     approvals: int = 0
     unresolved_comments: int = 0
     has_conflicts: bool = False
+    title: str = ""
+    body: str = ""
+    review_comments: list[dict] = field(default_factory=list)
 
     def display(self) -> str:
         if not self.number:

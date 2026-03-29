@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from enum import Enum
+
 from rich.text import Text
 from textual.widgets import DataTable, Input, RichLog, Static
 
 from . import config, tmux
 from .models import STATE_STYLES, Session, SessionState
+
+
+class DetailMode(Enum):
+    PANE = "pane"
+    PR_DESC = "pr"
+    PR_COMMENTS = "comments"
 
 
 class SessionTable(DataTable):
@@ -57,11 +65,20 @@ class SessionTable(DataTable):
         self.add_column("PR", key="pr", width=22)
         self._columns_added = True
 
-    def update_sessions(self, sessions: list[Session]) -> None:
+    def update_sessions(
+        self,
+        sessions: list[Session],
+        *,
+        filter_state: SessionState | None = None,
+        selected: set[str] | None = None,
+    ) -> None:
         self._ensure_columns()
+        self._sessions = sessions
+        sel = selected or set()
 
-        new_keys = [s.name for s in sessions]
-        new_map = {s.name: s for s in sessions}
+        visible = [s for s in sessions if s.state == filter_state] if filter_state else sessions
+        new_keys = [s.name for s in visible]
+        new_map = {s.name: s for s in visible}
         old_set = set(self._row_keys)
         new_set = set(new_keys)
 
@@ -74,7 +91,7 @@ class SessionTable(DataTable):
             if key not in old_set:
                 s = new_map[key]
                 self.add_row(
-                    _indicator(s),
+                    _indicator(s, key in sel),
                     _state_dot(s),
                     _session_name(s),
                     _git_col(s),
@@ -85,13 +102,12 @@ class SessionTable(DataTable):
         # Update existing sessions
         for key in old_set & new_set:
             s = new_map[key]
-            self.update_cell(key, "indicator", _indicator(s))
+            self.update_cell(key, "indicator", _indicator(s, key in sel))
             self.update_cell(key, "state", _state_dot(s))
             self.update_cell(key, "session", _session_name(s))
             self.update_cell(key, "git", _git_col(s))
             self.update_cell(key, "pr", _pr_col(s))
 
-        self._sessions = sessions
         self._row_keys = new_keys
 
     def get_selected(self) -> Session | None:
@@ -128,15 +144,62 @@ class DetailPanel(RichLog):
     }
     """
 
+    _MODE_ORDER = list(DetailMode)
+
     def __init__(self, **kwargs) -> None:
         super().__init__(max_lines=200, wrap=False, markup=False, **kwargs)
+        self._mode: DetailMode | None = None  # None = auto-select
+        self._last_session_name: str = ""
+
+    def _auto_mode(self, session: Session) -> DetailMode:
+        """Pick detail mode based on session state."""
+        if session.state == SessionState.UNRESOLVED:
+            return DetailMode.PR_COMMENTS
+        if session.state in (SessionState.REVIEW, SessionState.PENDING, SessionState.BLOCKED):
+            return DetailMode.PR_DESC
+        return DetailMode.PANE
+
+    @property
+    def mode(self) -> DetailMode:
+        return self._mode or DetailMode.PANE
+
+    def cycle_mode(self) -> None:
+        """Advance to next detail mode (manual override)."""
+        modes = self._MODE_ORDER
+        idx = modes.index(self.mode)
+        self._mode = modes[(idx + 1) % len(modes)]
 
     def update_session(self, session: Session | None) -> None:
         self.clear()
         if session is None:
             return
 
-        # Header: icons + values
+        # Reset to auto-select when cursor moves to a different session
+        if session.name != self._last_session_name:
+            self._mode = None
+            self._last_session_name = session.name
+
+        active_mode = self._mode if self._mode is not None else self._auto_mode(session)
+
+        self._render_header(session, active_mode)
+        self.write("")
+
+        if active_mode == DetailMode.PR_DESC:
+            self.auto_scroll = False
+            self.wrap = True
+            self._render_pr_desc(session)
+            self.scroll_home(animate=False)
+        elif active_mode == DetailMode.PR_COMMENTS:
+            self.auto_scroll = False
+            self.wrap = True
+            self._render_pr_comments(session)
+            self.scroll_home(animate=False)
+        else:
+            self.auto_scroll = True
+            self.wrap = False
+            self._render_pane(session)
+
+    def _render_header(self, session: Session, active_mode: DetailMode) -> None:
         header = Text()
         if session.git.branch:
             header.append("⎇ ", style="dim")
@@ -144,7 +207,7 @@ class DetailPanel(RichLog):
         if session.pr and session.pr.number:
             header.append("  ")
             header.append_text(_colorize_pr(session.pr))
-        # Git changes (without rebase age — show that separately)
+        # Git changes
         git_parts = []
         if session.git.modified:
             git_parts.append(f"~{session.git.modified}")
@@ -161,18 +224,25 @@ class DetailPanel(RichLog):
         age = session.git.rebase_age_display()
         if age:
             assert session.git.rebase_age_seconds is not None
+            threshold = int(config.get_setting("stale_threshold"))
+            stale = session.git.is_stale(threshold)
             hours = session.git.rebase_age_seconds // 3600
             if hours < 24:
-                header.append(f"  ↻ rebased {hours}h ago", style="dim")
+                label = f"  ↻ rebased {hours}h ago"
             else:
                 days = session.git.rebase_age_seconds // 86400
-                header.append(f"  ↻ rebased {days}d ago", style="dim")
+                label = f"  ↻ rebased {days}d ago"
+            if stale:
+                header.append(f"  ⚠{label.strip()}", style="bright_red")
+            else:
+                header.append(label, style="dim")
         state_style, state_dot = STATE_STYLES[session.state]
         header.append(f"  {state_dot} {session.state.value}", style=state_style)
+        # Mode indicator
+        header.append(f"  [{active_mode.value}]", style="dim")
         self.write(header)
-        self.write("")
 
-        # Captured pane output with ANSI colors
+    def _render_pane(self, session: Session) -> None:
         available = max(4, self.size.height - 3) if self.size.height > 0 else 20
         window = config.get_setting("capture_window") or None
         pane_output = tmux.capture_pane(session.name, lines=available, window=window)
@@ -181,6 +251,39 @@ class DetailPanel(RichLog):
                 stripped = pane_line.rstrip()
                 if stripped:
                     self.write(Text.from_ansi(f"  {stripped}"))
+
+    def _render_pr_desc(self, session: Session) -> None:
+        if not session.pr or not session.pr.number:
+            self.write(Text("  No PR", style="dim"))
+            return
+        if session.pr.title:
+            self.write(Text(f"  {session.pr.title}", style="bold"))
+        if session.pr.body:
+            self.write("")
+            for line in session.pr.body.splitlines():
+                self.write(Text(f"  {line}"))
+
+    def _render_pr_comments(self, session: Session) -> None:
+        if not session.pr or not session.pr.review_comments:
+            self.write(Text("  No review comments", style="dim"))
+            return
+        unresolved = [c for c in session.pr.review_comments if not c.get("resolved")]
+        if not unresolved:
+            self.write(Text("  All comments resolved", style="dim"))
+            return
+        for i, c in enumerate(unresolved):
+            if i > 0:
+                self.write("")
+            path = c.get("path", "")
+            author = c.get("author", "")
+            header = Text()
+            header.append(f"  {author}", style="cyan")
+            if path:
+                header.append(f"  {path}", style="dim")
+            self.write(header)
+            body = c.get("body", "")
+            for line in body.splitlines():
+                self.write(Text(f"    {line}"))
 
 
 class StatusBar(Static):
@@ -196,7 +299,12 @@ class StatusBar(Static):
     }
     """
 
-    def update_counts(self, sessions: list[Session]) -> None:
+    def update_counts(
+        self,
+        sessions: list[Session],
+        *,
+        active_filter: SessionState | None = None,
+    ) -> None:
         counts: dict[SessionState, int] = {}
         for s in sessions:
             counts[s.state] = counts.get(s.state, 0) + 1
@@ -211,6 +319,10 @@ class StatusBar(Static):
             if n > 0:
                 style, _ = STATE_STYLES[state]
                 line.append(f" · {n} {state.value}", style=style)
+
+        if active_filter is not None:
+            fstyle, _ = STATE_STYLES[active_filter]
+            line.append(f" · filter: {active_filter.value}", style=fstyle)
 
         self.update(line)
 
@@ -237,7 +349,9 @@ class DispatchInput(Input):
 
 # --- Cell renderers ---
 
-def _indicator(s: Session) -> Text:
+def _indicator(s: Session, selected: bool = False) -> Text:
+    if selected:
+        return Text(" ◆ ", style="bright_cyan")
     if s.has_bell:
         return Text(" * ", style="bright_yellow")
     return Text(f" {s.indicator} ")
@@ -254,7 +368,32 @@ def _session_name(s: Session) -> Text:
 
 
 def _git_col(s: Session) -> Text:
-    return Text(s.git.display())
+    threshold = int(config.get_setting("stale_threshold"))
+    stale = s.git.is_stale(threshold)
+
+    parts: list[str] = []
+    if s.git.modified:
+        parts.append(f"~{s.git.modified}")
+    if s.git.added:
+        parts.append(f"+{s.git.added}")
+    if s.git.deleted:
+        parts.append(f"-{s.git.deleted}")
+    if s.git.unpushed:
+        parts.append(f"↑{s.git.unpushed}")
+
+    age = s.git.rebase_age_display()
+    if not parts and not age:
+        return Text("—")
+
+    t = Text()
+    if parts:
+        t.append(" ".join(parts))
+    if age:
+        if parts:
+            t.append(" ")
+        age_str = f"⚠{age}" if stale else age
+        t.append(age_str, style="bright_red" if stale else "")
+    return t
 
 
 def _pr_col(s: Session) -> Text:

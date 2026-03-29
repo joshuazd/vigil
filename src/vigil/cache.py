@@ -90,6 +90,9 @@ def _dict_to_session(d: dict) -> Session:
             approvals=pr_data.get("approvals", 0),
             unresolved_comments=pr_data.get("unresolved_comments", 0),
             has_conflicts=pr_data.get("has_conflicts", False),
+            title=pr_data.get("title", ""),
+            body=pr_data.get("body", ""),
+            review_comments=pr_data.get("review_comments", []),
         )
     return Session(
         name=d["name"],

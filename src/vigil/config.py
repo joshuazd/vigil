@@ -19,6 +19,7 @@ CONFIG_PATH = Path.home() / ".config" / "vigil" / "config.toml"
 HOOK_DEFAULTS: dict[str, str] = {
     "merge": "gh pr merge {branch} --squash --delete-branch",
     "approve": "gh pr review {branch} --approve",
+    "notify": 'tmux display-message "vigil: {session} → {new_state}"',
 }
 
 # Settings with their TOML key, env var override, and default value.
@@ -29,6 +30,8 @@ SETTING_DEFAULTS: dict[str, tuple[str, str]] = {
     "log_level": ("VIGIL_LOG_LEVEL", "INFO"),
     "git_workers": ("VIGIL_GIT_WORKERS", "8"),
     "capture_window": ("VIGIL_CAPTURE_WINDOW", ""),
+    "stale_threshold": ("VIGIL_STALE_THRESHOLD", "86400"),
+    "notifications_enabled": ("VIGIL_NOTIFICATIONS", "true"),
 }
 
 

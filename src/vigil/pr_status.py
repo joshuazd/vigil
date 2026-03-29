@@ -44,7 +44,7 @@ def fetch(
             [
                 "gh", "pr", "view", branch,
                 "--json",
-                "number,state,isDraft,url,statusCheckRollup,"
+                "number,state,isDraft,url,title,body,statusCheckRollup,"
                 "reviewDecision,latestReviews,mergeable",
             ],
             cwd=git_root,
@@ -63,6 +63,8 @@ def fetch(
     state = data.get("state", "")
     is_draft = data.get("isDraft", False)
     url = data.get("url", "")
+    title = data.get("title", "")
+    body = data.get("body", "")
     review_decision = data.get("reviewDecision") or ""
 
     # Check status rollup
@@ -74,8 +76,9 @@ def fetch(
 
     # Unresolved review threads (only for open PRs)
     unresolved = 0
+    review_comments: list[dict] = []
     if state == "OPEN":
-        unresolved = _fetch_unresolved_threads(git_root, number, cancel=cancel)
+        unresolved, review_comments = _fetch_review_threads(git_root, number, cancel=cancel)
 
     has_conflicts = data.get("mergeable") == "CONFLICTING"
 
@@ -89,6 +92,9 @@ def fetch(
         approvals=approvals,
         unresolved_comments=unresolved,
         has_conflicts=has_conflicts,
+        title=title,
+        body=body,
+        review_comments=review_comments,
     )
 
 
@@ -110,16 +116,23 @@ def _parse_checks(rollup: list[dict]) -> str:
     return "pass"
 
 
-def _fetch_unresolved_threads(
+def _fetch_review_threads(
     git_root: str, pr_number: int, *, cancel: threading.Event | None = None,
-) -> int:
-    """Count unresolved, non-outdated review threads via GraphQL."""
+) -> tuple[int, list[dict]]:
+    """Fetch review threads via GraphQL. Returns (unresolved_count, comments_list)."""
     query = """
     query($owner: String!, $repo: String!, $number: Int!) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
           reviewThreads(first: 100) {
-            nodes { isResolved isOutdated }
+            nodes {
+              isResolved
+              isOutdated
+              path
+              comments(first: 5) {
+                nodes { author { login } body }
+              }
+            }
           }
         }
       }
@@ -128,7 +141,7 @@ def _fetch_unresolved_threads(
     # Get owner/repo from remote
     nwo = _get_nwo(git_root)
     if not nwo:
-        return 0
+        return 0, []
     owner, repo = nwo
 
     try:
@@ -145,7 +158,7 @@ def _fetch_unresolved_threads(
         )
         if result.returncode != 0:
             logger.warning("graphql query failed for PR #%d: %s", pr_number, result.stderr.strip())
-            return 0
+            return 0, []
         data = json.loads(result.stdout)
         threads = (
             data.get("data", {})
@@ -154,13 +167,25 @@ def _fetch_unresolved_threads(
             .get("reviewThreads", {})
             .get("nodes", [])
         )
-        return sum(
-            1 for t in threads
-            if not t.get("isResolved", True) and not t.get("isOutdated", False)
-        )
+        unresolved = 0
+        comments: list[dict] = []
+        for t in threads:
+            is_resolved = t.get("isResolved", True)
+            is_outdated = t.get("isOutdated", False)
+            if not is_resolved and not is_outdated:
+                unresolved += 1
+            thread_comments = t.get("comments", {}).get("nodes", [])
+            for c in thread_comments:
+                comments.append({
+                    "author": (c.get("author") or {}).get("login", ""),
+                    "body": c.get("body", ""),
+                    "path": t.get("path", ""),
+                    "resolved": is_resolved,
+                })
+        return unresolved, comments
     except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
-        logger.warning("unresolved threads fetch failed for PR #%d: %s", pr_number, e)
-        return 0
+        logger.warning("review threads fetch failed for PR #%d: %s", pr_number, e)
+        return 0, []
 
 
 def _get_nwo(git_root: str) -> tuple[str, str] | None:
