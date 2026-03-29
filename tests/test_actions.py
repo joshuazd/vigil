@@ -165,6 +165,37 @@ class TestDispatch:
             dispatch("https://example.com")
 
 
+class TestTimeoutPropagation:
+    @patch("vigil.actions.subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 30))
+    def test_merge_pr_timeout(self, mock_run):
+        with pytest.raises(subprocess.TimeoutExpired):
+            merge_pr("/repo", "feat")
+
+    @patch("vigil.actions.subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 30))
+    def test_approve_pr_timeout(self, mock_run):
+        with pytest.raises(subprocess.TimeoutExpired):
+            approve_pr("/repo", "feat")
+
+    @patch("vigil.actions.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 10))
+    def test_rebase_and_push_timeout(self, mock_run):
+        with pytest.raises(subprocess.TimeoutExpired):
+            rebase_and_push("/repo")
+
+
+class TestTimeoutValues:
+    @patch("vigil.actions.subprocess.run")
+    def test_merge_pr_passes_timeout(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n")
+        merge_pr("/repo", "feat")
+        assert mock_run.call_args.kwargs["timeout"] == 30
+
+    @patch("vigil.actions.subprocess.run")
+    def test_approve_pr_passes_timeout(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n")
+        approve_pr("/repo", "feat")
+        assert mock_run.call_args.kwargs["timeout"] == 30
+
+
 class TestOpenPR:
     @patch("vigil.actions.webbrowser.open")
     def test_opens_url(self, mock_open):

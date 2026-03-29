@@ -13,7 +13,7 @@ def merge_pr(git_root: str, branch: str) -> str:
     """Squash-merge the PR for the given branch."""
     result = subprocess.run(
         ["gh", "pr", "merge", branch, "--squash", "--delete-branch"],
-        cwd=git_root, capture_output=True, text=True,
+        cwd=git_root, capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
         logger.error("merge_pr failed: %s stderr=%s", result.args, result.stderr.strip())
@@ -27,7 +27,7 @@ def approve_pr(git_root: str, branch: str) -> str:
     """Approve the PR for the given branch."""
     result = subprocess.run(
         ["gh", "pr", "review", branch, "--approve"],
-        cwd=git_root, capture_output=True, text=True,
+        cwd=git_root, capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
         logger.error("approve_pr failed: %s stderr=%s", result.args, result.stderr.strip())
@@ -44,7 +44,7 @@ def cleanup_session(session_name: str, worktree_path: str) -> str:
         raise FileNotFoundError("git-worktree-cleanup not found on PATH")
     result = subprocess.run(
         [cmd, "--session", session_name, worktree_path],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
         raise subprocess.CalledProcessError(
@@ -67,7 +67,7 @@ def dispatch(input_str: str) -> str:
     env = {**os.environ, "DISPATCH_IN_POPUP": "1"}
     result = subprocess.run(
         [cmd, "--detached", "--non-interactive", input_str],
-        capture_output=True, text=True, env=env,
+        capture_output=True, text=True, env=env, timeout=15,
     )
     if result.returncode != 0:
         logger.error("dispatch failed: %s stderr=%s", result.args, result.stderr.strip())
@@ -84,7 +84,7 @@ def rebase_and_push(git_root: str) -> str:
     for name in ("main", "master"):
         result = subprocess.run(
             ["git", "-C", git_root, "rev-parse", "--verify", f"refs/heads/{name}"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
             main = name
@@ -95,7 +95,7 @@ def rebase_and_push(git_root: str) -> str:
     # Fetch latest
     result = subprocess.run(
         ["git", "-C", git_root, "fetch", "origin", main],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"fetch failed: {result.stderr.strip()}")
@@ -103,7 +103,7 @@ def rebase_and_push(git_root: str) -> str:
     # Check for conflicts (pure plumbing, no working tree changes)
     result = subprocess.run(
         ["git", "-C", git_root, "merge-tree", "--write-tree", "HEAD", f"origin/{main}"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=10,
     )
     if result.returncode != 0:
         raise RuntimeError("conflicts detected — rebase skipped")
@@ -111,20 +111,20 @@ def rebase_and_push(git_root: str) -> str:
     # Rebase
     result = subprocess.run(
         ["git", "-C", git_root, "rebase", f"origin/{main}"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
         # Abort if rebase somehow fails despite clean merge-tree
         subprocess.run(
             ["git", "-C", git_root, "rebase", "--abort"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         raise RuntimeError(f"rebase failed: {result.stderr.strip()}")
 
     # Force push
     result = subprocess.run(
         ["git", "-C", git_root, "push", "--force-with-lease"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"push failed: {result.stderr.strip()}")

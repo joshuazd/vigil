@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -130,9 +131,18 @@ class VigilApp(App):
             self.notify("Session refresh failed", severity="warning")
             return
 
-        current = tmux.get_current_session()
-        last = tmux.get_last_session(current)
-        bell_flags = tmux.get_bell_flags()
+        try:
+            current = tmux.get_current_session()
+        except Exception:
+            current = ""
+        try:
+            last = tmux.get_last_session(current)
+        except Exception:
+            last = ""
+        try:
+            bell_flags = tmux.get_bell_flags()
+        except Exception:
+            bell_flags = {}
 
         sessions: list[Session] = []
         for raw in raw_sessions:
@@ -156,7 +166,8 @@ class VigilApp(App):
         self.post_message(SessionsUpdated(sessions))
 
         # Fetch git status in parallel (git status --porcelain is ~750ms each)
-        with ThreadPoolExecutor(max_workers=len(sessions) or 1) as pool:
+        _git_workers = int(os.environ.get("VIGIL_GIT_WORKERS", "8"))
+        with ThreadPoolExecutor(max_workers=min(len(sessions), _git_workers) or 1) as pool:
             git_results = list(pool.map(lambda s: git_mod.fetch(s.pane_path), sessions))
         for s, git in zip(sessions, git_results):
             s.git = git
@@ -334,6 +345,13 @@ class VigilApp(App):
 
     async def action_quit(self) -> None:
         self.workers.cancel_all()
+        active = [w for w in self.workers if not w.is_finished]
+        if active:
+            self.notify("Shutting down...")
+            for _ in range(30):  # 30 x 0.1s = 3s max wait
+                if all(w.is_finished for w in active):
+                    break
+                await asyncio.sleep(0.1)
         self.exit()
 
     def action_refresh(self) -> None:

@@ -62,3 +62,28 @@ class TestStaleCache:
         cache_path.write_text("not json")
         with patch("vigil.cache.CACHE_PATH", cache_path):
             assert load() is None
+
+
+class TestCachePermissions:
+    def test_file_permissions_are_0600(self, tmp_path):
+        cache_path = tmp_path / "cache.json"
+        with patch("vigil.cache.CACHE_PATH", cache_path):
+            save([_make_session()])
+            mode = cache_path.stat().st_mode & 0o777
+            assert mode == 0o600
+
+
+class TestCacheVersionCheck:
+    def test_wrong_version_returns_none(self, tmp_path):
+        cache_path = tmp_path / "cache.json"
+        data = {"version": 999, "timestamp": int(time.time()), "sessions": []}
+        cache_path.write_text(json.dumps(data))
+        with patch("vigil.cache.CACHE_PATH", cache_path):
+            assert load() is None
+
+    def test_no_version_returns_none(self, tmp_path):
+        cache_path = tmp_path / "cache.json"
+        data = {"timestamp": int(time.time()), "sessions": []}
+        cache_path.write_text(json.dumps(data))
+        with patch("vigil.cache.CACHE_PATH", cache_path):
+            assert load() is None

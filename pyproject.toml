@@ -6,9 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "vigil"
 version = "0.1.0"
 description = "TUI mission control for tmux worktree sessions"
+license = "GPL-3.0-only"
 requires-python = ">=3.10"
 dependencies = [
-    "textual>=0.47.0",
+    "textual>=0.47.0,<1.0",
 ]
 
 [project.optional-dependencies]

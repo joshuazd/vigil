@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import time
@@ -9,19 +10,24 @@ from pathlib import Path
 
 from .models import GitStatus, PRStatus, Session
 
+logger = logging.getLogger(__name__)
+
 CACHE_PATH = Path.home() / ".local" / "share" / "vigil" / "cache.json"
 MAX_AGE_SECONDS = int(os.environ.get("VIGIL_CACHE_TTL", "30"))
+CACHE_VERSION = 1
 
 
 def save(sessions: list[Session]) -> None:
     """Write sessions to cache file (atomic write)."""
     data = {
+        "version": CACHE_VERSION,
         "timestamp": int(time.time()),
         "sessions": [_session_to_dict(s) for s in sessions],
     }
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=CACHE_PATH.parent, suffix=".tmp")
     try:
+        os.fchmod(fd, 0o600)
         with open(fd, "w") as f:
             json.dump(data, f)
         Path(tmp).replace(CACHE_PATH)
@@ -36,6 +42,9 @@ def load() -> list[Session] | None:
         return None
     try:
         data = json.loads(CACHE_PATH.read_text())
+        if data.get("version") != CACHE_VERSION:
+            logger.debug("cache version mismatch, discarding")
+            return None
         ts = data.get("timestamp", 0)
         if time.time() - ts > MAX_AGE_SECONDS:
             return None

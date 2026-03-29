@@ -151,7 +151,7 @@ def _get_nwo(git_root: str) -> tuple[str, str] | None:
     try:
         result = subprocess.run(
             ["git", "-C", git_root, "remote", "get-url", "origin"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
             return None
