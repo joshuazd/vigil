@@ -55,7 +55,8 @@ class TestAppSmoke:
 
 
 class TestRebasePushMainRejection:
-    def test_rebase_main_branch_warns(self):
+    @patch("vigil.app.detect_default_branch", return_value="main")
+    def test_rebase_main_branch_warns(self, mock_detect):
         """action_rebase_push should notify warning when branch is main."""
         async def _test():
             app = VigilApp()
@@ -73,7 +74,8 @@ class TestRebasePushMainRejection:
 
         asyncio.run(_test())
 
-    def test_rebase_master_branch_warns(self):
+    @patch("vigil.app.detect_default_branch", return_value="master")
+    def test_rebase_master_branch_warns(self, mock_detect):
         """action_rebase_push should notify warning when branch is master."""
         async def _test():
             app = VigilApp()
@@ -87,6 +89,6 @@ class TestRebasePushMainRejection:
                 table = app.query_one("#session-table")
                 table.update_sessions([session])
                 await pilot.press("b")
-                assert any("Can't rebase main" in n.message for n in app._notifications)
+                assert any("Can't rebase master" in n.message for n in app._notifications)
 
         asyncio.run(_test())

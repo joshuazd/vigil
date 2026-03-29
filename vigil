@@ -9,11 +9,13 @@ if [[ ! -d "${VENV_DIR}" ]]; then
     mkdir -p "$(dirname "${VENV_DIR}")"
     python3 -m venv "${VENV_DIR}"
     "${VENV_DIR}/bin/pip" install --quiet -e "${VIGIL_PKG}"
+    touch "${VENV_DIR}/pyvenv.cfg"
     echo "vigil: ready."
 fi
 
 if [[ "${VIGIL_PKG}/pyproject.toml" -nt "${VENV_DIR}/pyvenv.cfg" ]]; then
     "${VENV_DIR}/bin/pip" install --quiet -e "${VIGIL_PKG}"
+    touch "${VENV_DIR}/pyvenv.cfg"
 fi
 
 exec "${VENV_DIR}/bin/vigil" "$@"

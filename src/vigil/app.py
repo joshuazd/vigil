@@ -14,6 +14,7 @@ from textual.widgets import Footer, Input
 from . import actions, cache, config, tmux
 from . import git_status as git_mod
 from . import pr_status as pr_mod
+from .git_status import detect_default_branch
 from .models import GitStatus, PRStatus, Session
 from .widgets import DetailPanel, DispatchInput, SessionTable, StatusBar
 
@@ -338,8 +339,9 @@ class VigilApp(App):
         if not session or not session.git.git_root or not session.git.branch:
             self.notify("No git branch for this session", severity="warning")
             return
-        if session.git.branch in ("main", "master"):
-            self.notify("Can't rebase main", severity="warning")
+        default_branch = detect_default_branch(session.git.git_root)
+        if default_branch and session.git.branch == default_branch:
+            self.notify(f"Can't rebase {default_branch}", severity="warning")
             return
         self._do_rebase_push(session)
 

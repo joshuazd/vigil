@@ -5,6 +5,7 @@ import subprocess
 import webbrowser
 
 from . import config
+from .git_status import detect_default_branch
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def _is_worktree(path: str, git_root: str) -> bool:
 
 
 def dispatch(input_str: str) -> str:
-    """Route a Shortcut URL or PR number via the dispatch hook."""
+    """Route input via the dispatch hook."""
     if not input_str or not input_str.strip():
         raise ValueError("dispatch input must not be empty")
     if len(input_str) > 500:
@@ -103,19 +104,10 @@ def dispatch(input_str: str) -> str:
 
 
 def rebase_and_push(git_root: str) -> str:
-    """Fetch origin/main, check for conflicts, rebase, and force-push."""
-    # Find main branch
-    main = None
-    for name in ("main", "master"):
-        result = subprocess.run(
-            ["git", "-C", git_root, "rev-parse", "--verify", f"refs/heads/{name}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0:
-            main = name
-            break
+    """Fetch origin default branch, check for conflicts, rebase, and force-push."""
+    main = detect_default_branch(git_root)
     if not main:
-        raise RuntimeError("No main/master branch found")
+        raise RuntimeError("No default branch found")
 
     # Fetch latest
     result = subprocess.run(

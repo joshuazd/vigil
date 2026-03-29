@@ -1,6 +1,12 @@
 from unittest.mock import MagicMock, patch
 
-from vigil.git_status import _parse_porcelain, _rebase_age, _unpushed_count, fetch
+from vigil.git_status import (
+    _parse_porcelain,
+    _rebase_age,
+    _unpushed_count,
+    detect_default_branch,
+    fetch,
+)
 
 
 class TestParsePortcelain:
@@ -90,44 +96,53 @@ class TestUnpushedCount:
         assert _unpushed_count("/repo", "feat") == 0
 
 
-class TestRebaseAge:
-    def test_main_branch_returns_none(self):
-        assert _rebase_age("/repo", "main") is None
-        assert _rebase_age("/repo", "master") is None
+class TestDetectDefaultBranch:
+    @patch("vigil.git_status.subprocess.run")
+    def test_from_remote_head(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="refs/remotes/origin/main\n",
+        )
+        assert detect_default_branch("/repo") == "main"
 
     @patch("vigil.git_status.subprocess.run")
-    def test_no_main_or_master(self, mock_run):
+    def test_fallback_to_master(self, mock_run):
+        mock_run.side_effect = [
+            MagicMock(returncode=1),  # symbolic-ref fails
+            MagicMock(returncode=1),  # rev-parse main fails
+            MagicMock(returncode=0),  # rev-parse master succeeds
+        ]
+        assert detect_default_branch("/repo") == "master"
+
+    @patch("vigil.git_status.subprocess.run")
+    def test_no_default_branch(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1)
+        assert detect_default_branch("/repo") is None
+
+
+class TestRebaseAge:
+    @patch("vigil.git_status.detect_default_branch", return_value="main")
+    def test_default_branch_returns_none(self, mock_detect):
+        assert _rebase_age("/repo", "main") is None
+
+    @patch("vigil.git_status.detect_default_branch", return_value=None)
+    def test_no_default_branch(self, mock_detect):
         assert _rebase_age("/repo", "feat") is None
 
     @patch("vigil.git_status.time.time", return_value=1000.0)
     @patch("vigil.git_status.subprocess.run")
-    def test_happy_path(self, mock_run, mock_time):
+    @patch("vigil.git_status.detect_default_branch", return_value="main")
+    def test_happy_path(self, mock_detect, mock_run, mock_time):
         mock_run.side_effect = [
-            MagicMock(returncode=0),  # rev-parse main
             MagicMock(returncode=0, stdout="abc123\n"),  # merge-base
             MagicMock(returncode=0, stdout="500\n"),  # log --format=%ct
         ]
         assert _rebase_age("/repo", "feat") == 500
 
     @patch("vigil.git_status.subprocess.run")
-    def test_merge_base_failure(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(returncode=0),  # rev-parse main
-            MagicMock(returncode=1, stdout="", stderr=""),  # merge-base fails
-        ]
+    @patch("vigil.git_status.detect_default_branch", return_value="main")
+    def test_merge_base_failure(self, mock_detect, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
         assert _rebase_age("/repo", "feat") is None
-
-    @patch("vigil.git_status.subprocess.run")
-    def test_falls_through_to_master(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(returncode=1),  # rev-parse main fails
-            MagicMock(returncode=0),  # rev-parse master succeeds
-            MagicMock(returncode=0, stdout="abc123\n"),  # merge-base
-            MagicMock(returncode=0, stdout="0\n"),  # log
-        ]
-        result = _rebase_age("/repo", "feat")
-        assert result is not None
 
 
 class TestFetch:

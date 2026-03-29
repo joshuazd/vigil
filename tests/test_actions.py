@@ -63,16 +63,10 @@ class TestApprovePR:
 
 
 class TestRebaseAndPush:
-    def _mock_run_side_effects(self, main_exists=True, fetch_ok=True, merge_ok=True,
+    def _mock_run_side_effects(self, fetch_ok=True, merge_ok=True,
                                 rebase_ok=True, push_ok=True):
         """Build a side_effect list for sequential subprocess.run calls."""
         results = []
-        # rev-parse --verify main
-        results.append(MagicMock(returncode=0 if main_exists else 1))
-        if not main_exists:
-            # rev-parse --verify master
-            results.append(MagicMock(returncode=1))
-            return results
         # fetch
         results.append(MagicMock(returncode=0 if fetch_ok else 1, stderr="fetch err"))
         if not fetch_ok:
@@ -91,44 +85,48 @@ class TestRebaseAndPush:
         results.append(MagicMock(returncode=0 if push_ok else 1, stderr="push err"))
         return results
 
+    @patch("vigil.actions.detect_default_branch", return_value="main")
     @patch("vigil.actions.subprocess.run")
-    def test_success(self, mock_run):
+    def test_success(self, mock_run, mock_detect):
         mock_run.side_effect = self._mock_run_side_effects()
         assert rebase_and_push("/repo") == "rebased and pushed"
 
-    @patch("vigil.actions.subprocess.run")
-    def test_no_main_branch(self, mock_run):
-        mock_run.side_effect = self._mock_run_side_effects(main_exists=False)
-        with pytest.raises(RuntimeError, match="No main/master"):
+    @patch("vigil.actions.detect_default_branch", return_value=None)
+    def test_no_default_branch(self, mock_detect):
+        with pytest.raises(RuntimeError, match="No default branch"):
             rebase_and_push("/repo")
 
+    @patch("vigil.actions.detect_default_branch", return_value="main")
     @patch("vigil.actions.subprocess.run")
-    def test_conflicts_detected(self, mock_run):
+    def test_conflicts_detected(self, mock_run, mock_detect):
         mock_run.side_effect = self._mock_run_side_effects(merge_ok=False)
         with pytest.raises(RuntimeError, match="conflicts"):
             rebase_and_push("/repo")
 
+    @patch("vigil.actions.detect_default_branch", return_value="main")
     @patch("vigil.actions.subprocess.run")
-    def test_push_failure(self, mock_run):
+    def test_push_failure(self, mock_run, mock_detect):
         mock_run.side_effect = self._mock_run_side_effects(push_ok=False)
         with pytest.raises(RuntimeError, match="push failed"):
             rebase_and_push("/repo")
 
+    @patch("vigil.actions.detect_default_branch", return_value="main")
     @patch("vigil.actions.subprocess.run")
-    def test_fetch_failure(self, mock_run):
+    def test_fetch_failure(self, mock_run, mock_detect):
         mock_run.side_effect = self._mock_run_side_effects(fetch_ok=False)
         with pytest.raises(RuntimeError, match="fetch failed"):
             rebase_and_push("/repo")
 
+    @patch("vigil.actions.detect_default_branch", return_value="main")
     @patch("vigil.actions.subprocess.run")
-    def test_rebase_failure_triggers_abort(self, mock_run):
+    def test_rebase_failure_triggers_abort(self, mock_run, mock_detect):
         effects = self._mock_run_side_effects(rebase_ok=False)
         mock_run.side_effect = effects
         with pytest.raises(RuntimeError, match="rebase failed"):
             rebase_and_push("/repo")
-        # Should have called rebase --abort (5th call)
-        assert mock_run.call_count == 5
-        abort_call = mock_run.call_args_list[4]
+        # Should have called rebase --abort (4th call)
+        assert mock_run.call_count == 4
+        abort_call = mock_run.call_args_list[3]
         assert "rebase" in abort_call.args[0] and "--abort" in abort_call.args[0]
 
 

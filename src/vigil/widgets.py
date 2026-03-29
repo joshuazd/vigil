@@ -3,7 +3,7 @@ from __future__ import annotations
 from rich.text import Text
 from textual.widgets import DataTable, Input, RichLog, Static
 
-from . import tmux
+from . import config, tmux
 from .models import STATE_STYLES, Session, SessionState
 
 
@@ -174,7 +174,8 @@ class DetailPanel(RichLog):
 
         # Captured pane output with ANSI colors
         available = max(4, self.size.height - 3) if self.size.height > 0 else 20
-        pane_output = tmux.capture_pane(session.name, lines=available)
+        window = config.get_setting("capture_window")
+        pane_output = tmux.capture_pane(session.name, lines=available, window=window)
         if pane_output:
             for pane_line in pane_output.splitlines()[-available:]:
                 stripped = pane_line.rstrip()
@@ -230,7 +231,7 @@ class DispatchInput(Input):
     """
 
     def __init__(self, **kwargs) -> None:
-        super().__init__(placeholder="Shortcut URL or PR number...", **kwargs)
+        super().__init__(placeholder="URL or identifier...", **kwargs)
         self.add_class("hidden")
 
 

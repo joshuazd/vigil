@@ -68,6 +68,8 @@ Actions can be customized via shell command templates with `{placeholder}` varia
 
 Variables are automatically shell-escaped. Set a hook to `""` to disable it.
 
+The default merge hook uses `--squash --delete-branch`. Override `[hooks] merge` for a different strategy.
+
 ### Environment variable overrides
 
 Environment variables override TOML settings for quick testing or per-machine config:

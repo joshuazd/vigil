@@ -81,12 +81,12 @@ def get_bell_flags() -> dict[str, bool]:
     return bells
 
 
-def capture_pane(session_name: str, lines: int = 20) -> str:
-    """Capture last N lines from the claude window of a session."""
+def capture_pane(session_name: str, lines: int = 20, window: str = "0") -> str:
+    """Capture last N lines from a window of a session."""
     try:
         return _run([
             "tmux", "capture-pane",
-            "-t", f"={session_name}:claude",
+            "-t", f"={session_name}:{window}",
             "-p", "-e", "-S", f"-{lines}",
         ]).rstrip()
     except subprocess.CalledProcessError:

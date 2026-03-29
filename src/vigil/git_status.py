@@ -100,22 +100,34 @@ def _parse_porcelain(git_root: str) -> tuple[int, int, int]:
     return modified, added, deleted
 
 
-def _rebase_age(git_root: str, branch: str) -> int | None:
-    """Seconds since the branch last incorporated main. None if on main or error."""
-    if branch in ("main", "master"):
-        return None
-    # Find main branch
-    main = None
+def detect_default_branch(git_root: str) -> str | None:
+    """Detect the default branch via remote HEAD, falling back to main/master."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", git_root, "symbolic-ref", "refs/remotes/origin/HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            # refs/remotes/origin/main -> main
+            ref = result.stdout.strip()
+            return ref.rsplit("/", 1)[-1]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    # Fallback: check local branches
     for name in ("main", "master"):
         result = subprocess.run(
             ["git", "-C", git_root, "rev-parse", "--verify", f"refs/heads/{name}"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
-            main = name
-            break
-    if not main:
-        logger.debug("no main/master branch in %s", git_root)
+            return name
+    return None
+
+
+def _rebase_age(git_root: str, branch: str) -> int | None:
+    """Seconds since branch last incorporated default branch. None if on default."""
+    main = detect_default_branch(git_root)
+    if not main or branch == main:
         return None
     try:
         result = subprocess.run(
