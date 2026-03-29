@@ -48,6 +48,9 @@ Vigil discovers all tmux sessions, reads git status from each session's working 
 | `j` / `k` | Navigate down / up |
 | `Enter` | Switch to session (popup mode) or toggle detail |
 | `Tab` | Toggle detail panel |
+| `p` | Cycle detail mode (pane / PR description / review comments) |
+| `f` / `F` | Cycle session filter by state (forward / backward) |
+| `Space` | Toggle multi-select for batch operations |
 | `o` | Open PR in browser |
 | `m` | Merge PR (press twice to confirm) |
 | `a` | Approve PR |
@@ -55,7 +58,10 @@ Vigil discovers all tmux sessions, reads git status from each session's working 
 | `x` | Cleanup session (press twice to confirm) |
 | `d` | Dispatch (run configured hook with input) |
 | `r` | Refresh |
+| `Escape` | Clear selection / cancel |
 | `q` | Quit |
+
+With multi-select active, `m`, `a`, `x`, and `b` operate on all selected sessions as a batch.
 
 ## Configuration
 
@@ -63,12 +69,14 @@ All configuration is optional. Create `~/.config/vigil/config.toml` to customize
 
 ```toml
 [settings]
-git_interval = 3       # Git polling interval (seconds)
-pr_interval = 30       # PR polling interval (seconds)
-cache_ttl = 30         # Cache staleness threshold (seconds)
-log_level = "INFO"     # DEBUG, INFO, WARNING, ERROR
-git_workers = 8        # Max parallel git status threads
-capture_window = ""    # Window name for detail panel (empty = first window)
+git_interval = 3              # Git polling interval (seconds)
+pr_interval = 30              # PR polling interval (seconds)
+cache_ttl = 30                # Cache staleness threshold (seconds)
+log_level = "INFO"            # DEBUG, INFO, WARNING, ERROR
+git_workers = 8               # Max parallel git status threads
+capture_window = ""           # Window name for detail panel (empty = first window)
+stale_threshold = 86400       # Rebase age warning threshold (seconds, default 24h)
+notifications_enabled = true  # Toast + hook on session state changes
 
 [hooks]
 cleanup = "tmux kill-session -t {session} && git worktree remove {path}"
@@ -87,6 +95,7 @@ Actions are shell command templates with `{placeholder}` variables, automaticall
 | `dispatch` | `{input}` | *(none — must be configured)* |
 | `merge` | `{branch}`, `{git_root}` | `gh pr merge {branch} --squash --delete-branch` |
 | `approve` | `{branch}`, `{git_root}` | `gh pr review {branch} --approve` |
+| `notify` | `{session}`, `{old_state}`, `{new_state}` | `tmux display-message "vigil: {session} → {new_state}"` |
 
 The built-in cleanup kills the tmux session, then removes the git worktree if the session directory is one. For non-worktree sessions, it just kills the session. Override with a hook for custom behavior.
 
@@ -96,15 +105,17 @@ The default merge uses `--squash --delete-branch`. Override `[hooks] merge` for 
 
 Environment variables override TOML settings for quick testing:
 
-`VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`
+`VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`
 
 ## Development
 
 ```bash
 git clone https://github.com/joshuazd/vigil.git
 cd vigil
-pip install -e ".[dev]"
-pytest
+make install   # bootstrap venv
+make test      # run tests
+make lint      # run linter
+make release   # tag, publish to PyPI, update Homebrew tap
 ```
 
 The `./vigil` bootstrap script auto-creates a virtualenv at `~/.local/share/vigil/venv` for quick local use without a manual install.
