@@ -18,3 +18,42 @@ jobs:
       - run: pip install build
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  update-homebrew:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Wait for PyPI availability
+        run: |
+          url="https://files.pythonhosted.org/packages/source/v/vigil-tui/vigil_tui-${{ steps.version.outputs.version }}.tar.gz"
+          for i in $(seq 1 20); do
+            if curl -sfI "$url" > /dev/null 2>&1; then
+              echo "PyPI tarball available."
+              exit 0
+            fi
+            echo "Not yet available, retrying in 15s... ($i/20)"
+            sleep 15
+          done
+          echo "Timed out waiting for PyPI."
+          exit 1
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          url="https://files.pythonhosted.org/packages/source/v/vigil-tui/vigil_tui-${version}.tar.gz"
+          sha=$(curl -sfL "$url" | sha256sum | cut -d' ' -f1)
+          echo "SHA256: $sha"
+          tmpdir=$(mktemp -d)
+          gh repo clone joshuazd/homebrew-tap "$tmpdir" -- -q
+          cd "$tmpdir"
+          sed -i "s|url \"https://files.pythonhosted.org/packages/source/v/vigil-tui/vigil_tui-[^\"]*\.tar\.gz\"|url \"${url}\"|" Formula/vigil.rb
+          sed -i "0,/sha256 \"[a-f0-9]*\"/s|sha256 \"[a-f0-9]*\"|sha256 \"${sha}\"|" Formula/vigil.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/vigil.rb
+          git commit -m "vigil ${version}"
+          git push
