@@ -32,6 +32,7 @@ SETTING_DEFAULTS: dict[str, tuple[str, str]] = {
     "capture_window": ("VIGIL_CAPTURE_WINDOW", ""),
     "stale_threshold": ("VIGIL_STALE_THRESHOLD", "86400"),
     "notifications_enabled": ("VIGIL_NOTIFICATIONS", "true"),
+    "auto_cleanup": ("VIGIL_AUTO_CLEANUP", "false"),
 }
 
 

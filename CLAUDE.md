@@ -34,6 +34,8 @@ Bash wrapper at `./vigil` (project root) auto-bootstraps a venv at `~/.local/sha
 - Subprocess errors raised, not swallowed
 - Background polling: git every 3s, PR every 30s
 - Detail panel has three modes (pane, PR description, review comments) via `DetailMode` enum
-- Session filtering by state, batch operations via multi-select
+- Session filtering by state, sorting by created/state/alpha, batch operations via multi-select
 - State transition notifications with configurable hooks
 - Stale branch warnings when rebase age exceeds threshold
+- Draft toggle (`D`) with batch support
+- Auto-cleanup merged sessions (configurable via `auto_cleanup` setting, off by default)

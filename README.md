@@ -45,11 +45,13 @@ Vigil discovers all tmux sessions, reads git status from each session's working 
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Navigate down / up |
+| `j` / `k` | Navigate down / up (wraps around) |
 | `Enter` | Switch to session (popup mode) or toggle detail |
 | `Tab` | Toggle detail panel |
 | `p` | Cycle detail mode (pane / PR description / review comments) |
 | `f` / `F` | Cycle session filter by state (forward / backward) |
+| `s` / `S` | Cycle sort mode: created / state / alpha (forward / backward) |
+| `D` | Toggle PR draft status |
 | `Space` | Toggle multi-select for batch operations |
 | `o` | Open PR in browser |
 | `m` | Merge PR (press twice to confirm) |
@@ -61,7 +63,7 @@ Vigil discovers all tmux sessions, reads git status from each session's working 
 | `Escape` | Clear selection / cancel |
 | `q` | Quit |
 
-With multi-select active, `m`, `a`, `x`, and `b` operate on all selected sessions as a batch.
+With multi-select active, `m`, `a`, `x`, `b`, and `D` operate on all selected sessions as a batch.
 
 ## Configuration
 
@@ -77,6 +79,7 @@ git_workers = 8               # Max parallel git status threads
 capture_window = ""           # Window name for detail panel (empty = first window)
 stale_threshold = 86400       # Rebase age warning threshold (seconds, default 24h)
 notifications_enabled = true  # Toast + hook on session state changes
+auto_cleanup = false          # Auto-cleanup sessions when PR merges
 
 [hooks]
 cleanup = "tmux kill-session -t {session} && git worktree remove {path}"
@@ -105,7 +108,7 @@ The default merge uses `--squash --delete-branch`. Override `[hooks] merge` for 
 
 Environment variables override TOML settings for quick testing:
 
-`VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`
+`VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`, `VIGIL_AUTO_CLEANUP`
 
 ## Development
 

@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.widgets import DataTable, Input, RichLog, Static
 
 from . import config, tmux
-from .models import STATE_STYLES, Session, SessionState
+from .models import STATE_STYLES, Session, SessionState, SortMode
 
 
 class DetailMode(Enum):
@@ -81,6 +81,17 @@ class SessionTable(DataTable):
         new_map = {s.name: s for s in visible}
         old_set = set(self._row_keys)
         new_set = set(new_keys)
+
+        # Full rebuild if order changed (e.g. sort mode switch)
+        order_changed = (
+            new_keys != self._row_keys
+            and new_set == old_set
+            and len(new_keys) == len(self._row_keys)
+        )
+
+        if order_changed:
+            self.clear()
+            old_set = set()
 
         # Remove gone sessions
         for key in old_set - new_set:
@@ -304,6 +315,7 @@ class StatusBar(Static):
         sessions: list[Session],
         *,
         active_filter: SessionState | None = None,
+        active_sort: SortMode = SortMode.CREATED,
     ) -> None:
         counts: dict[SessionState, int] = {}
         for s in sessions:
@@ -323,6 +335,9 @@ class StatusBar(Static):
         if active_filter is not None:
             fstyle, _ = STATE_STYLES[active_filter]
             line.append(f" · filter: {active_filter.value}", style=fstyle)
+
+        if active_sort != SortMode.CREATED:
+            line.append(f" · sort: {active_sort.value}", style="dim")
 
         self.update(line)
 

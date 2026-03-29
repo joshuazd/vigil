@@ -17,7 +17,7 @@ from . import actions, cache, config, tmux
 from . import git_status as git_mod
 from . import pr_status as pr_mod
 from .git_status import detect_default_branch
-from .models import GitStatus, PRStatus, Session, SessionState
+from .models import GitStatus, PRStatus, Session, SessionState, SortMode
 from .widgets import DetailPanel, DispatchInput, SessionTable, StatusBar
 
 logger = logging.getLogger(__name__)
@@ -81,6 +81,7 @@ class VigilApp(App):
         Binding("m", "merge_pr", "Merge"),
         Binding("a", "approve_pr", "Approve"),
         Binding("x", "cleanup", "Cleanup"),
+        Binding("D", "toggle_draft", "Draft"),
         Binding("d", "dispatch", "Dispatch", show=False),
         Binding("b", "rebase_push", "Rebase"),
         Binding("r", "refresh", "Refresh", show=False),
@@ -88,6 +89,8 @@ class VigilApp(App):
         Binding("f", "cycle_filter", "Filter"),
         Binding("F", "cycle_filter_back", "Filter◀", show=False),
         Binding("p", "cycle_detail_mode", "PR Info"),
+        Binding("s", "cycle_sort", "Sort"),
+        Binding("S", "cycle_sort_back", "Sort◀", show=False),
         Binding("space", "toggle_select", "Select", priority=True, show=False),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
@@ -107,6 +110,7 @@ class VigilApp(App):
         self._prev_states: dict[str, SessionState] = {}
         self._initial_load = True
         self._selected_sessions: set[str] = set()
+        self._sort_mode: SortMode = SortMode.CREATED
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status-bar")
@@ -215,11 +219,12 @@ class VigilApp(App):
         self.sessions = event.sessions
         table = self.query_one("#session-table", SessionTable)
         table.update_sessions(
-            self.sessions, filter_state=self._filter_state,
+            self._sorted(self.sessions), filter_state=self._filter_state,
             selected=self._selected_sessions,
         )
         self.query_one("#status-bar", StatusBar).update_counts(
             self.sessions, active_filter=self._filter_state,
+            active_sort=self._sort_mode,
         )
         # Update detail panel for currently selected session
         selected = table.get_selected()
@@ -240,11 +245,12 @@ class VigilApp(App):
             if s.git.branch in event.pr_data:
                 s.pr = event.pr_data[s.git.branch]
         self.query_one("#session-table", SessionTable).update_sessions(
-            self.sessions, filter_state=self._filter_state,
+            self._sorted(self.sessions), filter_state=self._filter_state,
             selected=self._selected_sessions,
         )
         self.query_one("#status-bar", StatusBar).update_counts(
             self.sessions, active_filter=self._filter_state,
+            active_sort=self._sort_mode,
         )
         self._check_state_transitions()
         cache.save(self.sessions)
@@ -263,12 +269,18 @@ class VigilApp(App):
 
     def action_cursor_down(self) -> None:
         table = self.query_one("#session-table", SessionTable)
-        table.action_cursor_down()
+        if table.row_count and table.cursor_row >= table.row_count - 1:
+            table.move_cursor(row=0)
+        else:
+            table.action_cursor_down()
         self._update_detail()
 
     def action_cursor_up(self) -> None:
         table = self.query_one("#session-table", SessionTable)
-        table.action_cursor_up()
+        if table.row_count and table.cursor_row <= 0:
+            table.move_cursor(row=table.row_count - 1)
+        else:
+            table.action_cursor_up()
         self._update_detail()
 
     def action_toggle_select(self) -> None:
@@ -451,6 +463,22 @@ class VigilApp(App):
             return
         self._do_rebase_push(session)
 
+    def action_toggle_draft(self) -> None:
+        batch = self._get_batch_sessions()
+        if batch:
+            with_pr = [s for s in batch if s.pr and s.pr.number]
+            if not with_pr:
+                self.notify("No PRs in selection", severity="warning")
+                return
+            self._do_batch_toggle_draft(with_pr)
+            return
+
+        session = self._get_selected()
+        if not session or not session.pr or not session.pr.number:
+            self.notify("No PR for this session", severity="warning")
+            return
+        self._do_toggle_draft(session)
+
     async def action_quit(self) -> None:
         self._shutting_down.set()
         self.workers.cancel_all()
@@ -471,7 +499,7 @@ class VigilApp(App):
     }
 
     def _check_state_transitions(self) -> None:
-        """Detect state changes and fire notifications."""
+        """Detect state changes and fire notifications + auto-cleanup."""
         if self._initial_load:
             # Populate baseline without notifying
             has_git = any(s.git.branch for s in self.sessions)
@@ -480,19 +508,22 @@ class VigilApp(App):
             self._prev_states = {s.name: s.state for s in self.sessions}
             return
 
-        if config.get_setting("notifications_enabled") != "true":
-            self._prev_states = {s.name: s.state for s in self.sessions}
-            return
+        notify = config.get_setting("notifications_enabled") == "true"
+        auto_cleanup = config.get_setting("auto_cleanup") == "true"
 
         for s in self.sessions:
             old = self._prev_states.get(s.name)
-            if old is not None and old != s.state:
+            if old is None or old == s.state:
+                continue
+            if notify:
                 severity = self._NOTIFY_SEVERITY.get(s.state, "information")
                 self.notify(
                     f"{s.name}: {old.value} → {s.state.value}",
                     severity=severity,
                 )
                 self._run_notify_hook(s.name, old, s.state)
+            if auto_cleanup and s.state == SessionState.DONE and not s.is_current:
+                self._do_cleanup(s)
 
         self._prev_states = {s.name: s.state for s in self.sessions}
 
@@ -509,15 +540,25 @@ class VigilApp(App):
         except Exception as e:
             logger.debug("notify hook failed: %s", e)
 
+    def _sorted(self, sessions: list[Session]) -> list[Session]:
+        """Sort sessions by current sort mode."""
+        if self._sort_mode == SortMode.STATE:
+            state_order = list(SessionState)
+            return sorted(sessions, key=lambda s: state_order.index(s.state))
+        if self._sort_mode == SortMode.ALPHA:
+            return sorted(sessions, key=lambda s: s.name.lower())
+        return sessions  # CREATED — already in creation order from tmux
+
     def _apply_filter(self) -> None:
-        """Re-render table and status bar with current filter."""
+        """Re-render table and status bar with current filter and sort."""
         table = self.query_one("#session-table", SessionTable)
         table.update_sessions(
-            self.sessions, filter_state=self._filter_state,
+            self._sorted(self.sessions), filter_state=self._filter_state,
             selected=self._selected_sessions,
         )
         self.query_one("#status-bar", StatusBar).update_counts(
             self.sessions, active_filter=self._filter_state,
+            active_sort=self._sort_mode,
         )
 
     def action_cycle_filter(self) -> None:
@@ -536,6 +577,18 @@ class VigilApp(App):
         else:
             idx = states.index(self._filter_state)
             self._filter_state = states[idx - 1] if idx > 0 else None
+        self._apply_filter()
+
+    def action_cycle_sort(self) -> None:
+        modes = list(SortMode)
+        idx = modes.index(self._sort_mode)
+        self._sort_mode = modes[(idx + 1) % len(modes)]
+        self._apply_filter()
+
+    def action_cycle_sort_back(self) -> None:
+        modes = list(SortMode)
+        idx = modes.index(self._sort_mode)
+        self._sort_mode = modes[(idx - 1) % len(modes)]
         self._apply_filter()
 
     def action_refresh(self) -> None:
@@ -654,6 +707,32 @@ class VigilApp(App):
         self._selected_sessions.clear()
         self.notify(f"Rebased {ok} branches" + (f", {fail} failed" if fail else ""))
         self._poll_sessions()
+
+    @work(thread=True)
+    def _do_toggle_draft(self, session: Session) -> None:
+        try:
+            is_draft = session.pr.is_draft if session.pr else False
+            result = actions.toggle_draft(session.git.git_root, session.git.branch, is_draft)
+            self.notify(f"PR #{session.pr.number}: {result}" if session.pr else result)
+        except Exception as e:
+            logger.error("toggle draft failed for %s: %s", session.name, e)
+            self.notify(f"Draft toggle failed: {e}", severity="error")
+        self._poll_pr_status()
+
+    @work(thread=True)
+    def _do_batch_toggle_draft(self, sessions: list[Session]) -> None:
+        ok, fail = 0, 0
+        for s in sessions:
+            try:
+                is_draft = s.pr.is_draft if s.pr else False
+                actions.toggle_draft(s.git.git_root, s.git.branch, is_draft)
+                ok += 1
+            except Exception as e:
+                logger.error("batch toggle draft failed for %s: %s", s.name, e)
+                fail += 1
+        self._selected_sessions.clear()
+        self.notify(f"Toggled draft on {ok} PRs" + (f", {fail} failed" if fail else ""))
+        self._poll_pr_status()
 
     @work(thread=True)
     def _do_dispatch(self, input_str: str) -> None:

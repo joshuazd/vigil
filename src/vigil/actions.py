@@ -149,6 +149,17 @@ def rebase_and_push(git_root: str) -> str:
     return "rebased and pushed"
 
 
+def toggle_draft(git_root: str, branch: str, is_draft: bool) -> str:
+    """Toggle PR draft status. If draft, mark ready; if ready, convert to draft."""
+    cmd = ["gh", "pr", "ready", branch]
+    if not is_draft:
+        cmd.append("--undo")
+    result = subprocess.run(cmd, cwd=git_root, capture_output=True, text=True, timeout=15)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "toggle draft failed")
+    return "marked ready" if is_draft else "converted to draft"
+
+
 def open_pr_in_browser(url: str) -> None:
     """Open a URL in the default browser."""
     webbrowser.open(url)

@@ -4,6 +4,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+class SortMode(Enum):
+    CREATED = "created"
+    STATE = "state"
+    ALPHA = "alpha"
+
+
 class SessionState(Enum):
     ATTENTION = "attention"    # Bell active — Claude waiting for input
     BLOCKED = "blocked"        # CI fail or changes requested

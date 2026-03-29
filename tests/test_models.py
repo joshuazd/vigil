@@ -1,4 +1,4 @@
-from vigil.models import GitStatus, PRStatus, Session, SessionState
+from vigil.models import GitStatus, PRStatus, Session, SessionState, SortMode
 
 
 class TestSessionState:
@@ -132,3 +132,30 @@ class TestPRStatusDisplay:
     def test_unresolved(self):
         p = PRStatus(number=10, state="OPEN", unresolved_comments=3)
         assert "☐ 3" in p.display()
+
+
+class TestSortMode:
+    def test_enum_values(self):
+        assert SortMode.CREATED.value == "created"
+        assert SortMode.STATE.value == "state"
+        assert SortMode.ALPHA.value == "alpha"
+
+    def test_state_sort_order(self):
+        """State sort should order by SessionState enum position."""
+        sessions = [
+            Session(name="idle", pane_path="/"),
+            Session(name="bell", pane_path="/", has_bell=True),
+            Session(name="done", pane_path="/", pr=PRStatus(number=1, state="MERGED")),
+        ]
+        state_order = list(SessionState)
+        sorted_sessions = sorted(sessions, key=lambda s: state_order.index(s.state))
+        assert [s.name for s in sorted_sessions] == ["bell", "done", "idle"]
+
+    def test_alpha_sort_order(self):
+        sessions = [
+            Session(name="charlie", pane_path="/"),
+            Session(name="Alpha", pane_path="/"),
+            Session(name="bravo", pane_path="/"),
+        ]
+        sorted_sessions = sorted(sessions, key=lambda s: s.name.lower())
+        assert [s.name for s in sorted_sessions] == ["Alpha", "bravo", "charlie"]

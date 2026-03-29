@@ -11,6 +11,7 @@ from vigil.actions import (
     merge_pr,
     open_pr_in_browser,
     rebase_and_push,
+    toggle_draft,
 )
 from vigil.config import HookNotConfigured
 
@@ -258,6 +259,34 @@ class TestTimeoutValues:
     def test_approve_pr_delegates_to_hook(self, mock_hook):
         approve_pr("/repo", "feat")
         mock_hook.assert_called_once()
+
+
+class TestToggleDraft:
+    @patch("vigil.actions.subprocess.run")
+    def test_undraft(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        result = toggle_draft("/repo", "feat", is_draft=True)
+        assert "ready" in result
+        mock_run.assert_called_once_with(
+            ["gh", "pr", "ready", "feat"],
+            cwd="/repo", capture_output=True, text=True, timeout=15,
+        )
+
+    @patch("vigil.actions.subprocess.run")
+    def test_convert_to_draft(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        result = toggle_draft("/repo", "feat", is_draft=False)
+        assert "draft" in result
+        mock_run.assert_called_once_with(
+            ["gh", "pr", "ready", "feat", "--undo"],
+            cwd="/repo", capture_output=True, text=True, timeout=15,
+        )
+
+    @patch("vigil.actions.subprocess.run")
+    def test_failure_raises(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stderr="not found")
+        with pytest.raises(RuntimeError, match="not found"):
+            toggle_draft("/repo", "feat", is_draft=True)
 
 
 class TestOpenPR:
