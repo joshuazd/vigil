@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import Literal
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -462,7 +463,7 @@ class VigilApp(App):
                 await asyncio.sleep(0.1)
         self.exit()
 
-    _NOTIFY_SEVERITY = {
+    _NOTIFY_SEVERITY: dict[SessionState, Literal["information", "warning", "error"]] = {
         SessionState.BLOCKED: "error",
         SessionState.UNRESOLVED: "error",
         SessionState.MERGEABLE: "information",
