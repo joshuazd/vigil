@@ -86,15 +86,34 @@ def get_bell_flags() -> dict[str, bool]:
     return bells
 
 
-def capture_pane(session_name: str, lines: int = 20, window: str = "0") -> str:
-    """Capture last N lines from a window of a session."""
+def capture_pane(session_name: str, lines: int = 20, window: str | None = None) -> str:
+    """Capture last N lines from a window of a session.
+
+    If window is set, try that window name/index first. Falls back to the
+    first window listed in the session.
+    """
+    if window:
+        try:
+            return _run([
+                "tmux", "capture-pane",
+                "-t", f"={session_name}:{window}",
+                "-p", "-e", "-S", f"-{lines}",
+            ]).rstrip()
+        except subprocess.CalledProcessError:
+            pass  # fall through to first window
+    # Capture first window (whatever index it has)
     try:
+        raw = _run([
+            "tmux", "list-windows", "-t", f"={session_name}",
+            "-F", "#{window_index}",
+        ])
+        first_idx = raw.strip().splitlines()[0] if raw.strip() else "0"
         return _run([
             "tmux", "capture-pane",
-            "-t", f"={session_name}:{window}",
+            "-t", f"={session_name}:{first_idx}",
             "-p", "-e", "-S", f"-{lines}",
         ]).rstrip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, IndexError):
         return ""
 
 

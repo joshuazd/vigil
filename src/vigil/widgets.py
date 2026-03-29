@@ -174,7 +174,7 @@ class DetailPanel(RichLog):
 
         # Captured pane output with ANSI colors
         available = max(4, self.size.height - 3) if self.size.height > 0 else 20
-        window = config.get_setting("capture_window")
+        window = config.get_setting("capture_window") or None
         pane_output = tmux.capture_pane(session.name, lines=available, window=window)
         if pane_output:
             for pane_line in pane_output.splitlines()[-available:]:

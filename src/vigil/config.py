@@ -28,7 +28,7 @@ SETTING_DEFAULTS: dict[str, tuple[str, str]] = {
     "cache_ttl": ("VIGIL_CACHE_TTL", "30"),
     "log_level": ("VIGIL_LOG_LEVEL", "INFO"),
     "git_workers": ("VIGIL_GIT_WORKERS", "8"),
-    "capture_window": ("VIGIL_CAPTURE_WINDOW", "0"),
+    "capture_window": ("VIGIL_CAPTURE_WINDOW", ""),
 }
 
 

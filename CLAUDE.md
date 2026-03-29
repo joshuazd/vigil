@@ -1,6 +1,6 @@
 # vigil
 
-TUI mission control for tmux worktree sessions. Monitors session status, git changes, and PR state.
+TUI dashboard for tmux sessions. Monitors git status and GitHub PR state across sessions.
 
 ## Architecture
 
