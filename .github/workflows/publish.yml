@@ -50,6 +50,7 @@ jobs:
           tmpdir=$(mktemp -d)
           gh repo clone joshuazd/homebrew-tap "$tmpdir" -- -q
           cd "$tmpdir"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/joshuazd/homebrew-tap.git"
           sed -i "s|url \"https://files.pythonhosted.org/packages/source/v/vigil-tui/vigil_tui-[^\"]*\.tar\.gz\"|url \"${url}\"|" Formula/vigil.rb
           sed -i "0,/sha256 \"[a-f0-9]*\"/s|sha256 \"[a-f0-9]*\"|sha256 \"${sha}\"|" Formula/vigil.rb
           git config user.name "github-actions[bot]"
