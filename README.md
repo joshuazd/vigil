@@ -29,7 +29,7 @@ The bootstrap script auto-creates a venv at `~/.local/share/vigil/venv` and inst
 | `m` | Merge PR (press twice to confirm) |
 | `a` | Approve PR |
 | `x` | Cleanup session (press twice to confirm) |
-| `d` | Dispatch (Shortcut URL or PR number) |
+| `d` | Dispatch (run configured hook with input) |
 | `b` | Rebase and force-push |
 | `r` | Refresh |
 | `Esc` | Cancel |
@@ -49,8 +49,8 @@ log_level = "INFO"     # DEBUG, INFO, WARNING, ERROR
 git_workers = 8        # Max parallel git status threads
 
 [hooks]
-cleanup = "git-worktree-cleanup --session {session} {path}"
-dispatch = "dispatch --detached --non-interactive {input}"
+cleanup = "tmux kill-session -t {session} && git worktree remove {path}"
+dispatch = "my-dispatch-script {input}"
 merge = "gh pr merge {branch} --squash --delete-branch"
 approve = "gh pr review {branch} --approve"
 ```

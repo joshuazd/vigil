@@ -433,6 +433,15 @@ def _check_dependencies() -> None:
 
 
 def main() -> None:
+    import sys
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("vigil — TUI mission control for tmux sessions")
+        print()
+        print("Usage: vigil [--help]")
+        print()
+        print("Config: ~/.config/vigil/config.toml")
+        print("Logs:   ~/.local/share/vigil/vigil.log")
+        raise SystemExit(0)
     from . import logging_config
     config.load_config()
     logging_config.configure(config.get_setting("log_level"))

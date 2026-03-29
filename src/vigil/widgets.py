@@ -216,7 +216,7 @@ class StatusBar(Static):
 
 
 class DispatchInput(Input):
-    """Input for dispatching a Shortcut URL or PR number."""
+    """Input for dispatching a URL or identifier to an external command."""
 
     DEFAULT_CSS = """
     DispatchInput {

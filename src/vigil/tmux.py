@@ -19,12 +19,13 @@ def _run(args: list[str]) -> str:
 
 def list_sessions() -> list[dict]:
     """Return list of {name, pane_path, created} sorted by creation time."""
-    # Get first pane of first window per session (same as tmux-monitor)
+    # Get all panes, deduplicate by session (first pane seen wins).
+    # No -f filter: base-index and pane-base-index vary by user config.
     raw = _run([
         "tmux", "list-panes", "-a",
         "-F", "#{session_created}|#{session_name}|#{pane_current_path}",
-        "-f", "#{&&:#{==:#{window_index},1},#{==:#{pane_index},1}}",
     ])
+    seen: set[str] = set()
     sessions = []
     for line in sorted(raw.strip().splitlines()):
         if not line:
@@ -32,9 +33,13 @@ def list_sessions() -> list[dict]:
         parts = line.split("|", 2)
         if len(parts) < 3:
             continue
+        name = parts[1]
+        if name in seen:
+            continue
+        seen.add(name)
         sessions.append({
             "created": int(parts[0]),
-            "name": parts[1],
+            "name": name,
             "pane_path": parts[2],
         })
     return sessions

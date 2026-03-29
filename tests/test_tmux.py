@@ -24,6 +24,24 @@ class TestListSessions:
         assert result[1]["name"] == "beta"
 
     @patch("vigil.tmux.subprocess.run")
+    def test_deduplicates_by_session(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="100|alpha|/a\n100|alpha|/a2\n200|beta|/b\n200|beta|/b2\n",
+        )
+        result = list_sessions()
+        names = [s["name"] for s in result]
+        assert names == ["alpha", "beta"]
+        assert result[0]["pane_path"] == "/a"
+
+    @patch("vigil.tmux.subprocess.run")
+    def test_no_filter_flag_in_command(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="100|sess|/tmp\n")
+        list_sessions()
+        cmd = mock_run.call_args.args[0]
+        assert "-f" not in cmd
+
+    @patch("vigil.tmux.subprocess.run")
     def test_sorted_by_created(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,

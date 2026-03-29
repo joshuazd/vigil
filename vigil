@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "vigil — TUI mission control for tmux sessions"
+    echo ""
+    echo "Usage: vigil [--help]"
+    echo ""
+    echo "Config: ~/.config/vigil/config.toml"
+    echo "Logs:   ~/.local/share/vigil/vigil.log"
+    exit 0
+fi
+
 VENV_DIR="${HOME}/.local/share/vigil/venv"
 VIGIL_PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 

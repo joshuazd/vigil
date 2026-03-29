@@ -92,3 +92,14 @@ class TestRebasePushMainRejection:
                 assert any("Can't rebase master" in n.message for n in app._notifications)
 
         asyncio.run(_test())
+
+
+class TestHelpFlag:
+    def test_help_exits_cleanly(self):
+        import sys
+
+        from vigil.app import main
+        with patch.object(sys, "argv", ["vigil", "--help"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
