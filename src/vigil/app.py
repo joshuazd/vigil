@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from textual import work
@@ -96,6 +97,7 @@ class VigilApp(App):
         self._confirm_action: str = ""
         self._confirm_session: Session | None = None
         self._initial_pr_done = False
+        self._shutting_down = threading.Event()
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status-bar")
@@ -185,7 +187,9 @@ class VigilApp(App):
             if s.git.branch and s.git.git_root and s.git.branch not in seen:
                 seen[s.git.branch] = s.git.git_root
         for branch, git_root in seen.items():
-            pr = pr_mod.fetch(branch, git_root)
+            if self._shutting_down.is_set():
+                return
+            pr = pr_mod.fetch(branch, git_root, cancel=self._shutting_down)
             self.post_message(PullRequestsUpdated({branch: pr}))
 
     @work(thread=True, exclusive=True, group="pr")
@@ -346,6 +350,7 @@ class VigilApp(App):
         self._do_rebase_push(session)
 
     async def action_quit(self) -> None:
+        self._shutting_down.set()
         self.workers.cancel_all()
         active = [w for w in self.workers if not w.is_finished]
         if active:

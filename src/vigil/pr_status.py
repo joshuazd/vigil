@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import threading
 import time
 
 from .models import PRStatus
@@ -11,20 +12,32 @@ logger = logging.getLogger(__name__)
 
 
 def _run_with_retry(
-    args: list[str], *, cwd: str | None = None, max_retries: int = 2, backoff: float = 1.0,
+    args: list[str],
+    *,
+    cwd: str | None = None,
+    max_retries: int = 2,
+    backoff: float = 1.0,
+    cancel: threading.Event | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run subprocess with retry on non-zero exit."""
+    """Run subprocess with retry on non-zero exit. Checks cancel event between retries."""
     for attempt in range(max_retries + 1):
+        if cancel and cancel.is_set():
+            return subprocess.CompletedProcess(args, 1, "", "cancelled")
         result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=15)
         if result.returncode == 0:
             return result
         if attempt < max_retries:
             logger.info("Retrying %s (attempt %d/%d)", args[:3], attempt + 2, max_retries + 1)
-            time.sleep(backoff * (attempt + 1))
+            if cancel:
+                cancel.wait(backoff * (attempt + 1))  # interruptible sleep
+            else:
+                time.sleep(backoff * (attempt + 1))
     return result
 
 
-def fetch(branch: str, git_root: str) -> PRStatus | None:
+def fetch(
+    branch: str, git_root: str, *, cancel: threading.Event | None = None,
+) -> PRStatus | None:
     """Fetch PR status for a branch via gh CLI. Returns None if no PR exists."""
     try:
         result = _run_with_retry(
@@ -35,6 +48,7 @@ def fetch(branch: str, git_root: str) -> PRStatus | None:
                 "reviewDecision,latestReviews,mergeable",
             ],
             cwd=git_root,
+            cancel=cancel,
         )
         if result.returncode != 0:
             logger.debug("gh pr view failed for %s: %s", branch, result.stderr.strip())
@@ -61,7 +75,7 @@ def fetch(branch: str, git_root: str) -> PRStatus | None:
     # Unresolved review threads (only for open PRs)
     unresolved = 0
     if state == "OPEN":
-        unresolved = _fetch_unresolved_threads(git_root, number)
+        unresolved = _fetch_unresolved_threads(git_root, number, cancel=cancel)
 
     has_conflicts = data.get("mergeable") == "CONFLICTING"
 
@@ -96,7 +110,9 @@ def _parse_checks(rollup: list[dict]) -> str:
     return "pass"
 
 
-def _fetch_unresolved_threads(git_root: str, pr_number: int) -> int:
+def _fetch_unresolved_threads(
+    git_root: str, pr_number: int, *, cancel: threading.Event | None = None,
+) -> int:
     """Count unresolved, non-outdated review threads via GraphQL."""
     query = """
     query($owner: String!, $repo: String!, $number: Int!) {
@@ -125,6 +141,7 @@ def _fetch_unresolved_threads(git_root: str, pr_number: int) -> int:
                 "-F", f"number={pr_number}",
             ],
             cwd=git_root,
+            cancel=cancel,
         )
         if result.returncode != 0:
             logger.warning("graphql query failed for PR #%d: %s", pr_number, result.stderr.strip())
