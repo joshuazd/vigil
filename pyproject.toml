@@ -3,11 +3,26 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vigil"
+name = "vigil-tui"
 version = "0.1.0"
 description = "TUI mission control for tmux worktree sessions"
+readme = "README.md"
 license = "GPL-3.0-only"
 requires-python = ">=3.10"
+authors = [
+    {name = "Joshua Zink-Duda"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Version Control :: Git",
+]
 dependencies = [
     "textual>=0.47.0,<1.0",
     "tomli>=2.0; python_version < '3.11'",
@@ -20,6 +35,10 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/joshuazd/vigil"
+Repository = "https://github.com/joshuazd/vigil"
 
 [project.scripts]
 vigil = "vigil.app:main"

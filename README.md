@@ -11,11 +11,27 @@ TUI mission control for tmux worktree sessions. Monitors session status, git cha
 
 ## Installation
 
+### From PyPI
+
 ```bash
+pipx install vigil-tui
+```
+
+Or with pip:
+
+```bash
+pip install vigil-tui
+```
+
+### From source
+
+```bash
+git clone https://github.com/joshuazd/vigil.git
+cd vigil
 ./vigil
 ```
 
-The bootstrap script auto-creates a venv at `~/.local/share/vigil/venv` and installs dependencies. Re-run after pulling updates.
+The `./vigil` bootstrap script auto-creates a venv and installs dependencies.
 
 ## Keybindings
 
