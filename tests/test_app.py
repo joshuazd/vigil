@@ -1,8 +1,19 @@
 import asyncio
 from unittest.mock import patch
 
+import pytest
+
+import vigil.actions
 from vigil.app import VigilApp, _check_dependencies
 from vigil.models import GitStatus, Session
+
+
+@pytest.fixture(autouse=True)
+def _reset_config():
+    """Reset cached config between tests."""
+    vigil.actions.config._config = None
+    yield
+    vigil.actions.config._config = None
 
 
 class TestCheckDependencies:

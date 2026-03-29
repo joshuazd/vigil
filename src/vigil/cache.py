@@ -8,12 +8,12 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from . import config
 from .models import GitStatus, PRStatus, Session
 
 logger = logging.getLogger(__name__)
 
 CACHE_PATH = Path.home() / ".local" / "share" / "vigil" / "cache.json"
-MAX_AGE_SECONDS = int(os.environ.get("VIGIL_CACHE_TTL", "30"))
 CACHE_VERSION = 1
 
 
@@ -46,7 +46,7 @@ def load() -> list[Session] | None:
             logger.debug("cache version mismatch, discarding")
             return None
         ts = data.get("timestamp", 0)
-        if time.time() - ts > MAX_AGE_SECONDS:
+        if time.time() - ts > int(config.get_setting("cache_ttl")):
             return None
         return [_dict_to_session(d) for d in data.get("sessions", [])]
     except (json.JSONDecodeError, KeyError, TypeError):

@@ -12,7 +12,8 @@ Python + Textual TUI. Replaces the bash-based `tmux-monitor`.
 - `tmux.py` — Subprocess wrappers for tmux commands
 - `git_status.py` — Git status parsing (porcelain format, unpushed count)
 - `pr_status.py` — GitHub PR status via `gh` CLI and GraphQL
-- `actions.py` — Merge, approve, cleanup, dispatch actions
+- `config.py` — TOML config loading, hook template expansion and execution
+- `actions.py` — Merge, approve, cleanup, dispatch actions (via configurable hooks)
 
 ## Testing
 

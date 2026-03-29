@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import vigil.actions
 from vigil.actions import (
     approve_pr,
     cleanup_session,
@@ -11,28 +12,54 @@ from vigil.actions import (
     open_pr_in_browser,
     rebase_and_push,
 )
+from vigil.config import HookNotConfigured
+
+
+@pytest.fixture(autouse=True)
+def _reset_config():
+    """Reset cached config between tests."""
+    vigil.actions.config._config = None
+    yield
+    vigil.actions.config._config = None
 
 
 class TestMergePR:
-    @patch("vigil.actions.subprocess.run")
-    def test_success(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="merged\n")
+    @patch("vigil.actions.config.run_hook", return_value="merged")
+    def test_success(self, mock_hook):
         assert merge_pr("/repo", "feat") == "merged"
-
-    @patch("vigil.actions.subprocess.run")
-    def test_failure_raises(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1, stdout="", stderr="error", args=["gh"],
+        mock_hook.assert_called_once_with(
+            "merge", {"branch": "feat", "git_root": "/repo"}, cwd="/repo",
         )
+
+    @patch("vigil.actions.config.run_hook", side_effect=HookNotConfigured("merge"))
+    def test_hook_not_configured(self, mock_hook):
+        with pytest.raises(HookNotConfigured):
+            merge_pr("/repo", "feat")
+
+    @patch(
+        "vigil.actions.config.run_hook",
+        side_effect=subprocess.CalledProcessError(1, "cmd", "", "error"),
+    )
+    def test_failure_raises(self, mock_hook):
         with pytest.raises(subprocess.CalledProcessError):
             merge_pr("/repo", "feat")
 
 
 class TestApprovePR:
-    @patch("vigil.actions.subprocess.run")
-    def test_success(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="approved\n")
+    @patch("vigil.actions.config.run_hook", return_value="approved")
+    def test_success(self, mock_hook):
         assert approve_pr("/repo", "feat") == "approved"
+        mock_hook.assert_called_once_with(
+            "approve", {"branch": "feat", "git_root": "/repo"}, cwd="/repo",
+        )
+
+    @patch(
+        "vigil.actions.config.run_hook",
+        side_effect=subprocess.CalledProcessError(1, "cmd", "", "error"),
+    )
+    def test_failure_raises(self, mock_hook):
+        with pytest.raises(subprocess.CalledProcessError):
+            approve_pr("/repo", "feat")
 
 
 class TestRebaseAndPush:
@@ -106,33 +133,69 @@ class TestRebaseAndPush:
 
 
 class TestCleanupSession:
-    @patch("vigil.actions.shutil.which", return_value=None)
-    def test_missing_script(self, mock_which):
-        with pytest.raises(FileNotFoundError, match="git-worktree-cleanup"):
-            cleanup_session("test-session", "/tmp/wt")
-
-    @patch("vigil.actions.subprocess.run")
-    @patch("vigil.actions.shutil.which", return_value="/usr/bin/git-worktree-cleanup")
-    def test_success(self, mock_which, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="done\n")
-        assert cleanup_session("test-session", "/tmp/wt") == "done"
-
-    @patch("vigil.actions.subprocess.run")
-    @patch("vigil.actions.shutil.which", return_value="/usr/bin/git-worktree-cleanup")
-    def test_failure_raises(self, mock_which, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1, stdout="", stderr="error", args=["cleanup"],
+    @patch("vigil.actions.config.run_hook", return_value="hook cleaned up")
+    @patch("vigil.actions.config.get_hook", return_value="my-cleanup {session} {path}")
+    def test_hook_based_cleanup(self, mock_get, mock_run):
+        result = cleanup_session("test-session", "/tmp/wt", branch="feat", git_root="/repo")
+        assert result == "hook cleaned up"
+        mock_get.assert_called_once_with("cleanup")
+        mock_run.assert_called_once_with(
+            "cleanup",
+            {"session": "test-session", "path": "/tmp/wt", "branch": "feat", "git_root": "/repo"},
         )
-        with pytest.raises(subprocess.CalledProcessError):
-            cleanup_session("test-session", "/tmp/wt")
+
+    @patch("vigil.actions._is_worktree", return_value=True)
+    @patch("vigil.actions.subprocess.run")
+    @patch("vigil.actions.config.get_hook", return_value=None)
+    def test_builtin_cleanup(self, mock_get, mock_run, mock_is_wt):
+        mock_run.side_effect = [
+            # tmux kill-session
+            MagicMock(returncode=0),
+            # git status --porcelain (clean)
+            MagicMock(returncode=0, stdout=""),
+            # git worktree remove
+            MagicMock(returncode=0),
+        ]
+        result = cleanup_session("test-session", "/tmp/wt", branch="feat", git_root="/repo")
+        assert "killed session" in result
+        assert "removed worktree" in result
+
+    @patch("vigil.actions._is_worktree", return_value=False)
+    @patch("vigil.actions.subprocess.run")
+    @patch("vigil.actions.config.get_hook", return_value=None)
+    def test_builtin_cleanup_not_a_worktree(self, mock_get, mock_run, mock_is_wt):
+        mock_run.return_value = MagicMock(returncode=0)  # tmux kill-session
+        result = cleanup_session("test-session", "/tmp/wt", branch="feat", git_root="/repo")
+        assert "killed session" in result
+        # Should NOT attempt worktree removal
+        assert mock_run.call_count == 1
+
+    @patch("vigil.actions._is_worktree", return_value=True)
+    @patch("vigil.actions.subprocess.run")
+    @patch("vigil.actions.config.get_hook", return_value=None)
+    def test_builtin_cleanup_worktree_remove_fails(self, mock_get, mock_run, mock_is_wt):
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # tmux kill-session
+            MagicMock(returncode=0, stdout=""),  # git status --porcelain
+            MagicMock(returncode=1, stderr="error removing"),  # git worktree remove
+        ]
+        with pytest.raises(RuntimeError, match="worktree remove failed"):
+            cleanup_session("test-session", "/tmp/wt", branch="feat", git_root="/repo")
+
+    @patch("vigil.actions._is_worktree", return_value=True)
+    @patch("vigil.actions.subprocess.run")
+    @patch("vigil.actions.config.get_hook", return_value=None)
+    def test_builtin_cleanup_dirty_worktree(self, mock_get, mock_run, mock_is_wt):
+        mock_run.side_effect = [
+            MagicMock(returncode=0),  # tmux kill-session
+            MagicMock(returncode=0, stdout=" M file.txt\n"),  # dirty
+            MagicMock(returncode=0),  # git worktree remove
+        ]
+        result = cleanup_session("test-session", "/tmp/wt", branch="feat", git_root="/repo")
+        assert "uncommitted changes" in result
 
 
 class TestDispatch:
-    @patch("vigil.actions.shutil.which", return_value=None)
-    def test_missing_script(self, mock_which):
-        with pytest.raises(FileNotFoundError, match="dispatch"):
-            dispatch("https://example.com")
-
     def test_empty_input_rejected(self):
         with pytest.raises(ValueError, match="empty"):
             dispatch("")
@@ -149,30 +212,35 @@ class TestDispatch:
         with pytest.raises(ValueError, match="control"):
             dispatch("hello\x00world")
 
-    @patch("vigil.actions.subprocess.run")
-    @patch("vigil.actions.shutil.which", return_value="/usr/bin/dispatch")
-    def test_success(self, mock_which, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n")
+    @patch("vigil.actions.config.run_hook", return_value="ok")
+    def test_success(self, mock_hook):
         assert dispatch("https://example.com") == "ok"
-
-    @patch("vigil.actions.subprocess.run")
-    @patch("vigil.actions.shutil.which", return_value="/usr/bin/dispatch")
-    def test_failure_raises(self, mock_which, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1, stdout="", stderr="error", args=["dispatch"],
+        mock_hook.assert_called_once_with(
+            "dispatch", {"input": "https://example.com"}, timeout=15,
         )
+
+    @patch("vigil.actions.config.run_hook", side_effect=HookNotConfigured("dispatch"))
+    def test_hook_not_configured(self, mock_hook):
+        with pytest.raises(HookNotConfigured):
+            dispatch("https://example.com")
+
+    @patch(
+        "vigil.actions.config.run_hook",
+        side_effect=subprocess.CalledProcessError(1, "cmd", "", "error"),
+    )
+    def test_failure_raises(self, mock_hook):
         with pytest.raises(subprocess.CalledProcessError):
             dispatch("https://example.com")
 
 
 class TestTimeoutPropagation:
-    @patch("vigil.actions.subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 30))
-    def test_merge_pr_timeout(self, mock_run):
+    @patch("vigil.actions.config.run_hook", side_effect=subprocess.TimeoutExpired("sh", 30))
+    def test_merge_pr_timeout(self, mock_hook):
         with pytest.raises(subprocess.TimeoutExpired):
             merge_pr("/repo", "feat")
 
-    @patch("vigil.actions.subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 30))
-    def test_approve_pr_timeout(self, mock_run):
+    @patch("vigil.actions.config.run_hook", side_effect=subprocess.TimeoutExpired("sh", 30))
+    def test_approve_pr_timeout(self, mock_hook):
         with pytest.raises(subprocess.TimeoutExpired):
             approve_pr("/repo", "feat")
 
@@ -183,17 +251,15 @@ class TestTimeoutPropagation:
 
 
 class TestTimeoutValues:
-    @patch("vigil.actions.subprocess.run")
-    def test_merge_pr_passes_timeout(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n")
+    @patch("vigil.actions.config.run_hook", return_value="ok")
+    def test_merge_pr_delegates_to_hook(self, mock_hook):
         merge_pr("/repo", "feat")
-        assert mock_run.call_args.kwargs["timeout"] == 30
+        mock_hook.assert_called_once()
 
-    @patch("vigil.actions.subprocess.run")
-    def test_approve_pr_passes_timeout(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n")
+    @patch("vigil.actions.config.run_hook", return_value="ok")
+    def test_approve_pr_delegates_to_hook(self, mock_hook):
         approve_pr("/repo", "feat")
-        assert mock_run.call_args.kwargs["timeout"] == 30
+        mock_hook.assert_called_once()
 
 
 class TestOpenPR:

@@ -11,7 +11,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import Footer, Input
 
-from . import actions, cache, tmux
+from . import actions, cache, config, tmux
 from . import git_status as git_mod
 from . import pr_status as pr_mod
 from .models import GitStatus, PRStatus, Session
@@ -104,8 +104,8 @@ class VigilApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        git_interval = int(os.environ.get("VIGIL_GIT_INTERVAL", "3"))
-        pr_interval = int(os.environ.get("VIGIL_PR_INTERVAL", "30"))
+        git_interval = int(config.get_setting("git_interval"))
+        pr_interval = int(config.get_setting("pr_interval"))
         # Load cache for instant display
         cached = cache.load()
         if cached:
@@ -166,7 +166,7 @@ class VigilApp(App):
         self.post_message(SessionsUpdated(sessions))
 
         # Fetch git status in parallel (git status --porcelain is ~750ms each)
-        _git_workers = int(os.environ.get("VIGIL_GIT_WORKERS", "8"))
+        _git_workers = int(config.get_setting("git_workers"))
         with ThreadPoolExecutor(max_workers=min(len(sessions), _git_workers) or 1) as pool:
             git_results = list(pool.map(lambda s: git_mod.fetch(s.pane_path), sessions))
         for s, git in zip(sessions, git_results):
@@ -399,7 +399,10 @@ class VigilApp(App):
     @work(thread=True)
     def _do_cleanup(self, session: Session) -> None:
         try:
-            actions.cleanup_session(session.name, session.pane_path)
+            actions.cleanup_session(
+                session.name, session.pane_path,
+                branch=session.git.branch, git_root=session.git.git_root,
+            )
             self.notify(f"Cleaned up {session.name}")
         except Exception as e:
             logger.error("cleanup failed for %s: %s", session.name, e)
@@ -411,6 +414,8 @@ class VigilApp(App):
         try:
             actions.dispatch(input_str)
             self.notify(f"Dispatched: {input_str}")
+        except config.HookNotConfigured:
+            self.notify("Dispatch hook not configured", severity="warning")
         except Exception as e:
             logger.error("dispatch failed for %r: %s", input_str, e)
             self.notify(f"Dispatch failed: {e}", severity="error")
@@ -427,7 +432,8 @@ def _check_dependencies() -> None:
 
 def main() -> None:
     from . import logging_config
-    logging_config.configure()
+    config.load_config()
+    logging_config.configure(config.get_setting("log_level"))
     _check_dependencies()
     app = VigilApp()
     app.run()
