@@ -39,6 +39,10 @@ class PullRequestsUpdated(Message):
         self.pr_data = pr_data
 
 
+class _ClearSelection(Message):
+    """Posted by batch workers to clear selection on the main thread."""
+
+
 class VigilApp(App):
     TITLE = "vigil"
     COMMANDS = set()
@@ -254,6 +258,10 @@ class VigilApp(App):
         )
         self._check_state_transitions()
         cache.save(self.sessions)
+
+    def on__clear_selection(self, event: _ClearSelection) -> None:
+        self._selected_sessions.clear()
+        self._apply_filter()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if isinstance(event.input, DispatchInput):
@@ -658,7 +666,7 @@ class VigilApp(App):
             except Exception as e:
                 logger.error("batch merge failed for %s: %s", s.name, e)
                 fail += 1
-        self._selected_sessions.clear()
+        self.post_message(_ClearSelection())
         self.notify(f"Merged {ok} PRs" + (f", {fail} failed" if fail else ""))
         self._poll_pr_status()
 
@@ -672,7 +680,7 @@ class VigilApp(App):
             except Exception as e:
                 logger.error("batch approve failed for %s: %s", s.name, e)
                 fail += 1
-        self._selected_sessions.clear()
+        self.post_message(_ClearSelection())
         self.notify(f"Approved {ok} PRs" + (f", {fail} failed" if fail else ""))
         self._poll_pr_status()
 
@@ -689,7 +697,7 @@ class VigilApp(App):
             except Exception as e:
                 logger.error("batch cleanup failed for %s: %s", s.name, e)
                 fail += 1
-        self._selected_sessions.clear()
+        self.post_message(_ClearSelection())
         self.notify(f"Cleaned up {ok} sessions" + (f", {fail} failed" if fail else ""))
         self._poll_sessions()
 
@@ -704,7 +712,7 @@ class VigilApp(App):
             except Exception as e:
                 logger.error("batch rebase failed for %s: %s", s.name, e)
                 fail += 1
-        self._selected_sessions.clear()
+        self.post_message(_ClearSelection())
         self.notify(f"Rebased {ok} branches" + (f", {fail} failed" if fail else ""))
         self._poll_sessions()
 
@@ -730,7 +738,7 @@ class VigilApp(App):
             except Exception as e:
                 logger.error("batch toggle draft failed for %s: %s", s.name, e)
                 fail += 1
-        self._selected_sessions.clear()
+        self.post_message(_ClearSelection())
         self.notify(f"Toggled draft on {ok} PRs" + (f", {fail} failed" if fail else ""))
         self._poll_pr_status()
 

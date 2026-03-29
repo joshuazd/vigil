@@ -233,8 +233,7 @@ class DetailPanel(RichLog):
             header.append(" ".join(git_parts))
         # Rebase age
         age = session.git.rebase_age_display()
-        if age:
-            assert session.git.rebase_age_seconds is not None
+        if age and session.git.rebase_age_seconds is not None:
             threshold = int(config.get_setting("stale_threshold"))
             stale = session.git.is_stale(threshold)
             hours = session.git.rebase_age_seconds // 3600

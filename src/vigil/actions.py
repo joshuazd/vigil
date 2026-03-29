@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import webbrowser
+from pathlib import Path
 
 from . import config
 from .git_status import detect_default_branch
@@ -75,21 +76,9 @@ def _builtin_cleanup(session_name: str, worktree_path: str, git_root: str) -> st
 
 
 def _is_worktree(path: str, git_root: str) -> bool:
-    """Check if path is a git worktree by checking git worktree list."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", git_root, "worktree", "list", "--porcelain"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return False
-        # Porcelain format has "worktree <path>" lines
-        for line in result.stdout.splitlines():
-            if line.startswith("worktree ") and line[9:].rstrip() == path:
-                return True
-        return False
-    except Exception:
-        return False
+    """Check if path is a git worktree. Worktrees have a .git file (not directory)."""
+    git_path = Path(path) / ".git"
+    return git_path.is_file()
 
 
 def dispatch(input_str: str) -> str:

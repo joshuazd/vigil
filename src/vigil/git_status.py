@@ -8,6 +8,8 @@ from .models import GitStatus
 
 logger = logging.getLogger(__name__)
 
+_default_branch_cache: dict[str, str | None] = {}
+
 
 def fetch(pane_path: str) -> GitStatus:
     """Compute git status for the repo at pane_path."""
@@ -102,6 +104,8 @@ def _parse_porcelain(git_root: str) -> tuple[int, int, int]:
 
 def detect_default_branch(git_root: str) -> str | None:
     """Detect the default branch via remote HEAD, falling back to main/master."""
+    if git_root in _default_branch_cache:
+        return _default_branch_cache[git_root]
     try:
         result = subprocess.run(
             ["git", "-C", git_root, "symbolic-ref", "refs/remotes/origin/HEAD"],
@@ -110,7 +114,9 @@ def detect_default_branch(git_root: str) -> str | None:
         if result.returncode == 0:
             # refs/remotes/origin/main -> main
             ref = result.stdout.strip()
-            return ref.rsplit("/", 1)[-1]
+            branch = ref.rsplit("/", 1)[-1]
+            _default_branch_cache[git_root] = branch
+            return branch
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     # Fallback: check local branches
@@ -120,7 +126,9 @@ def detect_default_branch(git_root: str) -> str | None:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
+            _default_branch_cache[git_root] = name
             return name
+    _default_branch_cache[git_root] = None
     return None
 
 

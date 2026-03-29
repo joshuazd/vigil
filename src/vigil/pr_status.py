@@ -10,6 +10,8 @@ from .models import PRStatus
 
 logger = logging.getLogger(__name__)
 
+_nwo_cache: dict[str, tuple[str, str]] = {}
+
 
 def _run_with_retry(
     args: list[str],
@@ -190,6 +192,8 @@ def _fetch_review_threads(
 
 def _get_nwo(git_root: str) -> tuple[str, str] | None:
     """Extract (owner, repo) from git remote URL."""
+    if git_root in _nwo_cache:
+        return _nwo_cache[git_root]
     try:
         result = subprocess.run(
             ["git", "-C", git_root, "remote", "get-url", "origin"],
@@ -208,7 +212,9 @@ def _get_nwo(git_root: str) -> tuple[str, str] | None:
             return None
         parts = url.split("/")
         if len(parts) >= 2:
-            return parts[0], parts[1]
+            nwo = (parts[0], parts[1])
+            _nwo_cache[git_root] = nwo
+            return nwo
         return None
     except FileNotFoundError:
         return None
