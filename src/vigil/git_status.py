@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
 
 from .models import GitStatus
+
+logger = logging.getLogger(__name__)
 
 
 def fetch(pane_path: str) -> GitStatus:
@@ -35,10 +38,14 @@ def _git_root(path: str) -> str:
     try:
         result = subprocess.run(
             ["git", "-C", path, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except FileNotFoundError:
+        if result.returncode != 0:
+            logger.warning("git rev-parse failed for %s: %s", path, result.stderr.strip())
+            return ""
+        return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning("git_root failed for %s: %s", path, e)
         return ""
 
 
@@ -46,10 +53,11 @@ def _current_branch(git_root: str) -> str:
     try:
         result = subprocess.run(
             ["git", "-C", git_root, "branch", "--show-current"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning("current_branch failed for %s: %s", git_root, e)
         return ""
 
 
@@ -58,11 +66,13 @@ def _parse_porcelain(git_root: str) -> tuple[int, int, int]:
     try:
         result = subprocess.run(
             ["git", "--no-optional-locks", "-C", git_root, "status", "--porcelain"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
+            logger.warning("git status --porcelain failed for %s", git_root)
             return 0, 0, 0
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning("parse_porcelain failed for %s: %s", git_root, e)
         return 0, 0, 0
 
     modified = added = deleted = 0
@@ -99,30 +109,33 @@ def _rebase_age(git_root: str, branch: str) -> int | None:
     for name in ("main", "master"):
         result = subprocess.run(
             ["git", "-C", git_root, "rev-parse", "--verify", f"refs/heads/{name}"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
             main = name
             break
     if not main:
+        logger.debug("no main/master branch in %s", git_root)
         return None
     try:
         result = subprocess.run(
             ["git", "-C", git_root, "merge-base", main, "HEAD"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
+            logger.warning("merge-base failed for %s: %s", git_root, result.stderr.strip())
             return None
         base = result.stdout.strip()
         result = subprocess.run(
             ["git", "-C", git_root, "log", "-1", "--format=%ct", base],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
             return None
         base_ts = int(result.stdout.strip())
         return int(time.time() - base_ts)
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, ValueError, subprocess.TimeoutExpired) as e:
+        logger.warning("rebase_age failed for %s: %s", git_root, e)
         return None
 
 
@@ -132,14 +145,15 @@ def _unpushed_count(git_root: str, branch: str) -> int:
         # Check remote ref exists
         result = subprocess.run(
             ["git", "-C", git_root, "rev-parse", "--verify", f"origin/{branch}"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
             return 0
         result = subprocess.run(
             ["git", "-C", git_root, "rev-list", f"origin/{branch}..HEAD", "--count"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
         return int(result.stdout.strip()) if result.returncode == 0 else 0
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, ValueError, subprocess.TimeoutExpired) as e:
+        logger.warning("unpushed_count failed for %s/%s: %s", git_root, branch, e)
         return 0

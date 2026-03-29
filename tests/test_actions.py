@@ -87,6 +87,23 @@ class TestRebaseAndPush:
         with pytest.raises(RuntimeError, match="push failed"):
             rebase_and_push("/repo")
 
+    @patch("vigil.actions.subprocess.run")
+    def test_fetch_failure(self, mock_run):
+        mock_run.side_effect = self._mock_run_side_effects(fetch_ok=False)
+        with pytest.raises(RuntimeError, match="fetch failed"):
+            rebase_and_push("/repo")
+
+    @patch("vigil.actions.subprocess.run")
+    def test_rebase_failure_triggers_abort(self, mock_run):
+        effects = self._mock_run_side_effects(rebase_ok=False)
+        mock_run.side_effect = effects
+        with pytest.raises(RuntimeError, match="rebase failed"):
+            rebase_and_push("/repo")
+        # Should have called rebase --abort (5th call)
+        assert mock_run.call_count == 5
+        abort_call = mock_run.call_args_list[4]
+        assert "rebase" in abort_call.args[0] and "--abort" in abort_call.args[0]
+
 
 class TestCleanupSession:
     @patch("vigil.actions.shutil.which", return_value=None)
@@ -94,11 +111,57 @@ class TestCleanupSession:
         with pytest.raises(FileNotFoundError, match="git-worktree-cleanup"):
             cleanup_session("test-session", "/tmp/wt")
 
+    @patch("vigil.actions.subprocess.run")
+    @patch("vigil.actions.shutil.which", return_value="/usr/bin/git-worktree-cleanup")
+    def test_success(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="done\n")
+        assert cleanup_session("test-session", "/tmp/wt") == "done"
+
+    @patch("vigil.actions.subprocess.run")
+    @patch("vigil.actions.shutil.which", return_value="/usr/bin/git-worktree-cleanup")
+    def test_failure_raises(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="error", args=["cleanup"],
+        )
+        with pytest.raises(subprocess.CalledProcessError):
+            cleanup_session("test-session", "/tmp/wt")
+
 
 class TestDispatch:
     @patch("vigil.actions.shutil.which", return_value=None)
     def test_missing_script(self, mock_which):
         with pytest.raises(FileNotFoundError, match="dispatch"):
+            dispatch("https://example.com")
+
+    def test_empty_input_rejected(self):
+        with pytest.raises(ValueError, match="empty"):
+            dispatch("")
+
+    def test_whitespace_only_rejected(self):
+        with pytest.raises(ValueError, match="empty"):
+            dispatch("   ")
+
+    def test_too_long_rejected(self):
+        with pytest.raises(ValueError, match="too long"):
+            dispatch("x" * 501)
+
+    def test_control_chars_rejected(self):
+        with pytest.raises(ValueError, match="control"):
+            dispatch("hello\x00world")
+
+    @patch("vigil.actions.subprocess.run")
+    @patch("vigil.actions.shutil.which", return_value="/usr/bin/dispatch")
+    def test_success(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n")
+        assert dispatch("https://example.com") == "ok"
+
+    @patch("vigil.actions.subprocess.run")
+    @patch("vigil.actions.shutil.which", return_value="/usr/bin/dispatch")
+    def test_failure_raises(self, mock_which, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="error", args=["dispatch"],
+        )
+        with pytest.raises(subprocess.CalledProcessError):
             dispatch("https://example.com")
 
 

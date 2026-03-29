@@ -160,6 +160,7 @@ class DetailPanel(RichLog):
         # Rebase age
         age = session.git.rebase_age_display()
         if age:
+            assert session.git.rebase_age_seconds is not None
             hours = session.git.rebase_age_seconds // 3600
             if hours < 24:
                 header.append(f"  ↻ rebased {hours}h ago", style="dim")

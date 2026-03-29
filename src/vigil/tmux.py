@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
 import subprocess
+
+logger = logging.getLogger(__name__)
 
 
 def _run(args: list[str]) -> str:
-    result = subprocess.run(args, capture_output=True, text=True)
+    logger.debug("tmux: %s", args)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=5)
     if result.returncode != 0:
+        logger.error("tmux failed: %s stderr=%s", args, result.stderr.strip())
         raise subprocess.CalledProcessError(
             result.returncode, args, result.stdout, result.stderr,
         )

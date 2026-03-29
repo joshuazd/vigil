@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 from dataclasses import asdict
@@ -9,7 +10,7 @@ from pathlib import Path
 from .models import GitStatus, PRStatus, Session
 
 CACHE_PATH = Path.home() / ".local" / "share" / "vigil" / "cache.json"
-MAX_AGE_SECONDS = 30
+MAX_AGE_SECONDS = int(os.environ.get("VIGIL_CACHE_TTL", "30"))
 
 
 def save(sessions: list[Session]) -> None:

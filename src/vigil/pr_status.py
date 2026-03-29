@@ -1,15 +1,33 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
+import time
 
 from .models import PRStatus
+
+logger = logging.getLogger(__name__)
+
+
+def _run_with_retry(
+    args: list[str], *, cwd: str | None = None, max_retries: int = 2, backoff: float = 1.0,
+) -> subprocess.CompletedProcess:
+    """Run subprocess with retry on non-zero exit."""
+    for attempt in range(max_retries + 1):
+        result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            return result
+        if attempt < max_retries:
+            logger.info("Retrying %s (attempt %d/%d)", args[:3], attempt + 2, max_retries + 1)
+            time.sleep(backoff * (attempt + 1))
+    return result
 
 
 def fetch(branch: str, git_root: str) -> PRStatus | None:
     """Fetch PR status for a branch via gh CLI. Returns None if no PR exists."""
     try:
-        result = subprocess.run(
+        result = _run_with_retry(
             [
                 "gh", "pr", "view", branch,
                 "--json",
@@ -17,13 +35,14 @@ def fetch(branch: str, git_root: str) -> PRStatus | None:
                 "reviewDecision,latestReviews,mergeable",
             ],
             cwd=git_root,
-            capture_output=True, text=True,
         )
         if result.returncode != 0:
+            logger.debug("gh pr view failed for %s: %s", branch, result.stderr.strip())
             return None
 
         data = json.loads(result.stdout)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
+        logger.warning("pr fetch failed for %s: %s", branch, e)
         return None
 
     number = data.get("number", 0)
@@ -97,7 +116,7 @@ def _fetch_unresolved_threads(git_root: str, pr_number: int) -> int:
     owner, repo = nwo
 
     try:
-        result = subprocess.run(
+        result = _run_with_retry(
             [
                 "gh", "api", "graphql",
                 "-f", f"query={query}",
@@ -106,9 +125,9 @@ def _fetch_unresolved_threads(git_root: str, pr_number: int) -> int:
                 "-F", f"number={pr_number}",
             ],
             cwd=git_root,
-            capture_output=True, text=True,
         )
         if result.returncode != 0:
+            logger.warning("graphql query failed for PR #%d: %s", pr_number, result.stderr.strip())
             return 0
         data = json.loads(result.stdout)
         threads = (
@@ -122,7 +141,8 @@ def _fetch_unresolved_threads(git_root: str, pr_number: int) -> int:
             1 for t in threads
             if not t.get("isResolved", True) and not t.get("isOutdated", False)
         )
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
+        logger.warning("unresolved threads fetch failed for PR #%d: %s", pr_number, e)
         return 0
 
 

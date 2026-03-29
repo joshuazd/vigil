@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 
@@ -14,6 +15,8 @@ from . import git_status as git_mod
 from . import pr_status as pr_mod
 from .models import GitStatus, PRStatus, Session
 from .widgets import DetailPanel, DispatchInput, SessionTable, StatusBar
+
+logger = logging.getLogger(__name__)
 
 
 class SessionsUpdated(Message):
@@ -82,7 +85,8 @@ class VigilApp(App):
     ]
 
     def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, ansi_color=True, **kwargs)
+        kwargs.setdefault("ansi_color", True)
+        super().__init__(*args, **kwargs)
         self.sessions: list[Session] = []
         self._git_cache: dict[str, GitStatus] = {}
         self._pr_cache: dict[str, PRStatus | None] = {}
@@ -99,6 +103,8 @@ class VigilApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        git_interval = int(os.environ.get("VIGIL_GIT_INTERVAL", "3"))
+        pr_interval = int(os.environ.get("VIGIL_PR_INTERVAL", "30"))
         # Load cache for instant display
         cached = cache.load()
         if cached:
@@ -109,8 +115,8 @@ class VigilApp(App):
                     self._pr_cache[s.git.branch] = s.pr
             self.post_message(SessionsUpdated(cached))
         self._poll_sessions()
-        self.set_interval(3, self._poll_sessions)
-        self.set_interval(30, self._poll_pr_status)
+        self.set_interval(git_interval, self._poll_sessions)
+        self.set_interval(pr_interval, self._poll_pr_status)
 
     # --- Workers ---
 
@@ -120,6 +126,8 @@ class VigilApp(App):
         try:
             raw_sessions = tmux.list_sessions()
         except Exception:
+            logger.exception("poll_sessions: list_sessions failed")
+            self.notify("Session refresh failed", severity="warning")
             return
 
         current = tmux.get_current_session()
@@ -324,7 +332,7 @@ class VigilApp(App):
             return
         self._do_rebase_push(session)
 
-    def action_quit(self) -> None:
+    async def action_quit(self) -> None:
         self.workers.cancel_all()
         self.exit()
 
@@ -338,8 +346,10 @@ class VigilApp(App):
     def _do_merge(self, session: Session) -> None:
         try:
             actions.merge_pr(session.git.git_root, session.git.branch)
-            self.notify(f"Merged PR #{session.pr.number}")
+            pr_num = session.pr.number if session.pr else "?"
+            self.notify(f"Merged PR #{pr_num}")
         except Exception as e:
+            logger.error("merge failed for %s: %s", session.name, e)
             self.notify(f"Merge failed: {e}", severity="error")
         self._poll_pr_status()
 
@@ -347,8 +357,10 @@ class VigilApp(App):
     def _do_approve(self, session: Session) -> None:
         try:
             actions.approve_pr(session.git.git_root, session.git.branch)
-            self.notify(f"Approved PR #{session.pr.number}")
+            pr_num = session.pr.number if session.pr else "?"
+            self.notify(f"Approved PR #{pr_num}")
         except Exception as e:
+            logger.error("approve failed for %s: %s", session.name, e)
             self.notify(f"Approve failed: {e}", severity="error")
         self._poll_pr_status()
 
@@ -359,8 +371,10 @@ class VigilApp(App):
             actions.rebase_and_push(session.git.git_root)
             self.notify(f"Rebased and pushed {session.name}")
         except RuntimeError as e:
+            logger.error("rebase failed for %s: %s", session.name, e)
             self.notify(f"{e}", severity="error")
         except Exception as e:
+            logger.error("rebase failed for %s: %s", session.name, e)
             self.notify(f"Rebase failed: {e}", severity="error")
         self._poll_sessions()
 
@@ -370,6 +384,7 @@ class VigilApp(App):
             actions.cleanup_session(session.name, session.pane_path)
             self.notify(f"Cleaned up {session.name}")
         except Exception as e:
+            logger.error("cleanup failed for %s: %s", session.name, e)
             self.notify(f"Cleanup failed: {e}", severity="error")
         self._poll_sessions()
 
@@ -379,6 +394,7 @@ class VigilApp(App):
             actions.dispatch(input_str)
             self.notify(f"Dispatched: {input_str}")
         except Exception as e:
+            logger.error("dispatch failed for %r: %s", input_str, e)
             self.notify(f"Dispatch failed: {e}", severity="error")
         self._poll_sessions()
 
@@ -392,6 +408,8 @@ def _check_dependencies() -> None:
 
 
 def main() -> None:
+    from . import logging_config
+    logging_config.configure()
     _check_dependencies()
     app = VigilApp()
     app.run()

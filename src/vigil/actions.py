@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import webbrowser
+
+logger = logging.getLogger(__name__)
 
 
 def merge_pr(git_root: str, branch: str) -> str:
@@ -13,6 +16,7 @@ def merge_pr(git_root: str, branch: str) -> str:
         cwd=git_root, capture_output=True, text=True,
     )
     if result.returncode != 0:
+        logger.error("merge_pr failed: %s stderr=%s", result.args, result.stderr.strip())
         raise subprocess.CalledProcessError(
             result.returncode, result.args, result.stdout, result.stderr,
         )
@@ -26,6 +30,7 @@ def approve_pr(git_root: str, branch: str) -> str:
         cwd=git_root, capture_output=True, text=True,
     )
     if result.returncode != 0:
+        logger.error("approve_pr failed: %s stderr=%s", result.args, result.stderr.strip())
         raise subprocess.CalledProcessError(
             result.returncode, result.args, result.stdout, result.stderr,
         )
@@ -50,6 +55,12 @@ def cleanup_session(session_name: str, worktree_path: str) -> str:
 
 def dispatch(input_str: str) -> str:
     """Route a Shortcut URL or PR number via the dispatch script."""
+    if not input_str or not input_str.strip():
+        raise ValueError("dispatch input must not be empty")
+    if len(input_str) > 500:
+        raise ValueError("dispatch input too long")
+    if any(c < " " and c not in "\t\n" for c in input_str):
+        raise ValueError("dispatch input contains control characters")
     cmd = shutil.which("dispatch")
     if not cmd:
         raise FileNotFoundError("dispatch not found on PATH")
@@ -59,6 +70,7 @@ def dispatch(input_str: str) -> str:
         capture_output=True, text=True, env=env,
     )
     if result.returncode != 0:
+        logger.error("dispatch failed: %s stderr=%s", result.args, result.stderr.strip())
         raise subprocess.CalledProcessError(
             result.returncode, result.args, result.stdout, result.stderr,
         )
