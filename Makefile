@@ -46,7 +46,7 @@ release: test lint
 
 bump-tap:
 	@url="https://files.pythonhosted.org/packages/source/v/vigil-tui/vigil_tui-$(VERSION).tar.gz"; \
-	sha=$$(curl -sfL "$$url" | shasum -a 256 | cut -d' ' -f1); \
+	sha=$$(curl -sfL "$$url" | python3 -c "import sys,hashlib; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())"); \
 	if [ -z "$$sha" ]; then \
 		echo "Error: could not fetch tarball from PyPI"; \
 		exit 1; \
@@ -55,8 +55,12 @@ bump-tap:
 	tmpdir=$$(mktemp -d); \
 	gh repo clone $(TAP_REPO) "$$tmpdir" -- -q; \
 	cd "$$tmpdir" && \
-	sed -i '' 's|url "https://files.pythonhosted.org/packages/source/v/vigil-tui/vigil_tui-.*\.tar\.gz"|url "'"$$url"'"|' Formula/vigil.rb && \
-	sed -i '' '0,/sha256 "[a-f0-9]*"/s|sha256 "[a-f0-9]*"|sha256 "'"$$sha"'"|' Formula/vigil.rb && \
+	python3 -c "\
+	import re, sys; \
+	f='Formula/vigil.rb'; t=open(f).read(); \
+	t=re.sub(r'url \"https://files.pythonhosted.org/packages/source/v/vigil-tui/vigil_tui-[^\"]*\.tar\.gz\"', 'url \"'+'$$url'+'\"', t); \
+	t=re.sub(r'sha256 \"[a-f0-9]+\"', 'sha256 \"'+'$$sha'+'\"', t, count=1); \
+	open(f,'w').write(t)" && \
 	git add Formula/vigil.rb && \
 	git commit -m "vigil $(VERSION)" && \
 	git push && \
