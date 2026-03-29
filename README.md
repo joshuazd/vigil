@@ -7,6 +7,12 @@ Navigate sessions with vim-style keybindings, merge PRs, approve reviews, rebase
 ## Install
 
 ```bash
+brew install joshuazd/tap/vigil
+```
+
+Or via PyPI:
+
+```bash
 pipx install vigil-tui
 ```
 
