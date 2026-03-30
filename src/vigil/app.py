@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal
 
 from textual import work
@@ -186,16 +186,31 @@ class VigilApp(App):
         self.post_message(SessionsUpdated(sessions))
 
         # Fetch git status in parallel (git status --porcelain is ~750ms each)
+        if self._shutting_down.is_set():
+            return
         _git_workers = int(config.get_setting("git_workers"))
-        with ThreadPoolExecutor(max_workers=min(len(sessions), _git_workers) or 1) as pool:
-            git_results = list(pool.map(lambda s: git_mod.fetch(s.pane_path), sessions))
-        for s, git in zip(sessions, git_results):
-            s.git = git
-            self._git_cache[s.name] = git
-            if s.git.branch and s.git.branch in self._pr_cache:
-                s.pr = self._pr_cache[s.git.branch]
+        pool = ThreadPoolExecutor(max_workers=min(len(sessions), _git_workers) or 1)
+        try:
+            futures = {pool.submit(git_mod.fetch, s.pane_path): s for s in sessions}
+            for future in as_completed(futures):
+                if self._shutting_down.is_set():
+                    for f in futures:
+                        f.cancel()
+                    return
+                try:
+                    git = future.result()
+                except Exception:
+                    continue
+                s = futures[future]
+                s.git = git
+                self._git_cache[s.name] = git
+                if s.git.branch and s.git.branch in self._pr_cache:
+                    s.pr = self._pr_cache[s.git.branch]
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
-        self.post_message(SessionsUpdated(sessions))
+        if not self._shutting_down.is_set():
+            self.post_message(SessionsUpdated(sessions))
 
     def _fetch_pr_data_incremental(self) -> None:
         """Fetch PR status one branch at a time, posting after each."""
@@ -321,6 +336,8 @@ class VigilApp(App):
                 tmux.switch_client(session.name)
             except Exception:
                 self.notify(f"Failed to switch to {session.name}", severity="error")
+            self._shutting_down.set()
+            self.workers.cancel_all()
             self.exit()
         else:
             self.action_toggle_detail()
