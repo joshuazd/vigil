@@ -13,7 +13,15 @@ logger = logging.getLogger(__name__)
 
 def merge_pr(git_root: str, branch: str) -> str:
     """Squash-merge the PR for the given branch."""
-    return config.run_hook("merge", {"branch": branch, "git_root": git_root}, cwd=git_root)
+    try:
+        return config.run_hook("merge", {"branch": branch, "git_root": git_root}, cwd=git_root)
+    except subprocess.CalledProcessError as e:
+        # gh pr merge --delete-branch exits 1 if branch deletion fails even though
+        # the merge itself succeeded.  Treat as success if stdout confirms the merge.
+        if e.stdout and "merged" in e.stdout.lower():
+            logger.warning("merge hook exited %d but merge succeeded: %s", e.returncode, e.stderr)
+            return e.stdout.strip()
+        raise
 
 
 def approve_pr(git_root: str, branch: str) -> str:

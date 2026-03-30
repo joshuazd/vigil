@@ -139,7 +139,7 @@ def _rebase_age(git_root: str, branch: str) -> int | None:
         return None
     try:
         result = subprocess.run(
-            ["git", "-C", git_root, "merge-base", main, "HEAD"],
+            ["git", "-C", git_root, "merge-base", f"origin/{main}", "HEAD"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:

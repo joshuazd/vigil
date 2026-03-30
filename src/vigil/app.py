@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal
 
@@ -21,6 +22,14 @@ from .models import GitStatus, PRStatus, Session, SessionState, SortMode
 from .widgets import DetailPanel, DispatchInput, SessionTable, StatusBar
 
 logger = logging.getLogger(__name__)
+
+_AUTO_FOCUS_STATES = (
+    SessionState.ATTENTION,
+    SessionState.BLOCKED,
+    SessionState.UNRESOLVED,
+    SessionState.MERGEABLE,
+)
+_AUTO_FOCUS_COOLDOWN = 15  # seconds
 
 
 class SessionsUpdated(Message):
@@ -115,6 +124,7 @@ class VigilApp(App):
         self._initial_load = True
         self._selected_sessions: set[str] = set()
         self._sort_mode: SortMode = SortMode.CREATED
+        self._last_manual_nav: float = 0.0
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status-bar")
@@ -291,6 +301,7 @@ class VigilApp(App):
         return self.query_one("#session-table", SessionTable).get_selected()
 
     def action_cursor_down(self) -> None:
+        self._last_manual_nav = time.monotonic()
         table = self.query_one("#session-table", SessionTable)
         if table.row_count and table.cursor_row >= table.row_count - 1:
             table.move_cursor(row=0)
@@ -299,6 +310,7 @@ class VigilApp(App):
         self._update_detail()
 
     def action_cursor_up(self) -> None:
+        self._last_manual_nav = time.monotonic()
         table = self.query_one("#session-table", SessionTable)
         if table.row_count and table.cursor_row <= 0:
             table.move_cursor(row=table.row_count - 1)
@@ -307,6 +319,7 @@ class VigilApp(App):
         self._update_detail()
 
     def action_toggle_select(self) -> None:
+        self._last_manual_nav = time.monotonic()
         session = self._get_selected()
         if not session:
             return
@@ -364,6 +377,10 @@ class VigilApp(App):
         session = self._get_selected()
         if session and session.pr and session.pr.url:
             actions.open_pr_in_browser(session.pr.url)
+            if self._popup_mode:
+                self._shutting_down.set()
+                self.exit()
+                return
             self.notify(f"Opened PR #{session.pr.number}")
 
     def action_merge_pr(self) -> None:
@@ -550,7 +567,41 @@ class VigilApp(App):
             if auto_cleanup and s.state == SessionState.DONE and not s.is_current:
                 self._do_cleanup(s)
 
+        self._maybe_auto_focus()
         self._prev_states = {s.name: s.state for s in self.sessions}
+
+    def _maybe_auto_focus(self) -> None:
+        """Move cursor to highest-priority session that just became actionable."""
+        if self._popup_mode:
+            return
+        if config.get_setting("auto_focus") != "true":
+            return
+        if time.monotonic() - self._last_manual_nav < _AUTO_FOCUS_COOLDOWN:
+            return
+
+        # Find sessions that just transitioned into an auto-focus state, pick highest priority
+        best: Session | None = None
+        best_priority = len(_AUTO_FOCUS_STATES)
+        for s in self.sessions:
+            old = self._prev_states.get(s.name)
+            if old is None or old == s.state:
+                continue
+            if s.state in _AUTO_FOCUS_STATES:
+                priority = _AUTO_FOCUS_STATES.index(s.state)
+                if priority < best_priority:
+                    best = s
+                    best_priority = priority
+
+        if best is None:
+            return
+
+        table = self.query_one("#session-table", SessionTable)
+        try:
+            row_idx = table._row_keys.index(best.name)
+            table.move_cursor(row=row_idx)
+            self._update_detail()
+        except ValueError:
+            pass  # Session not visible (filtered out)
 
     @work(thread=True)
     def _run_notify_hook(self, session_name: str, old: SessionState, new: SessionState) -> None:

@@ -33,6 +33,7 @@ SETTING_DEFAULTS: dict[str, tuple[str, str]] = {
     "stale_threshold": ("VIGIL_STALE_THRESHOLD", "86400"),
     "notifications_enabled": ("VIGIL_NOTIFICATIONS", "true"),
     "auto_cleanup": ("VIGIL_AUTO_CLEANUP", "false"),
+    "auto_focus": ("VIGIL_AUTO_FOCUS", "true"),
 }
 
 
