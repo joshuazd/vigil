@@ -20,7 +20,7 @@ def merge_pr(git_root: str, branch: str) -> str:
         # the merge itself succeeded.  Treat as success if stdout confirms the merge.
         if e.stdout and "merged" in e.stdout.lower():
             logger.warning("merge hook exited %d but merge succeeded: %s", e.returncode, e.stderr)
-            return e.stdout.strip()
+            return str(e.stdout).strip()
         raise
 
 
