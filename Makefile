@@ -11,6 +11,7 @@ test:
 
 lint:
 	$(PYTHON) -m ruff check src/ tests/
+	$(PYTHON) -m mypy src/vigil/ --ignore-missing-imports
 
 clean:
 	rm -rf $(VENV)
