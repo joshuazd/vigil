@@ -855,7 +855,7 @@ func (m Model) mergeCmd(s *session.Session) tea.Cmd {
 	branch := s.Git.Branch
 	name := s.Name
 	return func() tea.Msg {
-		out, err := action.MergePR(m.ctx, m.cfg, gitRoot, branch)
+		out, err := action.MergePR(m.ctx, m.cfg, m.cmd, gitRoot, branch)
 		if err != nil {
 			return ActionResultMsg{Action: "merge", Session: name, OK: false, Message: err.Error()}
 		}
@@ -933,7 +933,7 @@ func (m Model) batchMergeCmd() tea.Cmd {
 	return func() tea.Msg {
 		ok, fail := 0, 0
 		for _, s := range sessions {
-			_, err := action.MergePR(context.Background(), m.cfg, s.Git.GitRoot, s.Git.Branch)
+			_, err := action.MergePR(context.Background(), m.cfg, m.cmd, s.Git.GitRoot, s.Git.Branch)
 			if err != nil {
 				fail++
 			} else {

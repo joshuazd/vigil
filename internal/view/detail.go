@@ -24,7 +24,7 @@ func RenderDetail(s *session.Session, mode DetailMode, paneContent string, stale
 	case DetailPRComments:
 		renderPRComments(&b, s, height-3)
 	default:
-		renderPane(&b, paneContent, height-3)
+		renderPane(&b, paneContent, height-3, width)
 	}
 
 	// Truncate to height lines
@@ -102,9 +102,14 @@ func renderDetailHeader(b *strings.Builder, s *session.Session, mode DetailMode,
 	b.WriteString(DimStyle.Render(fmt.Sprintf("  [%s]", mode)))
 }
 
-func renderPane(b *strings.Builder, paneContent string, maxLines int) {
+func renderPane(b *strings.Builder, paneContent string, maxLines int, width int) {
 	if paneContent == "" {
 		return
+	}
+	// Available width: total width minus indent (2) and border padding (2)
+	maxW := width - 4
+	if maxW < 10 {
+		maxW = 10
 	}
 	lines := strings.Split(paneContent, "\n")
 	// Show last maxLines
@@ -115,9 +120,56 @@ func renderPane(b *strings.Builder, paneContent string, maxLines int) {
 	for _, line := range lines[start:] {
 		stripped := strings.TrimRight(line, " \t")
 		if stripped != "" {
+			stripped = truncateVisible(stripped, maxW)
 			b.WriteString("  " + stripped + "\n")
 		}
 	}
+}
+
+// truncateVisible truncates a string (which may contain ANSI escapes) to maxW visible characters,
+// appending "…" if truncated.
+func truncateVisible(s string, maxW int) string {
+	visible := 0
+	inEscape := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if s[i] == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		// Count visible character
+		b := s[i]
+		if b >= 0x80 && b < 0xC0 {
+			continue // UTF-8 continuation byte
+		}
+		visible++
+		if visible >= maxW {
+			// Skip past remaining bytes of this UTF-8 character
+			end := i + 1
+			for end < len(s) && s[end] >= 0x80 && s[end] < 0xC0 {
+				end++
+			}
+			// Include any trailing ANSI reset sequences
+			for end < len(s) && s[end] == '\x1b' {
+				j := end + 1
+				for j < len(s) && s[j] != 'm' {
+					j++
+				}
+				if j < len(s) {
+					end = j + 1
+				} else {
+					break
+				}
+			}
+			return s[:end] + "…"
+		}
+	}
+	return s
 }
 
 func renderPRDesc(b *strings.Builder, s *session.Session, maxLines int) {

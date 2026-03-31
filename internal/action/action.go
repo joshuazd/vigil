@@ -14,16 +14,21 @@ import (
 )
 
 // MergePR squash-merges the PR for the given branch.
-func MergePR(ctx context.Context, cfg *config.Config, gitRoot, branch string) (string, error) {
+func MergePR(ctx context.Context, cfg *config.Config, cmd fetch.Commander, gitRoot, branch string) (string, error) {
 	out, err := cfg.RunHook("merge", map[string]string{
 		"branch": branch, "git_root": gitRoot,
 	}, gitRoot, 30_000_000_000) // 30s
 	if err != nil {
 		// gh pr merge --delete-branch exits 1 if branch deletion fails
-		// even though merge itself succeeded
+		// even though merge itself succeeded — verify PR state
 		combined := strings.ToLower(out + " " + err.Error())
-		if strings.Contains(combined, "merged") || strings.Contains(combined, "pull request was merged") {
+		if strings.Contains(combined, "merged") {
 			return out, nil
+		}
+		// Check if the PR was actually merged despite the error
+		state, stateErr := cmd.Run(ctx, gitRoot, "gh", "pr", "view", branch, "--json", "state", "--jq", ".state")
+		if stateErr == nil && strings.TrimSpace(state) == "MERGED" {
+			return "merged (branch cleanup may have failed)", nil
 		}
 		return out, err
 	}
