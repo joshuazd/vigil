@@ -1,5 +1,10 @@
 package session
 
+import (
+	"strconv"
+	"strings"
+)
+
 // GitStatus holds parsed git status for a session's working directory.
 type GitStatus struct {
 	Branch          string `json:"branch"`
@@ -20,9 +25,9 @@ func (g *GitStatus) RebaseAgeDisplay() string {
 		return ""
 	}
 	if *g.RebaseAgeSecs < 86400 {
-		return "↻ " + itoa(*g.RebaseAgeSecs/3600) + "h"
+		return "↻ " + strconv.Itoa(*g.RebaseAgeSecs/3600) + "h"
 	}
-	return "↻ " + itoa(*g.RebaseAgeSecs/86400) + "d"
+	return "↻ " + strconv.Itoa(*g.RebaseAgeSecs/86400) + "d"
 }
 
 func (g *GitStatus) IsStale(threshold int) bool {
@@ -32,16 +37,16 @@ func (g *GitStatus) IsStale(threshold int) bool {
 func (g *GitStatus) Display() string {
 	var parts []string
 	if g.Modified > 0 {
-		parts = append(parts, "~"+itoa(g.Modified))
+		parts = append(parts, "~"+strconv.Itoa(g.Modified))
 	}
 	if g.Added > 0 {
-		parts = append(parts, "+"+itoa(g.Added))
+		parts = append(parts, "+"+strconv.Itoa(g.Added))
 	}
 	if g.Deleted > 0 {
-		parts = append(parts, "-"+itoa(g.Deleted))
+		parts = append(parts, "-"+strconv.Itoa(g.Deleted))
 	}
 	if g.Unpushed > 0 {
-		parts = append(parts, "↑"+itoa(g.Unpushed))
+		parts = append(parts, "↑"+strconv.Itoa(g.Unpushed))
 	}
 	if age := g.RebaseAgeDisplay(); age != "" {
 		parts = append(parts, age)
@@ -49,7 +54,7 @@ func (g *GitStatus) Display() string {
 	if len(parts) == 0 {
 		return "—"
 	}
-	return join(parts, " ")
+	return strings.Join(parts, " ")
 }
 
 // ReviewComment is a single comment from a PR review thread.
@@ -80,7 +85,7 @@ func (p *PRStatus) Display() string {
 	if p.Number == 0 {
 		return "—"
 	}
-	parts := []string{"#" + itoa(p.Number)}
+	parts := []string{"#" + strconv.Itoa(p.Number)}
 	switch p.Checks {
 	case "pass":
 		parts = append(parts, "✓")
@@ -99,10 +104,10 @@ func (p *PRStatus) Display() string {
 			parts = append(parts, "☑")
 		}
 		if p.UnresolvedComments > 0 {
-			parts = append(parts, "☐ "+itoa(p.UnresolvedComments))
+			parts = append(parts, "☐ "+strconv.Itoa(p.UnresolvedComments))
 		}
 	}
-	return join(parts, " ")
+	return strings.Join(parts, " ")
 }
 
 // Session represents a tmux session with its git and PR state.
@@ -161,44 +166,3 @@ func (s *Session) Indicator() string {
 	return " "
 }
 
-// helpers to avoid importing strconv/strings at top level
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	buf := [20]byte{}
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}
-
-func join(parts []string, sep string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	n := len(sep) * (len(parts) - 1)
-	for _, p := range parts {
-		n += len(p)
-	}
-	b := make([]byte, 0, n)
-	for i, p := range parts {
-		if i > 0 {
-			b = append(b, sep...)
-		}
-		b = append(b, p...)
-	}
-	return string(b)
-}

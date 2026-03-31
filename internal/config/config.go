@@ -1,10 +1,12 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,7 +44,7 @@ var settingDefaults = map[string]settingDef{
 var hookDefaults = map[string]string{
 	"merge":   "gh pr merge {branch} --squash --delete-branch",
 	"approve": "gh pr review {branch} --approve",
-	"notify":  `tmux display-message "vigil: {session} → {new_state}"`,
+	"notify":  `tmux display-message -d 5000 "vigil: {session} → {new_state}"`,
 }
 
 // Config holds the loaded TOML configuration.
@@ -86,17 +88,9 @@ func (c *Config) GetSetting(name string) string {
 	return def.Default
 }
 
-// GetSettingInt returns a setting as an int, falling back to the default.
+// GetSettingInt returns a setting as an int, falling back to 0.
 func (c *Config) GetSettingInt(name string) int {
-	s := c.GetSetting(name)
-	n := 0
-	for _, ch := range s {
-		if ch >= '0' && ch <= '9' {
-			n = n*10 + int(ch-'0')
-		} else {
-			break
-		}
-	}
+	n, _ := strconv.Atoi(c.GetSetting(name))
 	return n
 }
 
@@ -161,30 +155,19 @@ func (c *Config) RunHook(name string, vars map[string]string, cwd string, timeou
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.Command("sh", "-c", cmdStr)
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
-	if timeout > 0 {
-		// Use a simple approach: set deadline via goroutine
-		done := make(chan struct{})
-		go func() {
-			select {
-			case <-done:
-			case <-time.After(timeout):
-				cmd.Process.Kill()
-			}
-		}()
-		out, err := cmd.CombinedOutput()
-		close(done)
-		if err != nil {
-			return strings.TrimSpace(string(out)), fmt.Errorf("hook %s failed: %w (output: %s)", name, err, strings.TrimSpace(string(out)))
-		}
-		return strings.TrimSpace(string(out)), nil
-	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return strings.TrimSpace(string(out)), fmt.Errorf("hook %s failed: %w", name, err)
+		return strings.TrimSpace(string(out)), fmt.Errorf("hook %s failed: %w (output: %s)", name, err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
 }

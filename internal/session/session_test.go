@@ -1,6 +1,9 @@
 package session
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func intPtr(n int) *int { return &n }
 
@@ -171,7 +174,7 @@ func TestPRPassingApproved(t *testing.T) {
 	p := PRStatus{Number: 42, State: "OPEN", Checks: "pass", ReviewDecision: "APPROVED"}
 	d := p.Display()
 	for _, want := range []string{"#42", "✓", "☑"} {
-		if !contains(d, want) {
+		if !strings.Contains(d, want) {
 			t.Errorf("display %q missing %q", d, want)
 		}
 	}
@@ -179,14 +182,14 @@ func TestPRPassingApproved(t *testing.T) {
 
 func TestPRFailing(t *testing.T) {
 	p := PRStatus{Number: 10, State: "OPEN", Checks: "fail"}
-	if !contains(p.Display(), "✗") {
+	if !strings.Contains(p.Display(), "✗") {
 		t.Errorf("display %q missing ✗", p.Display())
 	}
 }
 
 func TestPRUnresolved(t *testing.T) {
 	p := PRStatus{Number: 10, State: "OPEN", UnresolvedComments: 3}
-	if !contains(p.Display(), "☐ 3") {
+	if !strings.Contains(p.Display(), "☐ 3") {
 		t.Errorf("display %q missing ☐ 3", p.Display())
 	}
 }
@@ -223,15 +226,3 @@ func TestAlphaSortOrder(t *testing.T) {
 	}
 }
 
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && searchStr(s, sub)
-}
-
-func searchStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}

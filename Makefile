@@ -1,4 +1,4 @@
-GO := /usr/local/go/bin/go
+GO := go
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: build install test lint clean release

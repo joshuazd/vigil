@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/jzinkduda/vigil/internal/config"
@@ -152,5 +153,9 @@ func ToggleDraft(ctx context.Context, cmd fetch.Commander, gitRoot, branch strin
 
 // OpenPRInBrowser opens a URL in the default browser.
 func OpenPRInBrowser(url string) error {
-	return exec.Command("open", url).Start()
+	opener := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		opener = "open"
+	}
+	return exec.Command(opener, url).Start()
 }
