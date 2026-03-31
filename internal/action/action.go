@@ -157,10 +157,11 @@ func ToggleDraft(ctx context.Context, cmd fetch.Commander, gitRoot, branch strin
 }
 
 // OpenPRInBrowser opens a URL in the default browser.
+// Uses Run() instead of Start() so the process completes before the caller exits.
 func OpenPRInBrowser(url string) error {
 	opener := "xdg-open"
 	if runtime.GOOS == "darwin" {
 		opener = "open"
 	}
-	return exec.Command(opener, url).Start()
+	return exec.Command(opener, url).Run()
 }

@@ -465,7 +465,10 @@ func (m Model) handleOpenPR() (tea.Model, tea.Cmd) {
 	if s == nil || s.PR == nil || s.PR.URL == "" {
 		return m, nil
 	}
-	_ = action.OpenPRInBrowser(s.PR.URL)
+	if err := action.OpenPRInBrowser(s.PR.URL); err != nil {
+		m.addNotification("open: "+err.Error(), "error")
+		return m, nil
+	}
 	if m.popupMode {
 		m.cancel()
 		return m, tea.Quit
