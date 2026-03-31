@@ -450,7 +450,7 @@ func (m Model) handleSelect() (tea.Model, tea.Cmd) {
 		m.cancel()
 		return m, tea.Sequence(
 			func() tea.Msg {
-				fetch.SwitchClient(context.Background(), m.cmd, s.Name)
+				_ = fetch.SwitchClient(context.Background(), m.cmd, s.Name)
 				return nil
 			},
 			tea.Quit,
@@ -468,7 +468,7 @@ func (m Model) handleOpenPR() (tea.Model, tea.Cmd) {
 	if s == nil || s.PR == nil || s.PR.URL == "" {
 		return m, nil
 	}
-	action.OpenPRInBrowser(s.PR.URL)
+	_ = action.OpenPRInBrowser(s.PR.URL)
 	if m.popupMode {
 		m.cancel()
 		return m, tea.Quit
@@ -645,7 +645,7 @@ func (m Model) handleGitUpdated(msg GitUpdatedMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Save cache
-	go cache.Save(cache.CachePath(), m.sessions)
+	go func() { _ = cache.Save(cache.CachePath(), m.sessions) }()
 
 	// Trigger initial PR poll once we have branches
 	var cmds []tea.Cmd
@@ -1052,7 +1052,7 @@ func (m *Model) checkStateTransitions() []tea.Cmd {
 			}
 			cfg := m.cfg
 			cmds = append(cmds, func() tea.Msg {
-				cfg.RunHook("notify", hookVars, "", 5_000_000_000)
+				_, _ = cfg.RunHook("notify", hookVars, "", 5_000_000_000)
 				return nil
 			})
 		}

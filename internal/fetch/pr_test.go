@@ -1,6 +1,9 @@
 package fetch
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestParseChecksPass(t *testing.T) {
 	rollup := []any{
@@ -45,7 +48,7 @@ func TestGetNWOSSH(t *testing.T) {
 	mock := NewMockCommander()
 	mock.OnArgs("git remote get-url origin", "git@github.com:owner/repo.git", nil)
 
-	nwo := getNWO(nil, mock, "/repo")
+	nwo := getNWO(context.Background(), mock, "/repo")
 	if nwo[0] != "owner" || nwo[1] != "repo" {
 		t.Errorf("got %v, want [owner repo]", nwo)
 	}
@@ -59,7 +62,7 @@ func TestGetNWOHTTPS(t *testing.T) {
 	mock := NewMockCommander()
 	mock.OnArgs("git remote get-url origin", "https://github.com/myorg/myrepo.git", nil)
 
-	nwo := getNWO(nil, mock, "/repo2")
+	nwo := getNWO(context.Background(), mock, "/repo2")
 	if nwo[0] != "myorg" || nwo[1] != "myrepo" {
 		t.Errorf("got %v, want [myorg myrepo]", nwo)
 	}

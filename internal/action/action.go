@@ -124,7 +124,7 @@ func RebaseAndPush(ctx context.Context, cmd fetch.Commander, gitRoot string) (st
 	// Rebase
 	if _, err := cmd.Run(ctx, gitRoot, "git", "rebase", "origin/"+main); err != nil {
 		// Abort on failure
-		cmd.Run(ctx, gitRoot, "git", "rebase", "--abort")
+		_, _ = cmd.Run(ctx, gitRoot, "git", "rebase", "--abort")
 		return "", fmt.Errorf("rebase failed: %w", err)
 	}
 

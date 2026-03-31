@@ -8,7 +8,7 @@ import (
 
 func TestMissingFileReturnsEmptyConfig(t *testing.T) {
 	cfg := Load("/nonexistent/path/config.toml")
-	if cfg.Settings != nil && len(cfg.Settings) > 0 {
+	if len(cfg.Settings) > 0 {
 		t.Error("expected empty settings")
 	}
 }
@@ -16,7 +16,7 @@ func TestMissingFileReturnsEmptyConfig(t *testing.T) {
 func TestValidTOMLParsed(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.toml")
-	os.WriteFile(p, []byte("[hooks]\nmerge = \"custom merge\"\n"), 0o644)
+	_ = os.WriteFile(p, []byte("[hooks]\nmerge = \"custom merge\"\n"), 0o644)
 	cfg := Load(p)
 	if cfg.GetHook("merge") != "custom merge" {
 		t.Errorf("got %q, want %q", cfg.GetHook("merge"), "custom merge")
@@ -26,9 +26,9 @@ func TestValidTOMLParsed(t *testing.T) {
 func TestInvalidTOMLReturnsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.toml")
-	os.WriteFile(p, []byte("not valid [[[ toml"), 0o644)
+	_ = os.WriteFile(p, []byte("not valid [[[ toml"), 0o644)
 	cfg := Load(p)
-	if cfg.Settings != nil && len(cfg.Settings) > 0 {
+	if len(cfg.Settings) > 0 {
 		t.Error("expected empty settings for invalid TOML")
 	}
 }

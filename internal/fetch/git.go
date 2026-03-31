@@ -76,14 +76,16 @@ func parsePorcelain(ctx context.Context, cmd Commander, gitRoot string) (modifie
 			deleted++
 		default:
 			x, y := xy[0], xy[1]
-			if x == 'R' || x == 'U' {
+			switch x {
+			case 'R', 'U':
 				modified++
-			} else if x == 'C' {
+			case 'C':
 				added++
 			}
-			if y == 'M' {
+			switch y {
+			case 'M':
 				modified++
-			} else if y == 'D' {
+			case 'D':
 				deleted++
 			}
 		}

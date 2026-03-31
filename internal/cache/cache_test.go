@@ -76,7 +76,7 @@ func TestStaleReturnsNil(t *testing.T) {
 		"timestamp": time.Now().Unix() - 60,
 		"sessions":  []any{},
 	})
-	os.WriteFile(p, data, 0o644)
+	_ = os.WriteFile(p, data, 0o644)
 	if Load(p, 30*time.Second) != nil {
 		t.Error("expected nil for stale cache")
 	}
@@ -114,7 +114,7 @@ func TestWrongVersionReturnsNil(t *testing.T) {
 func TestFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cache.json")
-	Save(p, []*session.Session{makeSession("test")})
+	_ = Save(p, []*session.Session{makeSession("test")})
 	info, err := os.Stat(p)
 	if err != nil {
 		t.Fatal(err)
