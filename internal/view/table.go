@@ -36,24 +36,13 @@ func RenderTable(sessions []*session.Session, cursor int, selected map[string]bo
 		b.WriteString(line)
 		rendered++
 	}
-	// Overlay notification on the last rendered row
-	if notification != "" && rendered > 0 {
-		// Find the last newline to replace the final row
-		content := b.String()
-		if idx := strings.LastIndex(content, "\n"); idx >= 0 {
-			b.Reset()
-			b.WriteString(content[:idx+1])
-			b.WriteString(lipgloss.NewStyle().Width(width).Render(notification))
-		} else {
-			// Only one row — replace it entirely
-			b.Reset()
-			b.WriteString(lipgloss.NewStyle().Width(width).Render(notification))
-		}
-	}
-	// Pad to fill allocated height
+	// Pad to fill allocated height, placing notification on the last row
 	for rendered < height {
 		b.WriteString("\n")
 		rendered++
+		if notification != "" && rendered == height {
+			b.WriteString(lipgloss.NewStyle().Width(width).Render(notification))
+		}
 	}
 	return b.String()
 }
