@@ -121,6 +121,15 @@ class SessionTable(DataTable):
 
         self._row_keys = new_keys
 
+    def select_session(self, name: str) -> bool:
+        """Move cursor to the row matching *name*. Returns True on success."""
+        try:
+            idx = self._row_keys.index(name)
+        except ValueError:
+            return False
+        self.move_cursor(row=idx)
+        return True
+
     def get_selected(self) -> Session | None:
         if not self._sessions:
             return None

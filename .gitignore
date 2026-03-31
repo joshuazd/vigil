@@ -1,6 +1,10 @@
+# Go
+/vigil
+dist/
+
+# Python (archived)
 __pycache__/
 *.egg-info/
-dist/
 build/
 .coverage
 .pytest_cache/

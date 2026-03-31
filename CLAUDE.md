@@ -4,38 +4,45 @@ TUI dashboard for tmux sessions. Monitors git status and GitHub PR state across 
 
 ## Architecture
 
-Python + Textual TUI. Replaces the bash-based `tmux-monitor`.
+Go + Bubble Tea TUI. Single static binary.
 
-- `app.py` — Textual app, compose, keybindings, worker orchestration, state tracking
-- `widgets.py` — SessionTable, DetailPanel (with modes), StatusBar, DispatchInput
-- `models.py` — Session, GitStatus, PRStatus, SessionState enum
-- `tmux.py` — Subprocess wrappers for tmux commands
-- `git_status.py` — Git status parsing (porcelain format, unpushed count)
-- `pr_status.py` — GitHub PR status via `gh` CLI and GraphQL (includes review thread content)
-- `config.py` — TOML config loading, hook template expansion and execution
-- `actions.py` — Merge, approve, cleanup, dispatch actions (via configurable hooks)
+- `main.go` — Entry point, dependency checks, tea.NewProgram
+- `internal/model/model.go` — Bubble Tea Model/Update/View, polling, state management
+- `internal/model/keys.go` — Keybindings
+- `internal/model/messages.go` — All tea.Msg types
+- `internal/session/` — Session, GitStatus, PRStatus structs, SessionState enum, sorting
+- `internal/view/` — Rendering: table, detail panel, status bar, styles, cell formatters
+- `internal/fetch/` — Subprocess wrappers: tmux, git, gh CLI, Commander interface
+- `internal/action/` — Merge, approve, cleanup, rebase, draft, dispatch actions
+- `internal/config/` — TOML config loading, hook template expansion and execution
+- `internal/cache/` — JSON session cache for instant startup
 
 ## Testing
 
 ```bash
-make test    # pytest
-make lint    # ruff
+make test    # go test ./...
+make lint    # golangci-lint
 ```
 
-## Installation
+## Build & Install
 
-Bash wrapper at `./vigil` (project root) auto-bootstraps a venv at `~/.local/share/vigil/venv`.
+```bash
+make build     # compile binary
+make install   # copy to ~/.local/bin/vigil
+```
 
 ## Key Conventions
 
-- Theme is `nord`
-- Command palette is disabled (`COMMANDS = set()`)
-- All instance vars initialized in `__init__`, not class-level mutable defaults
-- Subprocess errors raised, not swallowed
-- Background polling: git every 3s, PR every 30s
-- Detail panel has three modes (pane, PR description, review comments) via `DetailMode` enum
+- ANSI colors (adapts to terminal theme, no hardcoded hex)
+- No global mutable state — config/caches passed explicitly
+- Commander interface for subprocess calls (testable)
+- View is pure — pane capture in Update via tea.Cmd, not in View
+- context.Context for cancellation
+- Background polling: git every 3s, PR every 30s (parallel fetches)
+- Detail panel: three modes (pane, PR description, review comments) with auto-select by state
 - Session filtering by state, sorting by created/state/alpha, batch operations via multi-select
 - State transition notifications with configurable hooks
 - Stale branch warnings when rebase age exceeds threshold
 - Draft toggle (`D`) with batch support
 - Auto-cleanup merged sessions (configurable via `auto_cleanup` setting, off by default)
+- Cache interop with previous Python version (same JSON format)
