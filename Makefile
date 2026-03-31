@@ -1,25 +1,26 @@
-VENV := $(HOME)/.local/share/vigil/venv
-PYTHON := $(VENV)/bin/python
-VERSION := $(shell $(PYTHON) -c "import tomllib; print(tomllib.loads(open('pyproject.toml').read())['project']['version'])" 2>/dev/null || python3 -c "import tomllib; print(tomllib.loads(open('pyproject.toml').read())['project']['version'])")
-.PHONY: install test lint clean release
+GO := go
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-install:
-	./vigil --help > /dev/null
+.PHONY: build install test lint clean release
+
+build:
+	$(GO) build -ldflags "-X main.version=$(VERSION)" -o vigil .
+
+install: build
+	\cp vigil ~/.local/bin/vigil
 
 test:
-	$(PYTHON) -m pytest tests/ -v
+	$(GO) test ./...
 
 lint:
-	$(PYTHON) -m ruff check src/ tests/
-	$(PYTHON) -m mypy src/vigil/ --ignore-missing-imports
+	golangci-lint run
 
 clean:
-	rm -rf $(VENV)
+	rm -f vigil
 
-release: test lint
-	@echo "Releasing v$(VERSION)..."
+release: test
 	@if git rev-parse "v$(VERSION)" >/dev/null 2>&1; then \
-		echo "Error: tag v$(VERSION) already exists. Bump version in pyproject.toml first."; \
+		echo "Error: tag v$(VERSION) already exists."; \
 		exit 1; \
 	fi
 	git tag "v$(VERSION)"

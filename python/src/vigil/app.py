@@ -125,6 +125,7 @@ class VigilApp(App):
         self._selected_sessions: set[str] = set()
         self._sort_mode: SortMode = SortMode.CREATED
         self._last_manual_nav: float = 0.0
+        self._cursor_placed = False
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status-bar")
@@ -255,6 +256,12 @@ class VigilApp(App):
             self.sessions, active_filter=self._filter_state,
             active_sort=self._sort_mode,
         )
+        # On first load, jump cursor to the current tmux session
+        if not self._cursor_placed:
+            for s in event.sessions:
+                if s.is_current and table.select_session(s.name):
+                    self._cursor_placed = True
+                    break
         # Update detail panel for currently selected session
         selected = table.get_selected()
         detail = self.query_one("#detail-panel", DetailPanel)

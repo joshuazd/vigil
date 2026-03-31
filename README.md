@@ -10,17 +10,14 @@ Navigate sessions with vim-style keybindings, merge PRs, approve reviews, rebase
 brew install joshuazd/tap/vigil
 ```
 
-Or via PyPI:
-
-```bash
-pipx install vigil-tui
-```
+Or download a binary from [GitHub Releases](https://github.com/joshuazd/vigil/releases).
 
 Or from source:
 
 ```bash
 git clone https://github.com/joshuazd/vigil.git
-pipx install ./vigil
+cd vigil
+make install
 ```
 
 ## Prerequisites
@@ -74,8 +71,7 @@ All configuration is optional. Create `~/.config/vigil/config.toml` to customize
 git_interval = 3              # Git polling interval (seconds)
 pr_interval = 30              # PR polling interval (seconds)
 cache_ttl = 30                # Cache staleness threshold (seconds)
-log_level = "INFO"            # DEBUG, INFO, WARNING, ERROR
-git_workers = 8               # Max parallel git status threads
+git_workers = 8               # Max parallel git status fetches
 capture_window = ""           # Window name for detail panel (empty = first window)
 stale_threshold = 86400       # Rebase age warning threshold (seconds, default 24h)
 notifications_enabled = true  # Toast + hook on session state changes
@@ -115,15 +111,12 @@ Environment variables override TOML settings for quick testing:
 ```bash
 git clone https://github.com/joshuazd/vigil.git
 cd vigil
-make install   # bootstrap venv
+make build     # compile binary
 make test      # run tests
 make lint      # run linter
-make release   # tag, publish to PyPI, update Homebrew tap
+make install   # install to ~/.local/bin
+make release   # tag, create GitHub release, GoReleaser builds + publishes
 ```
-
-The `./vigil` bootstrap script auto-creates a virtualenv at `~/.local/share/vigil/venv` for quick local use without a manual install.
-
-Logs are written to `~/.local/share/vigil/vigil.log` (rotating, 2 MB max).
 
 ## License
 

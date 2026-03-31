@@ -17,10 +17,11 @@ def merge_pr(git_root: str, branch: str) -> str:
         return config.run_hook("merge", {"branch": branch, "git_root": git_root}, cwd=git_root)
     except subprocess.CalledProcessError as e:
         # gh pr merge --delete-branch exits 1 if branch deletion fails even though
-        # the merge itself succeeded.  Treat as success if stdout confirms the merge.
-        if e.stdout and "merged" in e.stdout.lower():
+        # the merge itself succeeded.  Treat as success if output confirms the merge.
+        combined = f"{e.stdout or ''} {e.stderr or ''}".lower()
+        if "merged" in combined or "pull request was merged" in combined:
             logger.warning("merge hook exited %d but merge succeeded: %s", e.returncode, e.stderr)
-            return str(e.stdout).strip()
+            return (e.stdout or e.stderr or "").strip()
         raise
 
 
@@ -125,7 +126,7 @@ def rebase_and_push(git_root: str) -> str:
     # Rebase
     result = subprocess.run(
         ["git", "-C", git_root, "rebase", f"origin/{main}"],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     if result.returncode != 0:
         # Abort if rebase somehow fails despite clean merge-tree
@@ -138,7 +139,7 @@ def rebase_and_push(git_root: str) -> str:
     # Force push
     result = subprocess.run(
         ["git", "-C", git_root, "push", "--force-with-lease"],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=120,
     )
     if result.returncode != 0:
         raise RuntimeError(f"push failed: {result.stderr.strip()}")
