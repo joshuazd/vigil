@@ -91,7 +91,7 @@ func TestMissingReturnsNil(t *testing.T) {
 func TestMalformedReturnsNil(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cache.json")
-	os.WriteFile(p, []byte("not json"), 0o644)
+	_ = os.WriteFile(p, []byte("not json"), 0o644)
 	if Load(p, 30*time.Second) != nil {
 		t.Error("expected nil for malformed JSON")
 	}
@@ -105,7 +105,7 @@ func TestWrongVersionReturnsNil(t *testing.T) {
 		"timestamp": time.Now().Unix(),
 		"sessions":  []any{},
 	})
-	os.WriteFile(p, data, 0o644)
+	_ = os.WriteFile(p, data, 0o644)
 	if Load(p, 30*time.Second) != nil {
 		t.Error("expected nil for wrong version")
 	}
