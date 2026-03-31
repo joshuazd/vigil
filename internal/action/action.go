@@ -43,7 +43,11 @@ func ApprovePR(ctx context.Context, cfg *config.Config, gitRoot, branch string) 
 }
 
 // CleanupSession kills a tmux session and optionally removes its worktree.
+// If the session is the current tmux session, it switches to the most recent
+// other session first so the user isn't kicked out of tmux.
 func CleanupSession(ctx context.Context, cfg *config.Config, cmd fetch.Commander, sessionName, worktreePath, branch, gitRoot string) (string, error) {
+	switchAwayIfCurrent(ctx, cmd, sessionName)
+
 	hook := cfg.GetHook("cleanup")
 	if hook != "" {
 		return cfg.RunHook("cleanup", map[string]string{
@@ -52,6 +56,20 @@ func CleanupSession(ctx context.Context, cfg *config.Config, cmd fetch.Commander
 		}, "", 30_000_000_000)
 	}
 	return builtinCleanup(ctx, cmd, sessionName, worktreePath, gitRoot)
+}
+
+// switchAwayIfCurrent switches the tmux client to the most recent other session
+// if sessionName is the current session. This prevents kill-session from
+// dropping the user out of tmux.
+func switchAwayIfCurrent(ctx context.Context, cmd fetch.Commander, sessionName string) {
+	current := fetch.CurrentSession(ctx, cmd)
+	if current == "" || current != sessionName {
+		return
+	}
+	fallback := fetch.LastSession(ctx, cmd, sessionName)
+	if fallback != "" {
+		_ = fetch.SwitchClient(ctx, cmd, fallback)
+	}
 }
 
 func builtinCleanup(ctx context.Context, cmd fetch.Commander, sessionName, worktreePath, gitRoot string) (string, error) {

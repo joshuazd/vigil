@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -965,6 +966,10 @@ func (m Model) batchApproveCmd() tea.Cmd {
 
 func (m Model) batchCleanupCmd() tea.Cmd {
 	sessions := m.batchSessions()
+	// Put current session last so switch-away finds a surviving session.
+	sort.SliceStable(sessions, func(i, j int) bool {
+		return !sessions[i].IsCurrent && sessions[j].IsCurrent
+	})
 	return func() tea.Msg {
 		ok, fail := 0, 0
 		for _, s := range sessions {
