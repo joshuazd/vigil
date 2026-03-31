@@ -234,31 +234,7 @@ func (m Model) View() string {
 	// Status bar
 	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width)
 
-	// Table
-	visible := m.visibleSessions()
-	tableHeight := m.tableHeight()
-	staleThreshold := m.cfg.GetSettingInt("stale_threshold")
-	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight)
-
-	// Detail panel
-	var detail string
-	if m.detailOpen {
-		detailHeight := m.detailHeight()
-		s := m.selectedSession()
-		mode := m.activeDetailMode()
-		detail = view.RenderDetail(s, mode, m.paneContent, staleThreshold, m.width, detailHeight)
-	}
-
-	// Footer
-	footer := m.renderFooter()
-
-	// Dispatch input
-	var dispatch string
-	if m.dispatchActive {
-		dispatch = m.dispatchInput.View()
-	}
-
-	// Notifications overlay
+	// Notification (overlaid on last table row)
 	var notif string
 	now := time.Now()
 	for i := len(m.notifications) - 1; i >= 0; i-- {
@@ -278,6 +254,30 @@ func (m Model) View() string {
 		}
 	}
 
+	// Table
+	visible := m.visibleSessions()
+	tableHeight := m.tableHeight()
+	staleThreshold := m.cfg.GetSettingInt("stale_threshold")
+	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight, notif)
+
+	// Detail panel
+	var detail string
+	if m.detailOpen {
+		detailHeight := m.detailHeight()
+		s := m.selectedSession()
+		mode := m.activeDetailMode()
+		detail = view.RenderDetail(s, mode, m.paneContent, staleThreshold, m.width, detailHeight)
+	}
+
+	// Footer
+	footer := m.renderFooter()
+
+	// Dispatch input
+	var dispatch string
+	if m.dispatchActive {
+		dispatch = m.dispatchInput.View()
+	}
+
 	// Compose — pin footer to bottom by padding with blank lines
 	parts := []string{statusBar, table}
 	if detail != "" {
@@ -285,9 +285,6 @@ func (m Model) View() string {
 	}
 	if dispatch != "" {
 		parts = append(parts, dispatch)
-	}
-	if notif != "" {
-		parts = append(parts, notif)
 	}
 
 	// Count lines used so far
