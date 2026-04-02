@@ -2,6 +2,9 @@
 /vigil
 dist/
 
+# Claude Code local settings
+.claude/settings.local.json
+
 # Python (archived)
 __pycache__/
 *.egg-info/
