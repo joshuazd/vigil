@@ -67,8 +67,18 @@ func CurrentSession(ctx context.Context, cmd Commander) string {
 	return strings.TrimSpace(out)
 }
 
-// LastSession returns the most recently active session other than current.
-func LastSession(ctx context.Context, cmd Commander, current string) string {
+// LastSession returns the tmux "last" session (switch-client -l target).
+func LastSession(ctx context.Context, cmd Commander) string {
+	out, err := cmd.Run(ctx, "", "tmux", "display-message", "-p", "#{client_last_session}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+// MostRecentSession returns the most recently active session other than exclude.
+// Used as a fallback when we need a guaranteed-live session to switch to.
+func MostRecentSession(ctx context.Context, cmd Commander, exclude string) string {
 	out, err := cmd.Run(ctx, "", "tmux", "list-sessions",
 		"-F", "#{session_activity}|#{session_name}")
 	if err != nil {
@@ -78,7 +88,7 @@ func LastSession(ctx context.Context, cmd Commander, current string) string {
 	sort.Sort(sort.Reverse(sort.StringSlice(lines)))
 	for _, line := range lines {
 		parts := strings.SplitN(line, "|", 2)
-		if len(parts) == 2 && parts[1] != current {
+		if len(parts) == 2 && parts[1] != exclude {
 			return parts[1]
 		}
 	}

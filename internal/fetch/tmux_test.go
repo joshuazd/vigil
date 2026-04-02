@@ -50,11 +50,11 @@ func TestCurrentSession(t *testing.T) {
 
 func TestLastSession(t *testing.T) {
 	mock := NewMockCommander()
-	mock.On("tmux", "200|other\n100|current", nil)
+	mock.On("tmux", "other-session", nil)
 
-	last := LastSession(context.Background(), mock, "current")
-	if last != "other" {
-		t.Errorf("got %q, want other", last)
+	last := LastSession(context.Background(), mock)
+	if last != "other-session" {
+		t.Errorf("got %q, want other-session", last)
 	}
 }
 

@@ -67,7 +67,7 @@ func switchAwayIfCurrent(ctx context.Context, cmd fetch.Commander, sessionName s
 	if current == "" || current != sessionName {
 		return
 	}
-	fallback := fetch.LastSession(ctx, cmd, sessionName)
+	fallback := fetch.MostRecentSession(ctx, cmd, sessionName)
 	if fallback != "" {
 		_ = fetch.SwitchClient(ctx, cmd, fallback)
 	}

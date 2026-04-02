@@ -755,8 +755,17 @@ func (m Model) fetchTmuxCmd() tea.Cmd {
 		if current == "" {
 			current = currentName
 		}
-		last := fetch.LastSession(ctx, m.cmd, current)
+		last := fetch.LastSession(ctx, m.cmd)
 		bells := fetch.BellFlags(ctx, m.cmd)
+
+		// Build name set to validate last session still exists
+		nameSet := make(map[string]bool, len(raw))
+		for _, r := range raw {
+			nameSet[r.Name] = true
+		}
+		if !nameSet[last] {
+			last = ""
+		}
 
 		sessions := make([]*session.Session, len(raw))
 		for i, r := range raw {
