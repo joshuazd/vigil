@@ -19,12 +19,17 @@ type ExecCommander struct {
 }
 
 func (c *ExecCommander) Run(ctx context.Context, dir string, name string, args ...string) (string, error) {
-	timeout := c.Timeout
-	if timeout == 0 {
-		timeout = 10 * time.Second
+	// If the caller already set a deadline on ctx, respect it.
+	// Otherwise apply the default timeout (10s).
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		timeout := c.Timeout
+		if timeout == 0 {
+			timeout = 10 * time.Second
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
@@ -128,31 +129,40 @@ func Dispatch(ctx context.Context, cfg *config.Config, input string) (string, er
 }
 
 // RebaseAndPush fetches, checks for conflicts, rebases, and force-pushes.
+// Uses per-step timeouts since network operations can exceed the default 10s.
 func RebaseAndPush(ctx context.Context, cmd fetch.Commander, gitRoot string) (string, error) {
 	main := fetch.DetectDefaultBranch(ctx, cmd, gitRoot)
 	if main == "" {
 		return "", fmt.Errorf("no default branch found")
 	}
 
-	// Fetch
-	if _, err := cmd.Run(ctx, gitRoot, "git", "fetch", "origin", main); err != nil {
+	// Fetch (network I/O — needs longer timeout)
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer fetchCancel()
+	if _, err := cmd.Run(fetchCtx, gitRoot, "git", "fetch", "origin", main); err != nil {
 		return "", fmt.Errorf("fetch failed: %w", err)
 	}
 
-	// Conflict check
+	// Conflict check (local only)
 	if _, err := cmd.Run(ctx, gitRoot, "git", "merge-tree", "--write-tree", "HEAD", "origin/"+main); err != nil {
 		return "", fmt.Errorf("conflicts detected — rebase skipped")
 	}
 
-	// Rebase
-	if _, err := cmd.Run(ctx, gitRoot, "git", "rebase", "origin/"+main); err != nil {
-		// Abort on failure
-		_, _ = cmd.Run(ctx, gitRoot, "git", "rebase", "--abort")
+	// Rebase (can be slow on large histories)
+	rebaseCtx, rebaseCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer rebaseCancel()
+	if _, err := cmd.Run(rebaseCtx, gitRoot, "git", "rebase", "origin/"+main); err != nil {
+		// Abort on failure — use a generous timeout so the repo isn't left dirty
+		abortCtx, abortCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer abortCancel()
+		_, _ = cmd.Run(abortCtx, gitRoot, "git", "rebase", "--abort")
 		return "", fmt.Errorf("rebase failed: %w", err)
 	}
 
-	// Force push
-	if _, err := cmd.Run(ctx, gitRoot, "git", "push", "--force-with-lease"); err != nil {
+	// Force push (network I/O)
+	pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer pushCancel()
+	if _, err := cmd.Run(pushCtx, gitRoot, "git", "push", "--force-with-lease"); err != nil {
 		return "", fmt.Errorf("push failed: %w", err)
 	}
 

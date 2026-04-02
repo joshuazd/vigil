@@ -859,7 +859,7 @@ func (m Model) mergeCmd(s *session.Session) tea.Cmd {
 	branch := s.Git.Branch
 	name := s.Name
 	return func() tea.Msg {
-		out, err := action.MergePR(m.ctx, m.cfg, m.cmd, gitRoot, branch)
+		out, err := action.MergePR(context.Background(), m.cfg, m.cmd, gitRoot, branch)
 		if err != nil {
 			return ActionResultMsg{Action: "merge", Session: name, OK: false, Message: err.Error()}
 		}
@@ -872,7 +872,7 @@ func (m Model) approveCmd(s *session.Session) tea.Cmd {
 	branch := s.Git.Branch
 	name := s.Name
 	return func() tea.Msg {
-		out, err := action.ApprovePR(m.ctx, m.cfg, gitRoot, branch)
+		out, err := action.ApprovePR(context.Background(), m.cfg, gitRoot, branch)
 		if err != nil {
 			return ActionResultMsg{Action: "approve", Session: name, OK: false, Message: err.Error()}
 		}
@@ -886,7 +886,7 @@ func (m Model) cleanupCmd(s *session.Session) tea.Cmd {
 	branch := s.Git.Branch
 	gitRoot := s.Git.GitRoot
 	return func() tea.Msg {
-		out, err := action.CleanupSession(m.ctx, m.cfg, m.cmd, name, path, branch, gitRoot)
+		out, err := action.CleanupSession(context.Background(), m.cfg, m.cmd, name, path, branch, gitRoot)
 		if err != nil {
 			return ActionResultMsg{Action: "cleanup", Session: name, OK: false, Message: err.Error()}
 		}
@@ -898,7 +898,7 @@ func (m Model) rebaseCmd(s *session.Session) tea.Cmd {
 	gitRoot := s.Git.GitRoot
 	name := s.Name
 	return func() tea.Msg {
-		out, err := action.RebaseAndPush(m.ctx, m.cmd, gitRoot)
+		out, err := action.RebaseAndPush(context.Background(), m.cmd, gitRoot)
 		if err != nil {
 			return ActionResultMsg{Action: "rebase", Session: name, OK: false, Message: err.Error()}
 		}
@@ -912,7 +912,7 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 	isDraft := s.PR.IsDraft
 	name := s.Name
 	return func() tea.Msg {
-		out, err := action.ToggleDraft(m.ctx, m.cmd, gitRoot, branch, isDraft)
+		out, err := action.ToggleDraft(context.Background(), m.cmd, gitRoot, branch, isDraft)
 		if err != nil {
 			return ActionResultMsg{Action: "draft", Session: name, OK: false, Message: err.Error()}
 		}
@@ -922,7 +922,7 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 
 func (m Model) dispatchCmd(input string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := action.Dispatch(m.ctx, m.cfg, input)
+		out, err := action.Dispatch(context.Background(), m.cfg, input)
 		if err != nil {
 			return ActionResultMsg{Action: "dispatch", Session: "", OK: false, Message: err.Error()}
 		}
