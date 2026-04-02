@@ -43,7 +43,7 @@ type Model struct {
 	paneContent     string
 
 	// Confirmation
-	confirmAction string
+	confirmAction ConfirmAction
 	confirmName   string
 
 	// Dispatch
@@ -410,7 +410,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Cancel):
-		m.confirmAction = ""
+		m.confirmAction = ConfirmNone
 		m.confirmName = ""
 		m.selected = make(map[string]bool)
 		m.dispatchActive = false
@@ -479,11 +479,11 @@ func (m Model) handleOpenPR() (tea.Model, tea.Cmd) {
 
 func (m Model) handleMerge() (tea.Model, tea.Cmd) {
 	if len(m.selected) > 0 {
-		if m.confirmAction == "batch-merge" {
-			m.confirmAction = ""
+		if m.confirmAction == ConfirmBatchMerge {
+			m.confirmAction = ConfirmNone
 			return m, m.batchMergeCmd()
 		}
-		m.confirmAction = "batch-merge"
+		m.confirmAction = ConfirmBatchMerge
 		m.addNotification(fmt.Sprintf("Press m again to merge %d PRs", len(m.selected)), "warning")
 		return m, nil
 	}
@@ -492,12 +492,12 @@ func (m Model) handleMerge() (tea.Model, tea.Cmd) {
 		m.addNotification("No PR for this session", "warning")
 		return m, nil
 	}
-	if m.confirmAction == "merge" && m.confirmName == s.Name {
-		m.confirmAction = ""
+	if m.confirmAction == ConfirmMerge && m.confirmName == s.Name {
+		m.confirmAction = ConfirmNone
 		m.confirmName = ""
 		return m, m.mergeCmd(s)
 	}
-	m.confirmAction = "merge"
+	m.confirmAction = ConfirmMerge
 	m.confirmName = s.Name
 	m.addNotification("Press m again to merge", "warning")
 	return m, nil
@@ -517,11 +517,11 @@ func (m Model) handleApprove() (tea.Model, tea.Cmd) {
 
 func (m Model) handleCleanup() (tea.Model, tea.Cmd) {
 	if len(m.selected) > 0 {
-		if m.confirmAction == "batch-cleanup" {
-			m.confirmAction = ""
+		if m.confirmAction == ConfirmBatchCleanup {
+			m.confirmAction = ConfirmNone
 			return m, m.batchCleanupCmd()
 		}
-		m.confirmAction = "batch-cleanup"
+		m.confirmAction = ConfirmBatchCleanup
 		m.addNotification(fmt.Sprintf("Press x again to cleanup %d sessions", len(m.selected)), "warning")
 		return m, nil
 	}
@@ -529,12 +529,12 @@ func (m Model) handleCleanup() (tea.Model, tea.Cmd) {
 	if s == nil {
 		return m, nil
 	}
-	if m.confirmAction == "cleanup" && m.confirmName == s.Name {
-		m.confirmAction = ""
+	if m.confirmAction == ConfirmCleanup && m.confirmName == s.Name {
+		m.confirmAction = ConfirmNone
 		m.confirmName = ""
 		return m, m.cleanupCmd(s)
 	}
-	m.confirmAction = "cleanup"
+	m.confirmAction = ConfirmCleanup
 	m.confirmName = s.Name
 	m.addNotification("Press x again to cleanup", "warning")
 	return m, nil
@@ -645,8 +645,10 @@ func (m Model) handleGitUpdated(msg GitUpdatedMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Save cache
-	go func() { _ = cache.Save(cache.CachePath(), m.sessions) }()
+	// Save cache (snapshot slice to avoid data race with main thread)
+	snap := make([]*session.Session, len(m.sessions))
+	copy(snap, m.sessions)
+	go func() { _ = cache.Save(cache.CachePath(), snap) }()
 
 	// Trigger initial PR poll once we have branches
 	var cmds []tea.Cmd

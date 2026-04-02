@@ -59,16 +59,17 @@ func ConfigPath() string {
 	return filepath.Join(home, ".config", "vigil", "config.toml")
 }
 
-// Load reads and parses the config file. Returns an empty Config on error.
-func Load(path string) *Config {
+// Load reads and parses the config file. Returns an empty Config and an error
+// if the file exists but cannot be parsed.
+func Load(path string) (*Config, error) {
 	cfg := &Config{}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return cfg
+		return cfg, nil
 	}
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
-		return &Config{}
+		return &Config{}, fmt.Errorf("config parse error: %w", err)
 	}
-	return cfg
+	return cfg, nil
 }
 
 // GetSetting returns a setting value. Priority: env var > TOML > default.

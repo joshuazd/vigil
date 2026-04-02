@@ -41,8 +41,9 @@ func (c *ExecCommander) Run(ctx context.Context, dir string, name string, args .
 
 // MockCommander records calls and returns preset responses.
 type MockCommander struct {
-	Calls    []MockCall
-	Handlers map[string]MockHandler
+	Calls        []MockCall
+	Handlers     map[string]MockHandler
+	HandlerFuncs map[string]func(ctx context.Context, dir string, args []string) (string, error)
 }
 
 type MockCall struct {
@@ -71,6 +72,22 @@ func (m *MockCommander) OnArgs(key string, output string, err error) {
 
 func (m *MockCommander) Run(ctx context.Context, dir string, name string, args ...string) (string, error) {
 	m.Calls = append(m.Calls, MockCall{Dir: dir, Name: name, Args: args})
+
+	// Try dynamic handler funcs first (same key resolution order)
+	if m.HandlerFuncs != nil {
+		fullKey := name + " " + strings.Join(args, " ")
+		if fn, ok := m.HandlerFuncs[fullKey]; ok {
+			return fn(ctx, dir, args)
+		}
+		if fn, ok := m.HandlerFuncs[name]; ok {
+			return fn(ctx, dir, args)
+		}
+		if len(args) > 0 {
+			if fn, ok := m.HandlerFuncs[name+" "+args[0]]; ok {
+				return fn(ctx, dir, args)
+			}
+		}
+	}
 
 	// Try exact match with all args
 	fullKey := name + " " + strings.Join(args, " ")

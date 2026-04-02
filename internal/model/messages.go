@@ -60,6 +60,17 @@ type NotifyMsg struct {
 // DetailRefreshMsg triggers a detail panel content refresh.
 type DetailRefreshMsg struct{}
 
+// ConfirmAction represents a pending destructive action awaiting confirmation.
+type ConfirmAction int
+
+const (
+	ConfirmNone ConfirmAction = iota
+	ConfirmMerge
+	ConfirmBatchMerge
+	ConfirmCleanup
+	ConfirmBatchCleanup
+)
+
 // Notification is a displayed toast message with expiry.
 type Notification struct {
 	Text     string

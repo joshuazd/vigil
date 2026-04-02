@@ -39,7 +39,10 @@ func main() {
 	}
 
 	// Load config
-	cfg := config.Load(config.ConfigPath())
+	cfg, err := config.Load(config.ConfigPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vigil: %v (using defaults)\n", err)
+	}
 
 	// Create commander
 	cmd := &fetch.ExecCommander{}
