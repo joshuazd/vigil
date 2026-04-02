@@ -31,17 +31,33 @@ func Indicator(s *session.Session, selected bool) string {
 }
 
 func IndicatorWithBg(s *session.Session, selected bool, bg *lipgloss.Color) string {
+	// Left char: selection or bell
+	left := " "
+	var leftStyle *lipgloss.Color
 	if selected {
-		return styledFg(BrightCyan, bg).Render(" ◆ ")
+		left = "◆"
+		leftStyle = &BrightCyan
+	} else if s.HasBell {
+		left = "*"
+		leftStyle = &BrightYellow
 	}
-	if s.HasBell {
-		return styledFg(BrightYellow, bg).Render(" * ")
-	}
-	txt := " " + s.Indicator() + " "
+
+	// Right char: current/last session
+	right := s.Indicator()
+
+	plain := lipgloss.NewStyle()
 	if bg != nil {
-		return lipgloss.NewStyle().Background(*bg).Render(txt)
+		plain = plain.Background(*bg)
 	}
-	return txt
+
+	var result string
+	if leftStyle != nil {
+		result = styledFg(*leftStyle, bg).Render(left)
+	} else {
+		result = plain.Render(left)
+	}
+	result += plain.Render(right + " ")
+	return result
 }
 
 // StateIndicator returns the colored state dot.

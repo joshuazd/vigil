@@ -410,11 +410,29 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Cancel):
-		m.confirmAction = ConfirmNone
-		m.confirmName = ""
-		m.selected = make(map[string]bool)
-		m.dispatchActive = false
-		return m, nil
+		if m.confirmAction != ConfirmNone || len(m.selected) > 0 || m.dispatchActive {
+			m.confirmAction = ConfirmNone
+			m.confirmName = ""
+			m.selected = make(map[string]bool)
+			m.dispatchActive = false
+			return m, nil
+		}
+		m.cancel()
+		return m, tea.Quit
+	}
+
+	// Number keys 0-9: switch to session by index
+	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+		r := msg.Runes[0]
+		if r >= '0' && r <= '9' {
+			idx := int(r - '0')
+			visible := m.visibleSessions()
+			if idx < len(visible) {
+				m.cursor = idx
+				return m.handleSelect()
+			}
+			return m, nil
+		}
 	}
 
 	return m, nil

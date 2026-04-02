@@ -10,6 +10,7 @@ import (
 
 const (
 	colIndicator = 3
+	colIndex     = 2
 	colState     = 2
 	colSession   = 52
 	colGit       = 18
@@ -29,7 +30,7 @@ func RenderTable(sessions []*session.Session, cursor int, selected map[string]bo
 			break
 		}
 		isCursor := i == cursor
-		line := renderRow(s, selected[s.Name], staleThreshold, width, isCursor)
+		line := renderRow(s, i, selected[s.Name], staleThreshold, width, isCursor)
 		if rendered > 0 {
 			b.WriteString("\n")
 		}
@@ -47,13 +48,14 @@ func RenderTable(sessions []*session.Session, cursor int, selected map[string]bo
 	return b.String()
 }
 
-func renderRow(s *session.Session, selected bool, staleThreshold int, width int, isCursor bool) string {
+func renderRow(s *session.Session, index int, selected bool, staleThreshold int, width int, isCursor bool) string {
 	var bg *lipgloss.Color
 	if isCursor {
 		bg = &BarBg
 	}
 
 	indicator := IndicatorWithBg(s, selected, bg)
+	idx := indexCol(index, bg)
 	dot := StateIndicatorWithBg(s, bg)
 	name := SessionName(s)
 	git := GitColWithBg(s, staleThreshold, bg)
@@ -64,13 +66,26 @@ func renderRow(s *session.Session, selected bool, staleThreshold int, width int,
 		name = p.Render(name) + p.Render(strings.Repeat(" ", max(0, colSession-len(name))))
 		git = git + p.Render(strings.Repeat(" ", max(0, colGit-visibleLen(git))))
 		sep := p.Render(" ")
-		line := strings.Join([]string{indicator, dot, name, git, pr}, sep)
+		line := strings.Join([]string{indicator, idx, dot, name, git, pr}, sep)
 		return CursorStyle.Width(width).Render(line)
 	}
 
 	name = padRight(name, colSession)
 	git = padRight(git, colGit)
-	return fmt.Sprintf("%s %s %s %s %s", indicator, dot, name, git, pr)
+	return fmt.Sprintf("%s %s %s %s %s %s", indicator, idx, dot, name, git, pr)
+}
+
+// indexCol renders the 0-9 index for quick-jump, or blank for 10+.
+func indexCol(index int, bg *lipgloss.Color) string {
+	s := " "
+	if index <= 9 {
+		s = fmt.Sprintf("%d", index)
+	}
+	style := lipgloss.NewStyle().Faint(true)
+	if bg != nil {
+		style = style.Background(*bg)
+	}
+	return style.Render(s)
 }
 
 // padRight pads a string with spaces to the given width.
