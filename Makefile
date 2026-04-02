@@ -18,11 +18,21 @@ lint:
 clean:
 	rm -f vigil
 
-release: test
-	@if git rev-parse "v$(VERSION)" >/dev/null 2>&1; then \
-		echo "Error: tag v$(VERSION) already exists."; \
+LATEST_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)
+MAJOR := $(word 1,$(subst ., ,$(LATEST_TAG:v%=%)))
+MINOR := $(word 2,$(subst ., ,$(LATEST_TAG:v%=%)))
+PATCH := $(word 3,$(subst ., ,$(LATEST_TAG:v%=%)))
+
+release-patch: v = $(MAJOR).$(MINOR).$(shell echo $$(($(PATCH)+1)))
+release-minor: v = $(MAJOR).$(shell echo $$(($(MINOR)+1))).0
+release-major: v = $(shell echo $$(($(MAJOR)+1))).0.0
+
+release release-patch release-minor release-major: lint test
+	@if [ -z "$(v)" ]; then echo "Usage: make release v=1.0.1"; exit 1; fi
+	@if git rev-parse "v$(v)" >/dev/null 2>&1; then \
+		echo "Error: tag v$(v) already exists."; \
 		exit 1; \
 	fi
-	git tag "v$(VERSION)"
-	git push origin "v$(VERSION)"
-	gh release create "v$(VERSION)" --title "v$(VERSION)" --generate-notes
+	git tag "v$(v)"
+	git push origin "v$(v)"
+	gh release create "v$(v)" --title "v$(v)" --generate-notes
