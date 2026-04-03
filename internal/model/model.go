@@ -212,12 +212,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			severity = "error"
 		}
 		m.addNotification(msg.Message, severity)
-		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd())
+		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd(), m.fetchPRsCmd(), delayedPRRefreshCmd())
 
 	case BatchResultMsg:
 		m.selected = make(map[string]bool)
 		m.addNotification(fmt.Sprintf("%s: %d ok, %d failed", msg.Action, msg.OK, msg.Failed), "info")
-		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd())
+		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd(), m.fetchPRsCmd(), delayedPRRefreshCmd())
+
+	case DelayedPRRefreshMsg:
+		return m, m.fetchPRsCmd()
 
 	case NotifyMsg:
 		m.addNotification(msg.Text, msg.Severity)
@@ -733,6 +736,12 @@ func tmuxTickCmd(interval time.Duration) tea.Cmd {
 func gitTickCmd(interval time.Duration) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return GitTickMsg(t)
+	})
+}
+
+func delayedPRRefreshCmd() tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return DelayedPRRefreshMsg{}
 	})
 }
 

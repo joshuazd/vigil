@@ -57,6 +57,10 @@ type NotifyMsg struct {
 	Severity string // "info", "warning", "error"
 }
 
+// DelayedPRRefreshMsg triggers a follow-up PR fetch after a short delay
+// to catch GitHub API updates that lag behind the action.
+type DelayedPRRefreshMsg struct{}
+
 // DetailRefreshMsg triggers a detail panel content refresh.
 type DetailRefreshMsg struct{}
 
