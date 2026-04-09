@@ -194,6 +194,27 @@ func TestPRUnresolved(t *testing.T) {
 	}
 }
 
+func TestPRNoReviewersWarning(t *testing.T) {
+	p := PRStatus{Number: 5, State: "OPEN", Checks: "pass", ReviewersRequested: 0}
+	if !strings.Contains(p.Display(), "⚠") {
+		t.Errorf("display %q missing ⚠ for no reviewers", p.Display())
+	}
+}
+
+func TestPRWithReviewersNoWarning(t *testing.T) {
+	p := PRStatus{Number: 5, State: "OPEN", Checks: "pass", ReviewersRequested: 1}
+	if strings.Contains(p.Display(), "⚠") {
+		t.Errorf("display %q should not have ⚠ when reviewers requested", p.Display())
+	}
+}
+
+func TestPRNoReviewersButApprovedNoWarning(t *testing.T) {
+	p := PRStatus{Number: 5, State: "OPEN", Checks: "pass", ReviewDecision: "APPROVED", ReviewersRequested: 0}
+	if strings.Contains(p.Display(), "⚠") {
+		t.Errorf("display %q should not have ⚠ when already approved", p.Display())
+	}
+}
+
 // --- Sort tests ---
 
 func TestStateSortOrder(t *testing.T) {

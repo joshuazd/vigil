@@ -211,6 +211,9 @@ func ColorizePRWithBg(pr *session.PRStatus, bg *lipgloss.Color) string {
 		if pr.UnresolvedComments > 0 {
 			b.WriteString(sp + styledFg(BrightYellow, bg).Render(fmt.Sprintf("☐ %d", pr.UnresolvedComments)))
 		}
+		if !pr.IsDraft && pr.ReviewersRequested == 0 && pr.ReviewDecision == "" && pr.Approvals == 0 {
+			b.WriteString(sp + styledFg(BrightYellow, bg).Render("⚠"))
+		}
 		if pr.HasConflicts {
 			b.WriteString(sp + styledFg(BrightRed, bg).Render("⚡"))
 		}

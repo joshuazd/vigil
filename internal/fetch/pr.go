@@ -35,7 +35,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
 // FetchPRStatus fetches PR status for a branch via gh CLI.
 func FetchPRStatus(ctx context.Context, cmd Commander, branch, gitRoot string) *session.PRStatus {
 	out, err := runWithRetry(ctx, cmd, gitRoot, "gh", "pr", "view", branch,
-		"--json", "number,state,isDraft,url,title,body,statusCheckRollup,reviewDecision,latestReviews,mergeable")
+		"--json", "number,state,isDraft,url,title,body,statusCheckRollup,reviewDecision,latestReviews,mergeable,reviewRequests")
 	if err != nil {
 		return nil
 	}
@@ -65,6 +65,8 @@ func FetchPRStatus(ctx context.Context, cmd Commander, branch, gitRoot string) *
 		}
 	}
 
+	reviewersRequested := len(jsonArray(data, "reviewRequests"))
+
 	var unresolved int
 	var reviewComments []session.ReviewComment
 	if state == "OPEN" {
@@ -81,6 +83,7 @@ func FetchPRStatus(ctx context.Context, cmd Commander, branch, gitRoot string) *
 		Approvals:          approvals,
 		UnresolvedComments: unresolved,
 		HasConflicts:       hasConflicts,
+		ReviewersRequested: reviewersRequested,
 		Title:              title,
 		Body:               body,
 		ReviewComments:     reviewComments,

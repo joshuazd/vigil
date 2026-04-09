@@ -76,6 +76,7 @@ type PRStatus struct {
 	Approvals          int             `json:"approvals"`
 	UnresolvedComments int             `json:"unresolved_comments"`
 	HasConflicts       bool            `json:"has_conflicts"`
+	ReviewersRequested int             `json:"reviewers_requested"`
 	Title              string          `json:"title"`
 	Body               string          `json:"body"`
 	ReviewComments     []ReviewComment `json:"review_comments"`
@@ -105,6 +106,9 @@ func (p *PRStatus) Display() string {
 		}
 		if p.UnresolvedComments > 0 {
 			parts = append(parts, "☐ "+strconv.Itoa(p.UnresolvedComments))
+		}
+		if !p.IsDraft && p.ReviewersRequested == 0 && p.ReviewDecision == "" && p.Approvals == 0 {
+			parts = append(parts, "⚠")
 		}
 	}
 	return strings.Join(parts, " ")
