@@ -50,7 +50,6 @@ func stripANSI(s string) string {
 func lastNonEmptyLine(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	for i := len(s); i > 0; {
-		// find the previous newline
 		j := strings.LastIndex(s[:i], "\n")
 		line := strings.TrimSpace(s[j+1 : i])
 		if line != "" {
