@@ -38,11 +38,12 @@ func RenderTable(sessions []*session.Session, cursor int, selected map[string]bo
 		rendered++
 	}
 	// Pad to fill allocated height, placing notification on the last row
+	clamped := clampNotification(notification, width)
 	for rendered < height {
 		b.WriteString("\n")
 		rendered++
-		if notification != "" && rendered == height {
-			b.WriteString(lipgloss.NewStyle().Width(width).Render(notification))
+		if clamped != "" && rendered == height {
+			b.WriteString(lipgloss.NewStyle().Width(width).Render(clamped))
 		}
 	}
 	return b.String()
