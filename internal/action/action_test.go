@@ -296,37 +296,49 @@ func TestToggleDraft_ReadyToDraft(t *testing.T) {
 
 func TestDispatch_EmptyInput(t *testing.T) {
 	cfg := &config.Config{}
-	_, err := Dispatch(context.Background(), cfg, "")
+	out, err := Dispatch(context.Background(), cfg, "")
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("expected empty error, got: %v", err)
+	}
+	if !strings.HasPrefix(out, "dispatch failed: ") {
+		t.Errorf("expected 'dispatch failed: ' prefix, got %q", out)
 	}
 }
 
 func TestDispatch_TooLong(t *testing.T) {
 	cfg := &config.Config{}
-	_, err := Dispatch(context.Background(), cfg, strings.Repeat("a", 501))
+	out, err := Dispatch(context.Background(), cfg, strings.Repeat("a", 501))
 	if err == nil || !strings.Contains(err.Error(), "too long") {
 		t.Errorf("expected too long error, got: %v", err)
+	}
+	if !strings.HasPrefix(out, "dispatch failed: ") {
+		t.Errorf("expected 'dispatch failed: ' prefix, got %q", out)
 	}
 }
 
 func TestDispatch_ControlCharacters(t *testing.T) {
 	cfg := &config.Config{}
-	_, err := Dispatch(context.Background(), cfg, "hello\x01world")
+	out, err := Dispatch(context.Background(), cfg, "hello\x01world")
 	if err == nil || !strings.Contains(err.Error(), "control characters") {
 		t.Errorf("expected control characters error, got: %v", err)
+	}
+	if !strings.HasPrefix(out, "dispatch failed: ") {
+		t.Errorf("expected 'dispatch failed: ' prefix, got %q", out)
 	}
 }
 
 func TestDispatch_NoHookConfigured(t *testing.T) {
 	cfg := &config.Config{}
-	_, err := Dispatch(context.Background(), cfg, "valid input")
+	out, err := Dispatch(context.Background(), cfg, "valid input")
 	if err == nil {
 		t.Error("expected error for unconfigured dispatch hook")
 	}
 	var notConfigured *config.HookNotConfigured
 	if !strings.Contains(err.Error(), "not configured") {
 		t.Errorf("expected HookNotConfigured error, got: %v", err)
+	}
+	if !strings.HasPrefix(out, "dispatch failed: ") {
+		t.Errorf("expected 'dispatch failed: ' prefix, got %q", out)
 	}
 	_ = notConfigured
 }

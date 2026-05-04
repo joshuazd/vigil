@@ -124,14 +124,17 @@ func isWorktree(path string) bool {
 func Dispatch(ctx context.Context, cfg *config.Config, input string) (string, error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
-		return "", fmt.Errorf("dispatch input must not be empty")
+		err := fmt.Errorf("dispatch input must not be empty")
+		return FailureMessage("dispatch", "", err), err
 	}
 	if len(input) > 500 {
-		return "", fmt.Errorf("dispatch input too long")
+		err := fmt.Errorf("dispatch input too long")
+		return FailureMessage("dispatch", "", err), err
 	}
 	for _, c := range input {
 		if c < ' ' && c != '\t' && c != '\n' {
-			return "", fmt.Errorf("dispatch input contains control characters")
+			err := fmt.Errorf("dispatch input contains control characters")
+			return FailureMessage("dispatch", "", err), err
 		}
 	}
 	out, err := cfg.RunHook("dispatch", map[string]string{"input": input}, "", 15_000_000_000)
