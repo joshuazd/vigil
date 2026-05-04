@@ -899,7 +899,7 @@ func (m Model) mergeCmd(s *session.Session) tea.Cmd {
 	return func() tea.Msg {
 		out, err := action.MergePR(context.Background(), m.cfg, m.cmd, gitRoot, branch)
 		if err != nil {
-			return ActionResultMsg{Action: "merge", Session: name, OK: false, Message: err.Error()}
+			return ActionResultMsg{Action: "merge", Session: name, OK: false, Message: out}
 		}
 		return ActionResultMsg{Action: "merge", Session: name, OK: true, Message: out}
 	}
@@ -912,7 +912,7 @@ func (m Model) approveCmd(s *session.Session) tea.Cmd {
 	return func() tea.Msg {
 		out, err := action.ApprovePR(context.Background(), m.cfg, gitRoot, branch)
 		if err != nil {
-			return ActionResultMsg{Action: "approve", Session: name, OK: false, Message: err.Error()}
+			return ActionResultMsg{Action: "approve", Session: name, OK: false, Message: out}
 		}
 		return ActionResultMsg{Action: "approve", Session: name, OK: true, Message: out}
 	}
@@ -926,7 +926,7 @@ func (m Model) cleanupCmd(s *session.Session) tea.Cmd {
 	return func() tea.Msg {
 		out, err := action.CleanupSession(context.Background(), m.cfg, m.cmd, name, path, branch, gitRoot)
 		if err != nil {
-			return ActionResultMsg{Action: "cleanup", Session: name, OK: false, Message: err.Error()}
+			return ActionResultMsg{Action: "cleanup", Session: name, OK: false, Message: out}
 		}
 		return ActionResultMsg{Action: "cleanup", Session: name, OK: true, Message: out}
 	}
@@ -938,7 +938,7 @@ func (m Model) rebaseCmd(s *session.Session) tea.Cmd {
 	return func() tea.Msg {
 		out, err := action.RebaseAndPush(context.Background(), m.cmd, gitRoot)
 		if err != nil {
-			return ActionResultMsg{Action: "rebase", Session: name, OK: false, Message: err.Error()}
+			return ActionResultMsg{Action: "rebase", Session: name, OK: false, Message: out}
 		}
 		return ActionResultMsg{Action: "rebase", Session: name, OK: true, Message: out}
 	}
@@ -952,7 +952,7 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 	return func() tea.Msg {
 		out, err := action.ToggleDraft(context.Background(), m.cmd, gitRoot, branch, isDraft)
 		if err != nil {
-			return ActionResultMsg{Action: "draft", Session: name, OK: false, Message: err.Error()}
+			return ActionResultMsg{Action: "draft", Session: name, OK: false, Message: out}
 		}
 		return ActionResultMsg{Action: "draft", Session: name, OK: true, Message: out}
 	}
@@ -962,7 +962,7 @@ func (m Model) dispatchCmd(input string) tea.Cmd {
 	return func() tea.Msg {
 		out, err := action.Dispatch(context.Background(), m.cfg, input)
 		if err != nil {
-			return ActionResultMsg{Action: "dispatch", Session: "", OK: false, Message: err.Error()}
+			return ActionResultMsg{Action: "dispatch", Session: "", OK: false, Message: out}
 		}
 		return ActionResultMsg{Action: "dispatch", Session: "", OK: true, Message: out}
 	}
@@ -1106,7 +1106,7 @@ func (m *Model) checkStateTransitions() []tea.Cmd {
 			cmds = append(cmds, func() tea.Msg {
 				out, err := action.CleanupSession(context.Background(), m.cfg, m.cmd, s.Name, s.PanePath, s.Git.Branch, s.Git.GitRoot)
 				if err != nil {
-					return ActionResultMsg{Action: "auto-cleanup", Session: s.Name, OK: false, Message: err.Error()}
+					return ActionResultMsg{Action: "auto-cleanup", Session: s.Name, OK: false, Message: out}
 				}
 				return ActionResultMsg{Action: "auto-cleanup", Session: s.Name, OK: true, Message: out}
 			})
