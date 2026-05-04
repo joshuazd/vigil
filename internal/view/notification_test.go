@@ -71,3 +71,10 @@ func TestClampNotification_ZeroWidth(t *testing.T) {
 		t.Errorf("got %q, want empty for width 0", got)
 	}
 }
+
+func TestClampNotification_WidthOne(t *testing.T) {
+	got := clampNotification("hello", 1)
+	if got != "…" {
+		t.Errorf("got %q, want %q", got, "…")
+	}
+}
