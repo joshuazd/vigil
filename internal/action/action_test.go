@@ -19,8 +19,8 @@ func TestMergePR_HookSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out != "done" {
-		t.Errorf("got %q, want 'done'", out)
+	if out != "merged" {
+		t.Errorf("got %q, want %q", out, "merged")
 	}
 }
 
@@ -34,8 +34,8 @@ func TestMergePR_HookFailsStateMerged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success when PR is merged despite hook failure, got: %v", err)
 	}
-	if !strings.Contains(out, "merged") {
-		t.Errorf("expected output to mention merged, got %q", out)
+	if out != "merged (branch cleanup may have failed)" {
+		t.Errorf("got %q, want %q", out, "merged (branch cleanup may have failed)")
 	}
 }
 
@@ -45,9 +45,15 @@ func TestMergePR_HookFailsPRNotMerged(t *testing.T) {
 	cmd := fetch.NewMockCommander()
 	cmd.OnArgs("gh pr view feat --json state --jq .state", "OPEN", nil)
 
-	_, err := MergePR(context.Background(), cfg, cmd, dir, "feat")
+	out, err := MergePR(context.Background(), cfg, cmd, dir, "feat")
 	if err == nil {
-		t.Error("expected error when hook fails and PR is not merged")
+		t.Fatal("expected error when hook fails and PR is not merged")
+	}
+	if !strings.HasPrefix(out, "merge failed: ") {
+		t.Errorf("expected 'merge failed: ' prefix, got %q", out)
+	}
+	if strings.Contains(out, "\n") {
+		t.Errorf("message must be single-line, got %q", out)
 	}
 }
 
@@ -106,6 +112,26 @@ func TestCleanupSession_SkipsWorktreeForNonWorktree(t *testing.T) {
 	_ = out
 }
 
+func TestCleanupSession_HookWithMultiLineOutput(t *testing.T) {
+	// The user's real cleanup hook emits ~9 colored info lines.
+	// Verify we don't leak that into the notification message.
+	multiLine := "\x1b[32m>>> killing session\x1b[0m\n" +
+		"\x1b[32m>>> removing worktree\x1b[0m\n" +
+		"\x1b[32m>>> Cleanup complete!\x1b[0m\n"
+	hook := "printf '%s' '" + multiLine + "'"
+	cfg := &config.Config{Hooks: map[string]any{"cleanup": hook}}
+	cmd := fetch.NewMockCommander()
+	cmd.On("tmux", "", nil) // CurrentSession returns ""
+
+	out, err := CleanupSession(context.Background(), cfg, cmd, "s", "/p", "feat", "/repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "cleaned up" {
+		t.Errorf("expected 'cleaned up' on success, got %q", out)
+	}
+}
+
 // --- RebaseAndPush ---
 
 func TestRebaseAndPush_HappyPath(t *testing.T) {
@@ -140,12 +166,15 @@ func TestRebaseAndPush_NoDefaultBranch(t *testing.T) {
 	}
 
 	// Use a unique path to avoid sync.Map cache hits from other tests
-	_, err := RebaseAndPush(context.Background(), cmd, t.TempDir())
+	out, err := RebaseAndPush(context.Background(), cmd, t.TempDir())
 	if err == nil {
 		t.Fatal("expected error for no default branch")
 	}
 	if !strings.Contains(err.Error(), "no default branch") {
 		t.Errorf("expected 'no default branch' error, got: %v", err)
+	}
+	if !strings.HasPrefix(out, "rebase failed: ") {
+		t.Errorf("expected 'rebase failed: ' prefix, got %q", out)
 	}
 }
 
@@ -158,9 +187,12 @@ func TestRebaseAndPush_FetchFails(t *testing.T) {
 		},
 	}
 
-	_, err := RebaseAndPush(context.Background(), cmd, "/repo")
+	out, err := RebaseAndPush(context.Background(), cmd, "/repo")
 	if err == nil || !strings.Contains(err.Error(), "fetch failed") {
 		t.Errorf("expected 'fetch failed' error, got: %v", err)
+	}
+	if !strings.HasPrefix(out, "rebase failed: ") {
+		t.Errorf("expected 'rebase failed: ' prefix, got %q", out)
 	}
 }
 
@@ -174,9 +206,12 @@ func TestRebaseAndPush_ConflictsDetected(t *testing.T) {
 		},
 	}
 
-	_, err := RebaseAndPush(context.Background(), cmd, "/repo")
+	out, err := RebaseAndPush(context.Background(), cmd, "/repo")
 	if err == nil || !strings.Contains(err.Error(), "conflicts detected") {
 		t.Errorf("expected 'conflicts detected' error, got: %v", err)
+	}
+	if !strings.HasPrefix(out, "rebase failed: ") {
+		t.Errorf("expected 'rebase failed: ' prefix, got %q", out)
 	}
 }
 
@@ -196,12 +231,15 @@ func TestRebaseAndPush_RebaseFailsAbortsRebase(t *testing.T) {
 		},
 	}
 
-	_, err := RebaseAndPush(context.Background(), cmd, "/repo")
+	out, err := RebaseAndPush(context.Background(), cmd, "/repo")
 	if err == nil || !strings.Contains(err.Error(), "rebase failed") {
 		t.Errorf("expected 'rebase failed' error, got: %v", err)
 	}
 	if rebaseCalls < 2 {
 		t.Error("expected rebase --abort to be called after failure")
+	}
+	if !strings.HasPrefix(out, "rebase failed: ") {
+		t.Errorf("expected 'rebase failed: ' prefix, got %q", out)
 	}
 }
 
@@ -217,9 +255,12 @@ func TestRebaseAndPush_PushFails(t *testing.T) {
 		},
 	}
 
-	_, err := RebaseAndPush(context.Background(), cmd, "/repo")
+	out, err := RebaseAndPush(context.Background(), cmd, "/repo")
 	if err == nil || !strings.Contains(err.Error(), "push failed") {
 		t.Errorf("expected 'push failed' error, got: %v", err)
+	}
+	if !strings.HasPrefix(out, "rebase failed: ") {
+		t.Errorf("expected 'rebase failed: ' prefix, got %q", out)
 	}
 }
 

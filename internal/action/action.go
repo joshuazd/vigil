@@ -24,23 +24,27 @@ func MergePR(ctx context.Context, cfg *config.Config, cmd fetch.Commander, gitRo
 		// even though merge itself succeeded — verify PR state
 		combined := strings.ToLower(out + " " + err.Error())
 		if strings.Contains(combined, "merged") {
-			return out, nil
+			return SuccessMessage("merge"), nil
 		}
 		// Check if the PR was actually merged despite the error
 		state, stateErr := cmd.Run(ctx, gitRoot, "gh", "pr", "view", branch, "--json", "state", "--jq", ".state")
 		if stateErr == nil && strings.TrimSpace(state) == "MERGED" {
 			return "merged (branch cleanup may have failed)", nil
 		}
-		return out, err
+		return FailureMessage("merge", out, err), err
 	}
-	return out, nil
+	return SuccessMessage("merge"), nil
 }
 
 // ApprovePR approves the PR for the given branch.
 func ApprovePR(ctx context.Context, cfg *config.Config, gitRoot, branch string) (string, error) {
-	return cfg.RunHook("approve", map[string]string{
+	out, err := cfg.RunHook("approve", map[string]string{
 		"branch": branch, "git_root": gitRoot,
 	}, gitRoot, 30_000_000_000)
+	if err != nil {
+		return FailureMessage("approve", out, err), err
+	}
+	return SuccessMessage("approve"), nil
 }
 
 // CleanupSession kills a tmux session and optionally removes its worktree.
@@ -51,10 +55,14 @@ func CleanupSession(ctx context.Context, cfg *config.Config, cmd fetch.Commander
 
 	hook := cfg.GetHook("cleanup")
 	if hook != "" {
-		return cfg.RunHook("cleanup", map[string]string{
+		out, err := cfg.RunHook("cleanup", map[string]string{
 			"session": sessionName, "path": worktreePath,
 			"branch": branch, "git_root": gitRoot,
 		}, "", 30_000_000_000)
+		if err != nil {
+			return FailureMessage("cleanup", out, err), err
+		}
+		return SuccessMessage("cleanup"), nil
 	}
 	return builtinCleanup(ctx, cmd, sessionName, worktreePath, gitRoot)
 }
@@ -92,7 +100,8 @@ func builtinCleanup(ctx context.Context, cmd fetch.Commander, sessionName, workt
 
 		_, err := cmd.Run(ctx, gitRoot, "git", "worktree", "remove", "--force", worktreePath)
 		if err != nil {
-			return strings.Join(messages, "; "), fmt.Errorf("worktree remove failed: %w", err)
+			wrapped := fmt.Errorf("worktree remove failed: %w", err)
+			return FailureMessage("cleanup", strings.Join(messages, "; "), wrapped), wrapped
 		}
 		messages = append(messages, "removed worktree "+worktreePath)
 	}
@@ -125,7 +134,11 @@ func Dispatch(ctx context.Context, cfg *config.Config, input string) (string, er
 			return "", fmt.Errorf("dispatch input contains control characters")
 		}
 	}
-	return cfg.RunHook("dispatch", map[string]string{"input": input}, "", 15_000_000_000)
+	out, err := cfg.RunHook("dispatch", map[string]string{"input": input}, "", 15_000_000_000)
+	if err != nil {
+		return FailureMessage("dispatch", out, err), err
+	}
+	return SuccessMessage("dispatch"), nil
 }
 
 // RebaseAndPush fetches, checks for conflicts, rebases, and force-pushes.
@@ -133,19 +146,22 @@ func Dispatch(ctx context.Context, cfg *config.Config, input string) (string, er
 func RebaseAndPush(ctx context.Context, cmd fetch.Commander, gitRoot string) (string, error) {
 	main := fetch.DetectDefaultBranch(ctx, cmd, gitRoot)
 	if main == "" {
-		return "", fmt.Errorf("no default branch found")
+		err := fmt.Errorf("no default branch found")
+		return FailureMessage("rebase", "", err), err
 	}
 
 	// Fetch (network I/O — needs longer timeout)
 	fetchCtx, fetchCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer fetchCancel()
 	if _, err := cmd.Run(fetchCtx, gitRoot, "git", "fetch", "origin", main); err != nil {
-		return "", fmt.Errorf("fetch failed: %w", err)
+		wrapped := fmt.Errorf("fetch failed: %w", err)
+		return FailureMessage("rebase", "", wrapped), wrapped
 	}
 
 	// Conflict check (local only)
 	if _, err := cmd.Run(ctx, gitRoot, "git", "merge-tree", "--write-tree", "HEAD", "origin/"+main); err != nil {
-		return "", fmt.Errorf("conflicts detected — rebase skipped")
+		wrapped := fmt.Errorf("conflicts detected — rebase skipped")
+		return FailureMessage("rebase", "", wrapped), wrapped
 	}
 
 	// Rebase (can be slow on large histories)
@@ -156,17 +172,19 @@ func RebaseAndPush(ctx context.Context, cmd fetch.Commander, gitRoot string) (st
 		abortCtx, abortCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer abortCancel()
 		_, _ = cmd.Run(abortCtx, gitRoot, "git", "rebase", "--abort")
-		return "", fmt.Errorf("rebase failed: %w", err)
+		wrapped := fmt.Errorf("rebase failed: %w", err)
+		return FailureMessage("rebase", "", wrapped), wrapped
 	}
 
 	// Force push (network I/O)
 	pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer pushCancel()
 	if _, err := cmd.Run(pushCtx, gitRoot, "git", "push", "--force-with-lease"); err != nil {
-		return "", fmt.Errorf("push failed: %w", err)
+		wrapped := fmt.Errorf("push failed: %w", err)
+		return FailureMessage("rebase", "", wrapped), wrapped
 	}
 
-	return "rebased and pushed", nil
+	return SuccessMessage("rebase"), nil
 }
 
 // ToggleDraft toggles PR draft status.
@@ -176,7 +194,8 @@ func ToggleDraft(ctx context.Context, cmd fetch.Commander, gitRoot, branch strin
 		args = append(args, "--undo")
 	}
 	if _, err := cmd.Run(ctx, gitRoot, "gh", args...); err != nil {
-		return "", fmt.Errorf("toggle draft failed: %w", err)
+		wrapped := fmt.Errorf("toggle draft failed: %w", err)
+		return FailureMessage("draft", "", wrapped), wrapped
 	}
 	if isDraft {
 		return "marked ready", nil
