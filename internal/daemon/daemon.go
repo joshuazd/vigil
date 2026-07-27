@@ -3,10 +3,13 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jzinkduda/vigil/internal/cache"
@@ -25,10 +28,15 @@ type Server struct {
 	Interval   time.Duration
 	SocketPath string
 	CachePath  string
+	Log        *log.Logger
 
 	mu      sync.Mutex
 	clients map[net.Conn]struct{}
 	latest  *protocol.Snapshot
+
+	// pollFailing is only read and written from poll, which Run only ever
+	// calls from its own goroutine, so it needs no mutex.
+	pollFailing bool
 }
 
 func New(cfg *config.Config, cmd fetch.Commander) *Server {
@@ -41,6 +49,7 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 		Interval:   interval,
 		SocketPath: protocol.SocketPath(),
 		CachePath:  cache.CachePath(),
+		Log:        log.New(os.Stderr, "vigil: ", log.LstdFlags),
 	}
 }
 
@@ -54,6 +63,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	listener, err := net.Listen("unix", s.SocketPath)
 	if err != nil {
+		if errors.Is(err, syscall.EADDRINUSE) {
+			return ErrAlreadyRunning
+		}
 		return err
 	}
 	defer func() {
@@ -83,8 +95,12 @@ func (s *Server) Run(ctx context.Context) error {
 // clearStaleSocket removes a socket file left behind by a dead daemon.
 // A successful dial means a live daemon owns it.
 func (s *Server) clearStaleSocket() error {
-	if _, err := os.Stat(s.SocketPath); err != nil {
+	info, err := os.Stat(s.SocketPath)
+	if err != nil {
 		return nil
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("%s exists and is not a socket, refusing to remove it", s.SocketPath)
 	}
 	conn, err := net.DialTimeout("unix", s.SocketPath, 200*time.Millisecond)
 	if err == nil {
@@ -118,7 +134,15 @@ func (s *Server) accept(ctx context.Context, listener net.Listener) {
 func (s *Server) poll(ctx context.Context) {
 	sessions, err := s.Collector.Snapshot(ctx)
 	if err != nil {
+		if !s.pollFailing {
+			s.pollFailing = true
+			s.logf("poll failed: %v", err)
+		}
 		return
+	}
+	if s.pollFailing {
+		s.pollFailing = false
+		s.logf("poll recovered")
 	}
 	snap := &protocol.Snapshot{
 		Version:   protocol.Version,
@@ -140,6 +164,14 @@ func (s *Server) poll(ctx context.Context) {
 
 	if s.CachePath != "" {
 		_ = cache.Save(s.CachePath, sessions)
+	}
+}
+
+// logf guards s.Log so a zero-valued Server built directly (e.g. in a test)
+// does not nil-panic when logging.
+func (s *Server) logf(format string, args ...any) {
+	if s.Log != nil {
+		s.Log.Printf(format, args...)
 	}
 }
 
