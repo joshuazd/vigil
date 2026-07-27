@@ -1,8 +1,10 @@
 package model
 
 import (
+	"net"
 	"time"
 
+	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
@@ -97,6 +99,21 @@ type SnapshotMsg struct {
 // resume self-polling.
 type DaemonLostMsg struct {
 	Epoch int
+}
+
+// ProbeTickMsg schedules the next attempt to reach the daemon. It only fires
+// while self-polling: reaching a daemon that came up is what keeps one poller
+// serving many clients instead of N clients each spending the gh budget.
+type ProbeTickMsg struct {
+	Epoch int
+}
+
+// DaemonProbeResultMsg reports one dial attempt. A nil Conn means the dial
+// failed and probing should continue.
+type DaemonProbeResultMsg struct {
+	Epoch   int
+	Conn    net.Conn
+	Decoder *protocol.Decoder
 }
 
 // ConfirmAction represents a pending destructive action awaiting confirmation.

@@ -78,6 +78,14 @@ type Model struct {
 	daemonDecoder *protocol.Decoder
 	daemonReady   bool
 
+	// lastSnapshot is when the most recent daemon snapshot was applied. A
+	// daemon that is connected but silent is invisible without it.
+	lastSnapshot time.Time
+
+	// panelMode renders the compact per-session panel instead of the full
+	// dashboard. Set by NewPanel.
+	panelMode bool
+
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -183,6 +191,7 @@ func (m Model) Init() tea.Cmd {
 		tmuxTickCmd(1*time.Second, m.epoch),
 		gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch),
 		prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch),
+		probeTickCmd(m.epoch),
 	)
 
 	return tea.Batch(cmds...)
@@ -225,6 +234,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DaemonLostMsg:
 		return m.handleDaemonLost(msg)
+
+	case ProbeTickMsg:
+		if msg.Epoch != m.epoch || m.daemonConn != nil {
+			return m, nil
+		}
+		return m, dialDaemonCmd(protocol.SocketPath(), m.epoch)
+
+	case DaemonProbeResultMsg:
+		return m.handleProbeResult(msg)
 
 	case RenderTickMsg:
 		// Render-only heartbeat for the daemon path: Bubble Tea always
@@ -291,7 +309,7 @@ func (m Model) View() string {
 	}
 
 	// Status bar
-	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width)
+	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth())
 
 	// Notification (overlaid on last table row)
 	var notif string
@@ -698,6 +716,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		}
 		m.daemonReady = true
 	}
+	m.lastSnapshot = time.Now()
 
 	m.sessions = msg.Sessions
 
@@ -753,7 +772,72 @@ func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
 		tmuxTickCmd(1*time.Second, m.epoch),
 		gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch),
 		prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch),
+		probeTickCmd(m.epoch),
 	)
+}
+
+// handleProbeResult installs a reconnected daemon, or keeps probing. Bumping
+// the epoch is what retires the self-poll loops that were running while the
+// daemon was away.
+func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) {
+	if msg.Conn == nil {
+		if msg.Epoch != m.epoch || m.daemonConn != nil {
+			return m, nil
+		}
+		return m, probeTickCmd(m.epoch)
+	}
+	if msg.Epoch != m.epoch || m.daemonConn != nil {
+		// Retired generation, or a connection we no longer need. Dropping it
+		// on the floor would leak an fd and a daemon-side writer goroutine.
+		_ = msg.Conn.Close()
+		return m, nil
+	}
+
+	// Bound the wait for the first snapshot exactly as New does: a daemon
+	// whose poll is failing has nothing to send, and handleSnapshot clears
+	// the deadline once something arrives.
+	_ = msg.Conn.SetReadDeadline(time.Now().Add(firstSnapshotTimeout))
+	m.epoch++
+	m.daemonConn = msg.Conn
+	m.daemonDecoder = msg.Decoder
+	m.daemonReady = false
+	m.addNotification("daemon back, streaming snapshots", "info")
+
+	return m, tea.Batch(
+		listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName, m.epoch),
+		renderTickCmd(1*time.Second, m.epoch),
+	)
+}
+
+// daemonHealth describes the state of the data source, for the status bar.
+// Empty means nothing worth saying: either the daemon is feeding us or the
+// TUI is self-polling, which is a supported mode and already announced by a
+// notification when it starts. A panel says so out loud, because N panels
+// self-polling is the one arrangement that actually costs something.
+func (m Model) daemonHealth() string {
+	if m.daemonConn == nil {
+		if m.panelMode {
+			return "no daemon"
+		}
+		return ""
+	}
+	if !m.daemonReady {
+		return ""
+	}
+	if age := time.Since(m.lastSnapshot); age > m.staleAfter() {
+		return fmt.Sprintf("daemon stale %ds", int(age.Seconds()))
+	}
+	return ""
+}
+
+// staleAfter is how long a connected daemon may stay silent before the status
+// bar says so: three poll cycles, never less than 5s.
+func (m Model) staleAfter() time.Duration {
+	d := 3 * m.cfg.GetSettingDuration("tmux_interval")
+	if d < 5*time.Second {
+		d = 5 * time.Second
+	}
+	return d
 }
 
 func (m Model) handleTmuxUpdated(msg TmuxUpdatedMsg) (tea.Model, tea.Cmd) {

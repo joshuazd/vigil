@@ -25,6 +25,34 @@ func dialDaemon(path string) (net.Conn, error) {
 	return net.DialTimeout("unix", path, 300*time.Millisecond)
 }
 
+// daemonProbeInterval is how often a self-polling client tries the daemon
+// socket again. Fallback is a supported mode, so this is not urgent; it just
+// has to be short enough that a daemon restart does not leave a panel
+// self-polling for minutes.
+const daemonProbeInterval = 2 * time.Second
+
+func probeTickCmd(epoch int) tea.Cmd {
+	return tea.Tick(daemonProbeInterval, func(time.Time) tea.Msg {
+		return ProbeTickMsg{Epoch: epoch}
+	})
+}
+
+// dialDaemonCmd dials off the UI goroutine, where the 300ms connect timeout
+// is allowed to block.
+func dialDaemonCmd(path string, epoch int) tea.Cmd {
+	return func() tea.Msg {
+		conn, err := dialDaemon(path)
+		if err != nil {
+			return DaemonProbeResultMsg{Epoch: epoch}
+		}
+		return DaemonProbeResultMsg{
+			Epoch:   epoch,
+			Conn:    conn,
+			Decoder: protocol.NewDecoder(conn),
+		}
+	}
+}
+
 // listenDaemonCmd reads one snapshot per invocation; Update re-issues it on
 // every SnapshotMsg. Which session is current or last belongs to this tmux
 // client rather than to the daemon, so those are resolved here, off the UI
