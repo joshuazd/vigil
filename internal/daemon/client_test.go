@@ -3,8 +3,13 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
+	"log"
 	"net"
+	"os"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -61,6 +66,57 @@ func (c *blockingConn) writeCount() int {
 
 func snap(ts int64) *protocol.Snapshot {
 	return &protocol.Snapshot{Version: protocol.Version, Timestamp: ts}
+}
+
+// errConn is a net.Conn whose Write returns a fixed error immediately,
+// standing in for a peer that failed a specific way - unlike blockingConn,
+// which gates on a release channel to model a peer that never responds at
+// all, this drives writeLoop's error-handling branch directly.
+type errConn struct {
+	net.Conn
+	err error
+}
+
+func (c *errConn) Write([]byte) (int, error)        { return 0, c.err }
+func (c *errConn) Close() error                     { return nil }
+func (c *errConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestWriteLoopLogsOnlyOnDeadlineExceeded pins the one diagnostic left for
+// the failure this task addresses. A peer that closed its socket is routine
+// - a TUI quitting, a panel toggled off - and the daemon stays silent when
+// healthy; a client that held the connection open and stopped reading
+// surfaces as the write deadline expiring, and that is the one case worth a
+// log line.
+func TestWriteLoopLogsOnlyOnDeadlineExceeded(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantLog bool
+	}{
+		{"deadline exceeded", os.ErrDeadlineExceeded, true},
+		{"peer closed (EOF)", io.EOF, false},
+		{"peer reset (EPIPE)", syscall.EPIPE, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf syncBuffer
+			logger := log.New(&buf, "", 0)
+
+			c := newClient(&errConn{err: tt.err})
+			c.queue(snap(1))
+			c.stop()
+			c.writeLoop(logger.Printf)
+
+			got := buf.String()
+			gotLog := strings.Contains(got, "dropping unresponsive client")
+			if gotLog != tt.wantLog {
+				t.Errorf("got log %q, want a %q line: %v", got, "dropping unresponsive client", tt.wantLog)
+			}
+			if !tt.wantLog && got != "" {
+				t.Errorf("got log %q, want silence on a routine disconnect", got)
+			}
+		})
+	}
 }
 
 // TestQueueNeverBlocks is the whole point of the type: the poll loop hands a

@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"errors"
 	"net"
+	"os"
 	"time"
 
 	"github.com/jzinkduda/vigil/internal/protocol"
@@ -71,7 +73,13 @@ func (c *client) writeLoop(logf func(string, ...any)) {
 	for snap := range c.ch {
 		_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if err := protocol.Encode(c.conn, snap); err != nil {
-			logf("dropping client: %v", err)
+			// A peer that closed the socket is routine - a TUI quitting, a
+			// panel toggled off - and the daemon stays silent when healthy.
+			// A deadline expiring means a client held the connection open
+			// and stopped reading, which is the failure worth reporting.
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				logf("dropping unresponsive client after %s", writeTimeout)
+			}
 			return
 		}
 	}
