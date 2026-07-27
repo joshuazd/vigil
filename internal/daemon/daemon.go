@@ -57,6 +57,12 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(s.SocketPath), 0o700); err != nil {
 		return err
 	}
+	release, err := s.acquireLock()
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	if err := s.clearStaleSocket(); err != nil {
 		return err
 	}
