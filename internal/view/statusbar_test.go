@@ -14,10 +14,23 @@ func TestStatusBarShowsHealth(t *testing.T) {
 	}
 }
 
+// TestStatusBarOmitsEmptyHealth covers both shapes an unguarded empty health
+// segment would take: a doubled separator when another segment follows it, and
+// a dangling one when nothing does. A session fixture is required for the first
+// - with no sessions there is no following segment, and the doubled separator
+// can never appear whether the guard exists or not.
 func TestStatusBarOmitsEmptyHealth(t *testing.T) {
-	out := RenderStatusBar(nil, nil, session.SortCreated, 80, "")
+	sessions := []*session.Session{
+		{Name: "SC-1 one", Git: session.GitStatus{Branch: "a"}},
+	}
+	out := StripANSI(RenderStatusBar(sessions, nil, session.SortCreated, 80, ""))
 	if strings.Contains(out, "·  ·") {
-		t.Errorf("empty health left a stray separator in %q", out)
+		t.Errorf("empty health left a doubled separator in %q", out)
+	}
+
+	bare := strings.TrimRight(StripANSI(RenderStatusBar(nil, nil, session.SortCreated, 80, "")), " ")
+	if strings.HasSuffix(bare, "·") {
+		t.Errorf("empty health left a dangling separator in %q", bare)
 	}
 }
 

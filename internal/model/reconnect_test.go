@@ -151,6 +151,20 @@ func TestHealthEmptyWhenSelfPollingInTheTUI(t *testing.T) {
 	}
 }
 
+// TestHealthEmptyWhileConnectingNotYetReady covers a gap the other health
+// tests leave open: a freshly (re)connected daemonConn with daemonReady still
+// false and lastSnapshot at its zero value. Without the !m.daemonReady guard,
+// time.Since(zero value) is decades, which is far past any staleAfter
+// threshold, so daemonHealth would report the connecting daemon as stale
+// before it ever gets a chance to send a first snapshot.
+func TestHealthEmptyWhileConnectingNotYetReady(t *testing.T) {
+	m := newTestModel()
+	m.daemonConn = &fakeConn{}
+	if got := m.daemonHealth(); got != "" {
+		t.Errorf("got %q, want empty while waiting for the first snapshot", got)
+	}
+}
+
 func TestStaleAfterFloorsAtFiveSeconds(t *testing.T) {
 	t.Setenv("VIGIL_TMUX_INTERVAL", "1") // pinned: env beats config in GetSetting
 	m := newTestModel()
