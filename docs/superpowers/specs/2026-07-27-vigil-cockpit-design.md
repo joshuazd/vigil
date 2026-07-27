@@ -73,11 +73,19 @@ Same responsibility as now: create the worktree and the tmux session. The change
 
 Unix socket, newline-delimited JSON, at `$XDG_RUNTIME_DIR/vigil/vigild.sock` falling back to `~/.local/state/vigil/vigild.sock`.
 
+As built, `protocol.SocketPath` has a third fallback: `$TMPDIR/vigil/vigild.sock` (`os.TempDir()`), for the case where neither `XDG_RUNTIME_DIR` nor a home directory is available. Client and daemon resolve it identically, so they always agree.
+
 A socket rather than watching a state file, for two reasons: dispatch needs request/response so failures can be reported, and the panel wants push so a terminal bell highlights immediately rather than on the next poll. One mechanism serves both.
 
 The existing `internal/cache` JSON snapshot stays, as the cold-start view and as the data source for the self-polling fallback. Startup remains instant.
 
+As built, the TUI loads that cache synchronously in `model.New`, for every mode and on both the daemon and self-polling paths, rather than as a startup command. First paint is therefore never blank, including while a just-started daemon has not completed a successful poll, and cached data never reaches `handleTmuxUpdated`, where it would re-merge over live sessions.
+
 Clients connect and receive a full snapshot on connect, then a full snapshot on every poll cycle. `vigild` broadcasts to all connected clients.
+
+As built, the connect-time snapshot exists only once the daemon has completed its first *successful* poll; before that a connecting client gets nothing until the next successful poll, and the client bounds that wait with a read deadline (5s) after which it falls back to self-polling.
+
+The daemon polls tmux and git on `git_interval` but refreshes PR state per branch on `pr_interval`, memoized inside `collect.Collector`, so its `gh` budget matches the TUI's rather than being 10x it. A failed `gh` fetch reuses the last known PR for that branch instead of reporting no PR.
 
 Snapshots carry shared state only. Which session is "current" and which is "last" are properties of a tmux *client*, not of the world, so each client resolves those itself on receiving a snapshot. `session.Session` already marks both fields `json:"-"`, so the type enforces this.
 
@@ -161,9 +169,9 @@ Only after living on the above:
 | Failure | Behavior |
 |---|---|
 | `vigild` not running | TUI and panel self-poll, exactly as today. Panel shows a daemon-down indicator. |
-| Socket stale or missing | The client self-polls. A stale socket file left by a killed daemon is removed by the next daemon start. |
+| Socket stale or missing | The client self-polls. A stale socket file left by a killed daemon is removed by the next daemon start. Two daemons racing to bind the same fresh socket is still open: the loser exits with `ErrAlreadyRunning`, but there is no lock file, so a **phase 2** blocker. |
 | No daemon running when a panel starts | Phase 2 onward: `vigil` spawns the daemon on demand, since N self-polling panels would multiply the `gh` budget. In phase 1 the TUI simply self-polls, which keeps that phase invisible. |
-| `vigild` dies with panels open | Panels show last-known state marked stale, then reconnect when it returns. |
+| `vigild` dies with panels open | Panels show last-known state marked stale, then reconnect when it returns. **Phase 2**: as built in phase 1, a client that loses the daemon falls back to self-polling permanently and shows no staleness marker; it never reconnects. Self-polling is a supported mode, so the data stays correct, but stale-marking and reconnection are phase 2 work. |
 | Dispatch job fails | Structured error over the socket, surfaced in vigil's existing notification overlay. |
 | Panel pane process dies | `remain-on-exit off` so the pane closes cleanly rather than leaving a dead pane. |
 | Session's panel and a full vigil both open | Both are read-only views of the same daemon state. No conflict. |

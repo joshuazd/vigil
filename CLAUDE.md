@@ -18,7 +18,7 @@ Go + Bubble Tea TUI. Single static binary.
 - `internal/cache/` — JSON session cache for instant startup
 - `internal/collect/` - UI-independent session state collection (shared by the daemon and the TUI's self-polling fallback)
 - `internal/protocol/` - newline-delimited JSON snapshot protocol over a unix socket
-- `internal/daemon/` - `vigil daemon`: polls tmux/git/PR state on `git_interval` (default 3s), broadcasting each snapshot to every connected client, including one immediately to a client that just connected
+- `internal/daemon/` - `vigil daemon`: polls tmux/git state on `git_interval` (default 3s) and PR state per branch on `pr_interval` (default 30s), broadcasting each snapshot to every connected client. A client that connects gets the latest snapshot immediately, but only once the daemon has completed a first successful poll; before that it gets nothing until the next successful poll, and falls back to self-polling if that takes longer than 5s
 
 ## Testing
 
@@ -51,3 +51,5 @@ make install   # copy to ~/.local/bin/vigil
 - Cache interop with previous Python version (same JSON format)
 - The TUI dials the daemon socket on startup and consumes its broadcast snapshots when reachable; it falls back to self-polling if the daemon is never reached, does not send a first snapshot within a bounded wait, or is lost mid-session
 - Both paths are permanently supported and must render identically (git/PR data, sort order, notifications)
+- `model.New` loads the session cache synchronously for every mode, so first paint is never blank on either path; nothing about the cache is emitted as a message
+- A session missing PR data falls back to the last known PR for its branch (`prCache` client-side, a per-branch memo in `collect.Collector` daemon-side), so one failed `gh` call cannot blank the PR column or fire a spurious idle transition
