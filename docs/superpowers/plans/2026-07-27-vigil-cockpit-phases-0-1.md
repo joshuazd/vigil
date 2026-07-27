@@ -40,9 +40,15 @@ The scripts package has no test system today. Phase 0 modifies shell functions t
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
-  - `tests/helper.bash` exports `setup_tmux_stub()` which prepends `tests/stubs` to `PATH` and sets `TMUX_STUB_LOG` to a fresh temp file, and `tmux_calls()` which prints the recorded log to stdout.
+  - `tests/helper.bash` exports:
+    - `setup_tmux_stub()` - prepends `tests/stubs` to `PATH`, points `TMUX_STUB_LOG` at a fresh temp file, and sets `TMUX` so `is_in_tmux` is true.
+    - `tmux_calls()` - prints the whole recorded log.
+    - `assert_tmux_subcommand <name>` / `refute_tmux_subcommand <name>` - succeed when the subcommand was / was not invoked.
+    - `tmux_call_args <name>` - prints the first matching invocation's argv, one argument per line.
   - `make test` in `scripts/scripts` runs `bats tests/`.
-  - The stub records one line per invocation: the literal argv joined by `\x1f` (unit separator), so arguments containing spaces stay distinguishable.
+  - The stub records one line per invocation: argv joined by an actual 0x1f byte, so arguments containing spaces stay distinguishable.
+
+Tasks 2 and 4 assert on tmux behavior entirely through these helpers, so a helper that cannot fail would make those gates vacuous. Step 4 includes tests that the helpers reject the negative case.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -128,6 +134,12 @@ Make it executable: `chmod +x scripts/scripts/tests/stubs/tmux`
 Create `scripts/scripts/tests/helper.bash`:
 
 ```bash
+# The stub joins argv with the unit separator. This must be an actual 0x1f
+# byte via ANSI-C quoting: "\x1f" inside double quotes stays a literal
+# backslash-x-1-f, and grep would read it as the characters x1f, so every
+# pattern below would silently fail to match and refute_* would always pass.
+readonly TMUX_STUB_SEP=$'\x1f'
+
 setup_tmux_stub() {
   export TMUX_STUB_LOG="${BATS_TEST_TMPDIR}/tmux-calls.log"
   : > "${TMUX_STUB_LOG}"
@@ -139,17 +151,47 @@ tmux_calls() {
   cat "${TMUX_STUB_LOG}"
 }
 
-# Assert that no recorded invocation starts with the given tmux subcommand.
-refute_tmux_subcommand() {
+# Assert that at least one recorded invocation used the given subcommand.
+assert_tmux_subcommand() {
   local subcommand="${1}"
-  ! grep -q "^${subcommand}\x1f" "${TMUX_STUB_LOG}"
+  grep -q "^${subcommand}${TMUX_STUB_SEP}" "${TMUX_STUB_LOG}"
 }
 
-# Print the full argv of the first invocation of the given subcommand,
-# with the unit separators replaced by newlines.
+# Assert that no recorded invocation used the given subcommand.
+refute_tmux_subcommand() {
+  local subcommand="${1}"
+  ! grep -q "^${subcommand}${TMUX_STUB_SEP}" "${TMUX_STUB_LOG}"
+}
+
+# Print the full argv of the first invocation of the given subcommand, one
+# argument per line. tr needs the octal escape: it does not understand \x.
 tmux_call_args() {
   local subcommand="${1}"
-  grep -m1 "^${subcommand}\x1f" "${TMUX_STUB_LOG}" | tr '\x1f' '\n'
+  grep -m1 "^${subcommand}${TMUX_STUB_SEP}" "${TMUX_STUB_LOG}" | tr '\037' '\n'
+}
+```
+
+The helpers are the foundation of every tmux assertion in Tasks 2 and 4, so prove they can *fail* before trusting them. Add this test to `tmux_lib.bats`:
+
+```bash
+@test "refute_tmux_subcommand fails when the subcommand was used" {
+  tmux send-keys -t target "echo hi" Enter
+  run refute_tmux_subcommand "send-keys"
+  [ "${status}" -ne 0 ]
+}
+
+@test "assert_tmux_subcommand fails when the subcommand was not used" {
+  run assert_tmux_subcommand "respawn-pane"
+  [ "${status}" -ne 0 ]
+}
+
+@test "tmux_call_args splits arguments containing spaces" {
+  tmux respawn-pane -k -t "=SC-1 demo:claude.1" "claude --model opus"
+  run tmux_call_args "respawn-pane"
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"=SC-1 demo:claude.1"* ]]
+  [[ "${output}" == *"claude --model opus"* ]]
+  [ "$(printf '%s' "${output}" | grep -c .)" -eq 5 ]
 }
 ```
 
@@ -159,7 +201,7 @@ tmux_call_args() {
 cd ~/dotfiles/scripts/scripts && bats tests/
 ```
 
-Expected: 3 tests, all PASS.
+Expected: 6 tests, all PASS. If either negative-case test passes when it should fail, the separator handling is broken - fix it before going further, because Tasks 2 and 4 depend on these helpers being able to fail.
 
 - [ ] **Step 6: Add the make target**
 
@@ -220,7 +262,7 @@ jobs:
 cd ~/dotfiles/scripts/scripts && make test
 ```
 
-Expected: 3 tests PASS.
+Expected: 6 tests PASS.
 
 - [ ] **Step 9: Commit**
 
@@ -339,7 +381,7 @@ with:
 cd ~/dotfiles/scripts/scripts && make test
 ```
 
-Expected: 7 tests PASS.
+Expected: 10 tests PASS.
 
 - [ ] **Step 6: Confirm the secondary-pane send-keys is untouched**
 
@@ -497,7 +539,7 @@ Expected: 4 tests PASS.
 cd ~/dotfiles/scripts/scripts && make test && shellcheck lib/route.sh
 ```
 
-Expected: 11 tests PASS, no shellcheck output.
+Expected: 14 tests PASS, no shellcheck output.
 
 - [ ] **Step 6: Commit**
 
@@ -610,7 +652,7 @@ worktree_prompt_file() {
 cd ~/dotfiles/scripts/scripts && bats tests/tmux_lib.bats
 ```
 
-Expected: 10 tests PASS.
+Expected: 17 tests PASS.
 
 - [ ] **Step 5: Rewire shortcut-implement**
 
@@ -674,7 +716,7 @@ Expected: exactly one hit, the `setup_secondary_pane` line in `lib/tmux.sh`.
 cd ~/dotfiles/scripts/scripts && make test && make lint
 ```
 
-Expected: 14 tests PASS, no shellcheck output.
+Expected: 17 tests PASS, no shellcheck output.
 
 - [ ] **Step 9: Manual end-to-end check**
 
