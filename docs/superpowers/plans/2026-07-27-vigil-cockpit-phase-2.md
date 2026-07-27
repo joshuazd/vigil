@@ -1348,15 +1348,25 @@ func TestStatusBarNeverExceedsItsWidth(t *testing.T) {
 	}
 }
 
-// TestStatusBarKeepsHealthOverStateCounts pins the priority: in a 40-column
-// panel the health indicator is the segment worth the space.
+// TestStatusBarKeepsHealthOverStateCounts pins the priority at the real
+// landscape panel width: 40 columns leaves room for the identity, the session
+// count and the health segment, but not the state counts after them. Health is
+// the segment worth that last slot.
+//
+// The arithmetic, so this test is maintainable: StatusBarStyle has
+// Padding(0, 1), so the content budget is 38. "vigil" is 5, " · 1 sessions" is
+// 13, " · no daemon" is 12, totalling 30. The next segment, " · 1 idle", costs
+// 9 and would reach 39, so it is dropped.
 func TestStatusBarKeepsHealthOverStateCounts(t *testing.T) {
 	sessions := []*session.Session{
 		{Name: "SC-1 one", Git: session.GitStatus{Branch: "a"}},
 	}
-	out := RenderStatusBar(sessions, nil, session.SortCreated, 26, "no daemon")
+	out := StripANSI(RenderStatusBar(sessions, nil, session.SortCreated, 40, "no daemon"))
 	if !strings.Contains(out, "no daemon") {
-		t.Errorf("health was dropped before the state counts: %q", out)
+		t.Errorf("health was dropped: %q", out)
+	}
+	if strings.Contains(out, "idle") {
+		t.Errorf("a state count was kept ahead of health: %q", out)
 	}
 }
 ```
