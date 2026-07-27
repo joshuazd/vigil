@@ -25,12 +25,16 @@ func tableFixture() []*session.Session {
 // wideCellFixture is tableFixture's counterpart for exercising truncation
 // itself: tableFixture's cells are all short enough to fit even the
 // narrowest surviving column untruncated, so a renderRow bug that drops a
-// TruncateVisible call is invisible against it. This fixture's single
-// session has a name, a git cell, and a PR cell each wide enough to overflow
+// TruncateVisible call is invisible against it. Both of this fixture's
+// sessions have a name, a git cell, and a PR cell wide enough to overflow
 // the compact/full column widths, so truncation is load-bearing rather than
-// a no-op.
+// a no-op. Two sessions, not one: with cursor hardcoded to 0 in the tests
+// that use this fixture, row 0 exercises renderRow's isCursor branch and
+// row 1 exercises its non-cursor branch, so a truncation bug confined to
+// either branch has wide content to fail against.
 func wideCellFixture() []*session.Session {
 	staleAge := 172800 // 2 days: renders a stale marker and exceeds colGit untruncated
+	staleAge2 := 90000 // just over the 86400 staleness threshold, 1 day display
 	return []*session.Session{
 		{
 			Name: "SC-999999 an extremely long session name that overflows every name tier",
@@ -45,6 +49,21 @@ func wideCellFixture() []*session.Session {
 			PR: &session.PRStatus{
 				Number: 4521, State: "OPEN", Checks: "fail",
 				ReviewDecision: "CHANGES_REQUESTED", UnresolvedComments: 3, HasConflicts: true,
+			},
+		},
+		{
+			Name: "SC-1010 second overflowing session for the non-cursor branch",
+			Git: session.GitStatus{
+				Branch:        "feature/also-wide",
+				Modified:      45,
+				Added:         200,
+				Deleted:       15,
+				Unpushed:      9,
+				RebaseAgeSecs: &staleAge2,
+			},
+			PR: &session.PRStatus{
+				Number: 7777, State: "OPEN", Checks: "pending",
+				UnresolvedComments: 12, HasConflicts: true,
 			},
 		},
 	}
