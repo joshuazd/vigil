@@ -136,6 +136,10 @@ func New(cfg *config.Config, cmd fetch.Commander) Model {
 			}
 		}
 		m.warmCaches()
+		// The cache is written in tmux order, and nothing else sorts before the
+		// first render, so without this the first frame ignores the configured
+		// sort. placeCursor indexes into visibleSessions, so it sorts first.
+		session.SortSessions(m.sessions, m.sortMode)
 		m.placeCursor()
 	}
 
