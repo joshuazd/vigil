@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,6 +277,25 @@ func TestHandleDaemonLostIsIdempotent(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Error("want a nil command when there was no daemon connection to lose")
+	}
+}
+
+// TestRenderTickStopsWhenDaemonGone pins the render tick's termination:
+// without a live daemon decoder it must not reschedule itself, or it would
+// run forever as a second 1s ticker alongside self-polling's own
+// tmuxTickCmd after a fallback. It also checks the opposite direction -
+// with a live decoder it must keep rescheduling - so the test would fail
+// if the guard were ever inverted, not just if it were deleted.
+func TestRenderTickStopsWhenDaemonGone(t *testing.T) {
+	m := newTestModel()
+
+	if _, cmd := m.Update(RenderTickMsg(time.Now())); cmd != nil {
+		t.Error("render tick should not reschedule once the daemon is gone (nil daemonDecoder)")
+	}
+
+	m.daemonDecoder = protocol.NewDecoder(strings.NewReader(""))
+	if _, cmd := m.Update(RenderTickMsg(time.Now())); cmd == nil {
+		t.Error("render tick should keep rescheduling while a daemon is connected")
 	}
 }
 

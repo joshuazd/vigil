@@ -243,6 +243,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// screen repainting at the same 1s cadence self-polling gets from
 		// tmuxTickCmd, which is what lets notification expiry (evaluated
 		// in View against a 3s TTL) behave the same on both paths.
+		//
+		// Stop rescheduling once the daemon is gone (same nil check
+		// handleDaemonLost leaves behind): self-polling already runs its
+		// own tmuxTickCmd(1*time.Second) after falling back, and without
+		// this guard the render tick would keep rescheduling itself
+		// forever, leaving two independent 1s tickers running side by side
+		// for the rest of the process's life.
+		if m.daemonDecoder == nil {
+			return m, nil
+		}
 		return m, renderTickCmd(1 * time.Second)
 
 	case TmuxUpdatedMsg:
