@@ -17,6 +17,7 @@ func TestParseArgs(t *testing.T) {
 		{"short help", []string{"-h"}, "help"},
 		{"long version", []string{"--version"}, "version"},
 		{"short version", []string{"-v"}, "version"},
+		{"panel flag", []string{"--panel"}, "panel"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

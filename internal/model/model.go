@@ -27,6 +27,10 @@ import (
 
 const autoFocusCooldown = 15 * time.Second
 
+// spawnCooldown is the floor between two attempts by one panel to start a
+// daemon.
+const spawnCooldown = 15 * time.Second
+
 type Model struct {
 	// Data
 	sessions   []*session.Session
@@ -86,6 +90,9 @@ type Model struct {
 	// dashboard. Set by NewPanel.
 	panelMode bool
 
+	// lastSpawn is when this panel last tried to start a daemon.
+	lastSpawn time.Time
+
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -102,8 +109,21 @@ type Model struct {
 	epoch int
 }
 
-// New creates a new Model.
+// New creates a Model for the full dashboard.
 func New(cfg *config.Config, cmd fetch.Commander) Model {
+	return newModel(cfg, cmd, false)
+}
+
+// NewPanel creates a Model for a session's panel: a compact, always-on
+// session list in a tmux pane. A panel starts the daemon if none is running,
+// because a panel per session self-polling would multiply the gh budget by
+// the number of open sessions. Startup races between panels are safe: the
+// daemon serializes on an flock and every loser exits immediately.
+func NewPanel(cfg *config.Config, cmd fetch.Commander) Model {
+	return newModel(cfg, cmd, true)
+}
+
+func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Detect current session eagerly so cursor placement doesn't jump
@@ -124,7 +144,8 @@ func New(cfg *config.Config, cmd fetch.Commander) Model {
 
 		popupMode:   popupMode,
 		initialLoad: true,
-		detailOpen:  true,
+		detailOpen:  !panel,
+		panelMode:   panel,
 
 		cfg:    cfg,
 		cmd:    cmd,
@@ -164,9 +185,23 @@ func New(cfg *config.Config, cmd fetch.Commander) Model {
 		_ = conn.SetReadDeadline(time.Now().Add(firstSnapshotTimeout))
 		m.daemonConn = conn
 		m.daemonDecoder = protocol.NewDecoder(conn)
+	} else if panel {
+		m.spawnDaemonOnce()
 	}
 
 	return m
+}
+
+// spawnDaemonOnce starts a daemon at most once every spawnCooldown, so a
+// daemon that refuses to stay up cannot turn a panel into a fork loop.
+func (m *Model) spawnDaemonOnce() {
+	if time.Since(m.lastSpawn) < spawnCooldown {
+		return
+	}
+	m.lastSpawn = time.Now()
+	if err := daemonSpawner(); err != nil {
+		m.addNotification("could not start daemon: "+err.Error(), "warning")
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -307,29 +342,14 @@ func (m Model) View() string {
 	if m.width == 0 {
 		return ""
 	}
+	if m.panelMode {
+		return m.panelView()
+	}
 
 	// Status bar
 	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth())
 
-	// Notification (overlaid on last table row)
-	var notif string
-	now := time.Now()
-	for i := len(m.notifications) - 1; i >= 0; i-- {
-		n := m.notifications[i]
-		if now.Before(n.Expires) {
-			style := lipgloss.NewStyle().Padding(0, 1)
-			switch n.Severity {
-			case "error":
-				style = style.Foreground(view.BrightRed)
-			case "warning":
-				style = style.Foreground(view.BrightYellow)
-			default:
-				// default foreground — no explicit color
-			}
-			notif = style.Render(n.Text)
-			break
-		}
-	}
+	notif := m.activeNotification()
 
 	// Table
 	visible := m.visibleSessions()
@@ -378,6 +398,47 @@ func (m Model) View() string {
 	parts = append(parts, footer)
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// panelView renders the compact panel: a status bar and as many session rows
+// as the pane has left. No footer and no detail panel - the rows are what the
+// pane is for, and the detail panel's pane captures would run once per panel
+// per tick.
+func (m Model) panelView() string {
+	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth())
+	table := view.RenderTable(
+		m.visibleSessions(),
+		m.cursor,
+		m.selected,
+		m.cfg.GetSettingInt("stale_threshold"),
+		m.width,
+		max(1, m.height-1),
+		m.activeNotification(),
+	)
+	return lipgloss.JoinVertical(lipgloss.Left, statusBar, table)
+}
+
+// activeNotification returns the newest unexpired notification, styled, or
+// "". Expiry is evaluated at render time, which is why both paths keep a 1s
+// repaint cadence.
+func (m Model) activeNotification() string {
+	now := time.Now()
+	for i := len(m.notifications) - 1; i >= 0; i-- {
+		n := m.notifications[i]
+		if now.Before(n.Expires) {
+			style := lipgloss.NewStyle().Padding(0, 1)
+			switch n.Severity {
+			case "error":
+				style = style.Foreground(view.BrightRed)
+			case "warning":
+				style = style.Foreground(view.BrightYellow)
+			default:
+				// default foreground — no explicit color
+			}
+			return style.Render(n.Text)
+		}
+	}
+	return ""
 }
 
 // --- Key handling ---
@@ -436,6 +497,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd(), m.fetchPRsCmd())
 
 	case key.Matches(msg, keys.ToggleDetail):
+		if m.panelMode {
+			return m, nil
+		}
 		m.detailOpen = !m.detailOpen
 		if m.detailOpen {
 			return m, m.refreshDetailCmd()
@@ -783,6 +847,9 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 	if msg.Conn == nil {
 		if msg.Epoch != m.epoch || m.daemonConn != nil {
 			return m, nil
+		}
+		if m.panelMode {
+			m.spawnDaemonOnce()
 		}
 		return m, probeTickCmd(m.epoch)
 	}
