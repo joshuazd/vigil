@@ -122,28 +122,21 @@ func New(cfg *config.Config, cmd fetch.Commander) Model {
 		help:          help.New(),
 	}
 
-	// In popup mode, load cache and place cursor immediately
-	if popupMode && currentSession != "" {
-		cachePath := cache.CachePath()
-		cacheTTL := cfg.GetSettingDuration("cache_ttl")
-		if cached := cache.Load(cachePath, cacheTTL); cached != nil {
-			m.sessions = cached
-			for i, s := range cached {
-				if s.Name == currentSession {
-					s.IsCurrent = true
-					m.cursor = i
-					m.cursorPlaced = true
-					break
-				}
-			}
-			// Backfill caches
-			for _, s := range cached {
-				m.gitCache[s.Name] = s.Git
-				if s.PR != nil && s.Git.Branch != "" {
-					m.prCache[s.Git.Branch] = s.PR
-				}
+	// Load the cache synchronously, on both the daemon and self-polling
+	// paths, so the first paint is never blank: the daemon may not have
+	// completed a successful poll yet. Doing it here rather than as a command
+	// keeps a stale cache out of handleTmuxUpdated, where it would rebuild
+	// sessions from cached data and reset HasBell.
+	if cached := cache.Load(cache.CachePath(), cfg.GetSettingDuration("cache_ttl")); cached != nil {
+		m.sessions = cached
+		for _, s := range cached {
+			if s.Name == currentSession {
+				s.IsCurrent = true
+				break
 			}
 		}
+		m.warmCaches()
+		m.placeCursor()
 	}
 
 	if conn, err := dialDaemon(protocol.SocketPath()); err == nil {
@@ -163,37 +156,15 @@ func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
 	if m.daemonDecoder != nil {
-		// Skip the cache-load command entirely: the daemon sends its latest
-		// snapshot immediately on connect (see internal/daemon's accept()),
-		// which arrives about as fast as cache.Load parses the cache file
-		// and is strictly fresher, so there is no first-paint benefit to
-		// loading the cache too. There is a real cost to doing both: with
-		// tea.Batch's no-ordering guarantee, a cache-load TmuxUpdatedMsg
-		// arriving after the first SnapshotMsg would route through
-		// handleTmuxUpdated and rebuild sessions from stale cache data,
-		// dropping newly created sessions and resetting HasBell, which can
-		// fire a spurious state-transition notification and hook.
-		//
-		// renderTickCmd keeps the 1s repaint heartbeat self-polling gets
-		// for free from tmuxTickCmd, without triggering any fetch work, so
-		// notification expiry (evaluated at render time) behaves the same
-		// on both paths.
+		// renderTickCmd keeps the 1s repaint heartbeat self-polling gets for
+		// free from tmuxTickCmd, without triggering any fetch work, so
+		// notification expiry (evaluated at render time) behaves the same on
+		// both paths.
 		cmds = append(cmds,
 			listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName),
 			renderTickCmd(1*time.Second),
 		)
 		return tea.Batch(cmds...)
-	}
-
-	// Load cache for instant display (skip if already loaded in New for popup mode)
-	if len(m.sessions) == 0 {
-		cachePath := cache.CachePath()
-		cacheTTL := m.cfg.GetSettingDuration("cache_ttl")
-		if cached := cache.Load(cachePath, cacheTTL); cached != nil {
-			cmds = append(cmds, func() tea.Msg {
-				return TmuxUpdatedMsg{Sessions: cached}
-			})
-		}
 	}
 
 	// Start independent poll cycles: tmux (1s), git (configurable), PR (configurable)
@@ -656,6 +627,39 @@ func (m Model) handleRebasePush() (tea.Model, tea.Cmd) {
 
 // --- Data handlers ---
 
+// warmCaches records each session's git state by name and PR state by branch,
+// and backfills any session missing PR data from the last known value for its
+// branch. The backfill keeps a single failed gh call from blanking the PR
+// column and flipping the session to idle, which would fire a state
+// transition notification and the notify hook.
+func (m *Model) warmCaches() {
+	for _, s := range m.sessions {
+		m.gitCache[s.Name] = s.Git
+		if s.Git.Branch == "" {
+			continue
+		}
+		if s.PR != nil {
+			m.prCache[s.Git.Branch] = s.PR
+		} else if pr, ok := m.prCache[s.Git.Branch]; ok {
+			s.PR = pr
+		}
+	}
+}
+
+// placeCursor points the cursor at the current session, once, in popup mode.
+func (m *Model) placeCursor() {
+	if m.cursorPlaced || !m.popupMode || m.currentSessionName == "" {
+		return
+	}
+	for i, s := range m.visibleSessions() {
+		if s.Name == m.currentSessionName {
+			m.cursor = i
+			m.cursorPlaced = true
+			break
+		}
+	}
+}
+
 // handleSnapshot applies a complete daemon snapshot. Unlike
 // handleTmuxUpdated, it does not merge into existing sessions: the snapshot
 // already carries git and PR state, and merging would discard it.
@@ -672,34 +676,22 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 
 	m.sessions = msg.Sessions
 
-	// Keep the caches warm so a later fall back to self-polling starts
-	// with data rather than blank columns. A snapshot delivers git and PR
-	// together, so if any session actually has PR data, there is no
-	// self-polling-style wait for a branch to show up before fetching PRs.
-	// If the daemon's PR fetch failed or is still pending, leave the flag
-	// alone so a later fallback still does its own eager PR fetch instead
-	// of leaving the PR column blank for a full pr_interval.
+	// A snapshot delivers git and PR together, so if any session actually has
+	// PR data, there is no self-polling-style wait for a branch to show up
+	// before fetching PRs. Judge that on the snapshot as received, before
+	// warmCaches can backfill PRs from the cache: if the daemon's PR fetch
+	// failed or is still pending, a later fallback should still do its own
+	// eager PR fetch rather than sit on cached data for a full pr_interval.
 	for _, s := range m.sessions {
-		m.gitCache[s.Name] = s.Git
-		if s.Git.Branch != "" && s.PR != nil {
-			m.prCache[s.Git.Branch] = s.PR
-		}
 		if s.PR != nil {
 			m.initialPRDone = true
+			break
 		}
 	}
+	m.warmCaches()
 
 	session.SortSessions(m.sessions, m.sortMode)
-
-	if !m.cursorPlaced && m.popupMode && m.currentSessionName != "" {
-		for i, s := range m.visibleSessions() {
-			if s.Name == m.currentSessionName {
-				m.cursor = i
-				m.cursorPlaced = true
-				break
-			}
-		}
-	}
+	m.placeCursor()
 
 	cmds := m.checkStateTransitions()
 	if m.detailOpen {
@@ -771,16 +763,7 @@ func (m Model) handleTmuxUpdated(msg TmuxUpdatedMsg) (tea.Model, tea.Cmd) {
 	// Sort
 	session.SortSessions(m.sessions, m.sortMode)
 
-	// Cursor placement (popup mode only)
-	if !m.cursorPlaced && m.popupMode && m.currentSessionName != "" {
-		for i, s := range m.visibleSessions() {
-			if s.Name == m.currentSessionName {
-				m.cursor = i
-				m.cursorPlaced = true
-				break
-			}
-		}
-	}
+	m.placeCursor()
 
 	// State transitions
 	cmds := m.checkStateTransitions()
@@ -796,18 +779,12 @@ func (m Model) handleGitUpdated(msg GitUpdatedMsg) (tea.Model, tea.Cmd) {
 	for name, git := range msg.GitData {
 		m.gitCache[name] = git
 	}
-	// Apply to sessions
 	for _, s := range m.sessions {
 		if git, ok := msg.GitData[s.Name]; ok {
 			s.Git = git
 		}
-		// Apply PR from cache if branch now known
-		if s.PR == nil && s.Git.Branch != "" {
-			if pr, ok := m.prCache[s.Git.Branch]; ok {
-				s.PR = pr
-			}
-		}
 	}
+	m.warmCaches()
 
 	// Save cache (snapshot slice to avoid data race with main thread)
 	snap := make([]*session.Session, len(m.sessions))

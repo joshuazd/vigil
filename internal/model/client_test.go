@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/jzinkduda/vigil/internal/cache"
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
@@ -352,6 +353,64 @@ func TestHandleSnapshotLeavesInitialPRDoneFalseWithoutPRData(t *testing.T) {
 	}
 }
 
+// TestHandleSnapshotFallsBackToLastKnownPR covers a daemon whose gh call
+// failed after having succeeded: the snapshot carries a nil PR, and taking it
+// verbatim would blank the PR column and flip the session to idle, firing a
+// notification and the notify hook on a session that did not change.
+func TestHandleSnapshotFallsBackToLastKnownPR(t *testing.T) {
+	m := newTestModel()
+	pr := &session.PRStatus{Number: 7, State: "OPEN"}
+	m.prCache["feature/x"] = pr
+
+	next, _ := m.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{
+		{Name: "alpha", Git: session.GitStatus{Branch: "feature/x"}},
+	}})
+	m2 := next.(Model)
+
+	if m2.sessions[0].PR != pr {
+		t.Errorf("got PR %v, want the last known %v from prCache", m2.sessions[0].PR, pr)
+	}
+	if m2.initialPRDone {
+		t.Error("initialPRDone should be judged on the snapshot as received, before the cache backfill")
+	}
+}
+
+// TestNewLoadsCacheOutsidePopupMode pins the fix for a blank first paint in
+// the standalone window: the cache load runs for every mode, synchronously,
+// so a daemon that has not completed a successful poll yet does not leave the
+// table empty. It must stay synchronous rather than emit a TmuxUpdatedMsg,
+// which would re-merge stale cached data over live sessions.
+func TestNewLoadsCacheOutsidePopupMode(t *testing.T) {
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("TMUX", "")
+
+	pr := &session.PRStatus{Number: 7, State: "OPEN"}
+	cached := []*session.Session{{
+		Name: "alpha",
+		Git:  session.GitStatus{Branch: "feature/x", GitRoot: "/repo/alpha"},
+		PR:   pr,
+	}}
+	if err := cache.Save(cache.CachePath(), cached); err != nil {
+		t.Fatalf("cache.Save: %v", err)
+	}
+
+	m := New(&config.Config{}, fetch.NewMockCommander())
+	if len(m.sessions) != 1 || m.sessions[0].Name != "alpha" {
+		t.Fatalf("got sessions %+v, want the cached alpha session", m.sessions)
+	}
+	if m.sessions[0].Git.Branch != "feature/x" {
+		t.Errorf("got branch %q, want feature/x", m.sessions[0].Git.Branch)
+	}
+	if got, ok := m.gitCache["alpha"]; !ok || got.Branch != "feature/x" {
+		t.Errorf("gitCache[alpha] = %+v, ok=%v, want the cached git state", got, ok)
+	}
+	if m.prCache["feature/x"] == nil {
+		t.Error("prCache should be warmed from the cache load")
+	}
+}
+
 // TestNewArmsFirstSnapshotReadDeadline proves New actually sets the read
 // deadline on the freshly dialed connection, rather than merely proving
 // listenDaemonCmd maps some error to DaemonLostMsg (already covered by
@@ -370,6 +429,8 @@ func TestNewArmsFirstSnapshotReadDeadline(t *testing.T) {
 		t.Fatalf("Mkdir: %v", err)
 	}
 	t.Setenv("XDG_RUNTIME_DIR", dir)
+	// New loads the session cache, so keep it off the developer's real one.
+	t.Setenv("HOME", dir)
 
 	sockPath := filepath.Join(sockDir, "vigild.sock")
 	l, err := net.Listen("unix", sockPath)
