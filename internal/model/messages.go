@@ -64,6 +64,16 @@ type DelayedPRRefreshMsg struct{}
 // DetailRefreshMsg triggers a detail panel content refresh.
 type DetailRefreshMsg struct{}
 
+// SnapshotMsg carries a full session snapshot received from the daemon,
+// with per-client flags already resolved.
+type SnapshotMsg struct {
+	Sessions []*session.Session
+}
+
+// DaemonLostMsg reports that the daemon stream ended, so the TUI should
+// resume self-polling.
+type DaemonLostMsg struct{}
+
 // ConfirmAction represents a pending destructive action awaiting confirmation.
 type ConfirmAction int
 
