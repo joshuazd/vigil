@@ -36,6 +36,30 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
+// startServer runs s.Run in the background and registers a t.Cleanup that
+// cancels it and waits for it to actually return before the test's TempDir
+// cleanup can run. Without that wait, a live poll can still be mid-flight
+// (in particular inside cache.Save, which writes into CachePath via a temp
+// file) when TempDir starts deleting its directory, which intermittently
+// fails with "directory not empty". It waits for the socket to become
+// available before returning, since every caller needs that regardless.
+func startServer(t *testing.T, s *Server) (ctx context.Context, stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = s.Run(ctx)
+		close(done)
+	}()
+	stop = func() {
+		cancel()
+		<-done
+	}
+	t.Cleanup(stop)
+	waitForSocket(t, s.SocketPath)
+	return ctx, stop
+}
+
 func testServer(t *testing.T) *Server {
 	t.Helper()
 	cmd := fetch.NewMockCommander()
@@ -81,12 +105,7 @@ func TestNewDefaultsCollectorGitInterval(t *testing.T) {
 func TestServerSendsSnapshotOnConnect(t *testing.T) {
 	s := testServer(t)
 	s.Interval = 10 * time.Second
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- s.Run(ctx) }()
-	waitForSocket(t, s.SocketPath)
+	startServer(t, s)
 	waitForCondition(t, 2*time.Second, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -119,10 +138,7 @@ func TestServerSendsSnapshotOnConnect(t *testing.T) {
 // send that accept does for every new connection regardless of poll.
 func TestServerBroadcastsToMultipleClients(t *testing.T) {
 	s := testServer(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = s.Run(ctx) }()
-	waitForSocket(t, s.SocketPath)
+	startServer(t, s)
 
 	var decoders [3]*protocol.Decoder
 	for i := 0; i < 3; i++ {
@@ -156,10 +172,7 @@ func TestServerBroadcastsToMultipleClients(t *testing.T) {
 
 func TestServerKeepsPushingOnInterval(t *testing.T) {
 	s := testServer(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = s.Run(ctx) }()
-	waitForSocket(t, s.SocketPath)
+	startServer(t, s)
 
 	conn, err := net.Dial("unix", s.SocketPath)
 	if err != nil {
@@ -180,10 +193,7 @@ func TestServerKeepsPushingOnInterval(t *testing.T) {
 
 func TestServerRefusesWhenAlreadyRunning(t *testing.T) {
 	s := testServer(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = s.Run(ctx) }()
-	waitForSocket(t, s.SocketPath)
+	startServer(t, s)
 
 	second := testServer(t)
 	second.SocketPath = s.SocketPath
@@ -222,10 +232,7 @@ func TestServerReplacesStaleSocket(t *testing.T) {
 		t.Fatalf("writeStaleSocketFile: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = s.Run(ctx) }()
-	waitForSocket(t, s.SocketPath)
+	startServer(t, s)
 
 	conn, err := net.Dial("unix", s.SocketPath)
 	if err != nil {
@@ -260,13 +267,8 @@ func TestServerRejectsNonSocketAtPath(t *testing.T) {
 // stale-socket recovery instead of a clean bind.
 func TestServerLeavesNoSocketFileOnShutdown(t *testing.T) {
 	s := testServer(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = s.Run(ctx); close(done) }()
-	waitForSocket(t, s.SocketPath)
-
-	cancel()
-	<-done
+	_, stop := startServer(t, s)
+	stop()
 
 	if _, err := os.Stat(s.SocketPath); !os.IsNotExist(err) {
 		t.Errorf("socket file still at %s after shutdown (stat err %v)", s.SocketPath, err)
@@ -361,10 +363,7 @@ func TestServerLogsPollFailureTransitions(t *testing.T) {
 		Log:        log.New(&buf, "", 0),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = s.Run(ctx) }()
-	waitForSocket(t, s.SocketPath)
+	startServer(t, s)
 
 	waitForCondition(t, 2*time.Second, func() bool { return cmd.callCount() >= 2 })
 
