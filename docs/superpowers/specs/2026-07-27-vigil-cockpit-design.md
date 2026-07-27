@@ -50,6 +50,8 @@ Three components.
 
 The sole owner of polling: tmux session enumeration, git status, `gh` PR state, and (phase 5) the assigned-work queue. It publishes state snapshots to connected clients and accepts dispatch jobs.
 
+Shipped as a subcommand of the existing binary (`vigil daemon`), not a second binary. One build, one install, one version. "vigild" is the name of the role in this document, not of an artifact.
+
 One daemon means one `gh` rate-limit budget regardless of how many panels are on screen. This is what makes a panel-per-session affordable.
 
 Dispatch jobs are executed by shelling out to the existing `shortcut-implement` / `gh-review` scripts, unchanged. `vigild` supplies the tmux context those scripts need, which is precisely what the popup tunnel was faking.
@@ -75,7 +77,11 @@ A socket rather than watching a state file, for two reasons: dispatch needs requ
 
 The existing `internal/cache` JSON snapshot stays, as the cold-start view and as the data source for the self-polling fallback. Startup remains instant.
 
-Clients connect and receive a full snapshot, then deltas. `vigild` broadcasts to all connected clients.
+Clients connect and receive a full snapshot on connect, then a full snapshot on every poll cycle. `vigild` broadcasts to all connected clients.
+
+Snapshots carry shared state only. Which session is "current" and which is "last" are properties of a tmux *client*, not of the world, so each client resolves those itself on receiving a snapshot. `session.Session` already marks both fields `json:"-"`, so the type enforces this.
+
+Full snapshots rather than deltas: a snapshot is a few dozen sessions of small structs, so delta encoding would add reconnection and ordering bugs to save bytes that do not matter. Revisit only if profiling shows otherwise.
 
 ## Panel geometry
 
@@ -96,9 +102,21 @@ Each phase is independently shippable and independently revertible. Nothing is l
 
 ### Phase 0: remove the send-keys race
 
-Make the Claude invocation the tmux session's initial command in `lib/tmux.sh:122` rather than text typed in later at `shortcut-implement:208` and `gh-review:195`. Pass the prompt via a file in the worktree rather than through a shell command line.
+Make Claude the pane's own process rather than text typed into a shell, and take the system prompt out of the command line.
+
+Two changes:
+
+1. Replace `tmux send-keys` (`shortcut-implement:208`, `gh-review:195`, `lib/tmux.sh:128`) with `tmux respawn-pane -k`, which replaces the pane's process directly. No shell readiness to race and no prompt text passing through a shell prompt. The respawned command appends `; exec "${SHELL}"` so exiting Claude leaves a usable shell instead of collapsing the pane and, with it, the window.
+
+   `respawn-pane` rather than making it the session's initial command: both give the same property, but the initial-command form requires threading a `--claude-command` argument through `run_worktree_popup` -> `git-worktree-session` -> `create_tmux_session`, and the callers cannot build the command until after routing. Respawning keeps the existing call order and touches three lines instead of three scripts.
+
+2. `claude_launch_cmd` (`lib/route.sh:500`) currently `printf '%q'`-quotes a multi-line system prompt into the command string. Instead write that prompt to a file and emit `--append-system-prompt "$(cat <file>)"`. The multi-line content never passes through tmux argument parsing.
+
+   The prompt file lives in the worktree's private git directory (`git -C <worktree> rev-parse --absolute-git-dir`), as `vigil-launch-prompt.txt`. Not in the working tree, so it never appears in `git status` and cannot be committed by accident, and it is removed along with the worktree. Callers get the worktree path from `tmux display-message -p -t '=<session>:claude' '#{pane_current_path}'` rather than recomputing `${repo_root}/../${dir_name}`.
 
 Removes a timing race and a quoting hazard. Independent of everything else in this spec and can land first.
+
+This phase also introduces the first test harness for the scripts package, which has none today (`bats-core`, plus a `tmux` stub that records its argv so tmux interactions are assertable).
 
 ### Phase 1: `vigild`, invisible
 
@@ -143,7 +161,8 @@ Only after living on the above:
 | Failure | Behavior |
 |---|---|
 | `vigild` not running | TUI and panel self-poll, exactly as today. Panel shows a daemon-down indicator. |
-| Socket stale or missing | Clients retry with backoff. `vigil` spawns the daemon on demand. |
+| Socket stale or missing | The client self-polls. A stale socket file left by a killed daemon is removed by the next daemon start. |
+| No daemon running when a panel starts | Phase 2 onward: `vigil` spawns the daemon on demand, since N self-polling panels would multiply the `gh` budget. In phase 1 the TUI simply self-polls, which keeps that phase invisible. |
 | `vigild` dies with panels open | Panels show last-known state marked stale, then reconnect when it returns. |
 | Dispatch job fails | Structured error over the socket, surfaced in vigil's existing notification overlay. |
 | Panel pane process dies | `remain-on-exit off` so the pane closes cleanly rather than leaving a dead pane. |
