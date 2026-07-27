@@ -30,9 +30,13 @@ type Server struct {
 	CachePath  string
 	Log        *log.Logger
 
-	mu      sync.Mutex
-	clients map[net.Conn]struct{}
-	latest  *protocol.Snapshot
+	// mu guards latest only. clients is owned by Run's goroutine: poll,
+	// addClient and broadcast all run there and nothing else touches it.
+	mu     sync.Mutex
+	latest *protocol.Snapshot
+
+	clients []*client
+	writers sync.WaitGroup
 
 	// pollFailing is only read and written from poll, which Run only ever
 	// calls from its own goroutine, so it needs no mutex.
@@ -71,14 +75,17 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return listenError(err)
 	}
-	defer func() {
-		_ = listener.Close()
-		_ = os.Remove(s.SocketPath)
+	defer func() { _ = os.Remove(s.SocketPath) }()
+
+	// Accept only hands connections over; Run does every send, so a client
+	// that never reads cannot block new connections.
+	incoming := make(chan net.Conn)
+	var accepted sync.WaitGroup
+	accepted.Add(1)
+	go func() {
+		defer accepted.Done()
+		s.accept(ctx, listener, incoming)
 	}()
-
-	s.clients = make(map[net.Conn]struct{})
-
-	go s.accept(ctx, listener)
 
 	ticker := time.NewTicker(s.Interval)
 	defer ticker.Stop()
@@ -87,8 +94,13 @@ func (s *Server) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// Closing the listener is what unblocks accept out of Accept.
+			_ = listener.Close()
+			accepted.Wait()
 			s.closeClients()
 			return nil
+		case conn := <-incoming:
+			s.addClient(conn)
 		case <-ticker.C:
 			s.poll(ctx)
 		}
@@ -123,23 +135,17 @@ func (s *Server) clearStaleSocket() error {
 	return os.Remove(s.SocketPath)
 }
 
-func (s *Server) accept(ctx context.Context, listener net.Listener) {
+func (s *Server) accept(ctx context.Context, listener net.Listener, incoming chan<- net.Conn) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		if ctx.Err() != nil {
+		select {
+		case incoming <- conn:
+		case <-ctx.Done():
 			_ = conn.Close()
 			return
-		}
-		s.mu.Lock()
-		s.clients[conn] = struct{}{}
-		latest := s.latest
-		s.mu.Unlock()
-
-		if latest != nil {
-			s.send(conn, latest)
 		}
 	}
 }
@@ -165,15 +171,9 @@ func (s *Server) poll(ctx context.Context) {
 
 	s.mu.Lock()
 	s.latest = snap
-	conns := make([]net.Conn, 0, len(s.clients))
-	for c := range s.clients {
-		conns = append(conns, c)
-	}
 	s.mu.Unlock()
 
-	for _, c := range conns {
-		s.send(c, snap)
-	}
+	s.broadcast(snap)
 
 	if s.CachePath != "" {
 		_ = cache.Save(s.CachePath, sessions)
@@ -188,25 +188,47 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
-func (s *Server) send(conn net.Conn, snap *protocol.Snapshot) {
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if err := protocol.Encode(conn, snap); err != nil {
-		s.drop(conn)
+// addClient registers a connection and sends it the latest snapshot, if there
+// is one. A client that connects before the first successful poll gets
+// nothing until the next one, and falls back to self-polling if that takes
+// too long.
+func (s *Server) addClient(conn net.Conn) {
+	c := newClient(conn)
+	s.clients = append(s.clients, c)
+	s.writers.Add(1)
+	go func() {
+		defer s.writers.Done()
+		c.writeLoop(s.logf)
+	}()
+
+	s.mu.Lock()
+	latest := s.latest
+	s.mu.Unlock()
+	if latest != nil {
+		c.queue(latest)
 	}
 }
 
-func (s *Server) drop(conn net.Conn) {
-	s.mu.Lock()
-	delete(s.clients, conn)
-	s.mu.Unlock()
-	_ = conn.Close()
+// broadcast queues snap for every live client and prunes the dead ones.
+func (s *Server) broadcast(snap *protocol.Snapshot) {
+	live := s.clients[:0]
+	for _, c := range s.clients {
+		if c.gone() {
+			continue
+		}
+		c.queue(snap)
+		live = append(live, c)
+	}
+	for i := len(live); i < len(s.clients); i++ {
+		s.clients[i] = nil
+	}
+	s.clients = live
 }
 
 func (s *Server) closeClients() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for c := range s.clients {
-		_ = c.Close()
-		delete(s.clients, c)
+	for _, c := range s.clients {
+		c.stop()
 	}
+	s.clients = nil
+	s.writers.Wait()
 }

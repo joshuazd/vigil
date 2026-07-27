@@ -336,6 +336,22 @@ func (f *flakyCommander) Run(_ context.Context, _ string, name string, args ...s
 	return "", nil
 }
 
+// pollTransitionLines returns only the "poll failed"/"poll recovered" lines
+// from buf, ignoring other log activity such as a client's writeLoop logging
+// a dropped connection. waitForSocket dials-and-closes a throwaway probe
+// connection that becomes a real client under the single-writer design, so a
+// "dropping client" line is expected background noise here, not a poll
+// transition.
+func pollTransitionLines(buf *syncBuffer) []string {
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if strings.Contains(l, "poll failed") || strings.Contains(l, "poll recovered") {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -367,9 +383,9 @@ func TestServerLogsPollFailureTransitions(t *testing.T) {
 
 	waitForCondition(t, 2*time.Second, func() bool { return cmd.callCount() >= 2 })
 
-	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	lines := pollTransitionLines(&buf)
 	if len(lines) != 1 || !strings.Contains(lines[0], "poll failed") {
-		t.Fatalf("got log lines %q after repeated failures, want exactly one poll failed line", buf.String())
+		t.Fatalf("got poll log lines %q after repeated failures, want exactly one poll failed line", buf.String())
 	}
 
 	callsBeforeRecovery := cmd.callCount()
@@ -377,9 +393,9 @@ func TestServerLogsPollFailureTransitions(t *testing.T) {
 	waitForCondition(t, 2*time.Second, func() bool { return cmd.callCount() > callsBeforeRecovery })
 	waitForCondition(t, 2*time.Second, func() bool { return strings.Contains(buf.String(), "poll recovered") })
 
-	lines = strings.Split(strings.TrimSpace(buf.String()), "\n")
+	lines = pollTransitionLines(&buf)
 	if len(lines) != 2 {
-		t.Fatalf("got log lines %q after recovery, want exactly one failure line and one recovery line", buf.String())
+		t.Fatalf("got poll log lines %q after recovery, want exactly one failure line and one recovery line", buf.String())
 	}
 }
 
