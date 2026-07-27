@@ -18,7 +18,7 @@ Go + Bubble Tea TUI. Single static binary.
 - `internal/cache/` — JSON session cache for instant startup
 - `internal/collect/` - UI-independent session state collection (shared by the daemon and the TUI's self-polling fallback)
 - `internal/protocol/` - newline-delimited JSON snapshot protocol over a unix socket
-- `internal/daemon/` - `vigil daemon`: polls tmux/git state on `git_interval` (default 3s) and PR state per branch on `pr_interval` (default 30s), broadcasting each snapshot to every connected client. A client that connects gets the latest snapshot immediately, but only once the daemon has completed a first successful poll; before that it gets nothing until the next successful poll, and falls back to self-polling if that takes longer than 5s
+- `internal/daemon/` - `vigil daemon`: runs one `Snapshot` per tick at `tmux_interval` (default 1s) so tmux metadata (including bell flags) is never more than a tick stale; git state is gated inside `Snapshot` on `git_interval` (default 3s) and PR state per branch on `pr_interval` (default 30s), each via its own memo. It broadcasts each snapshot to every connected client. A client that connects gets the latest snapshot immediately, but only once the daemon has completed a first successful poll; before that it gets nothing until the next successful poll, and falls back to self-polling if that takes longer than 5s
 
 ## Testing
 
@@ -41,7 +41,7 @@ make install   # copy to ~/.local/bin/vigil
 - Commander interface for subprocess calls (testable)
 - View is pure — pane capture in Update via tea.Cmd, not in View
 - context.Context for cancellation
-- Background polling: git every 3s, PR every 30s (parallel fetches)
+- Background polling: tmux every 1s, git every 3s, PR every 30s (parallel fetches)
 - Detail panel: three modes (pane, PR description, review comments) with auto-select by state
 - Session filtering by state, sorting by created/state/alpha, batch operations via multi-select
 - State transition notifications with configurable hooks

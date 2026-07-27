@@ -56,6 +56,22 @@ func testServer(t *testing.T) *Server {
 	}
 }
 
+func TestNewDefaultsIntervalToTmuxInterval(t *testing.T) {
+	t.Setenv("VIGIL_TMUX_INTERVAL", "0")
+	s := New(&config.Config{}, fetch.NewMockCommander())
+	if s.Interval != 1*time.Second {
+		t.Errorf("got interval %s, want 1s", s.Interval)
+	}
+}
+
+func TestNewDefaultsCollectorGitInterval(t *testing.T) {
+	t.Setenv("VIGIL_GIT_INTERVAL", "0")
+	s := New(&config.Config{}, fetch.NewMockCommander())
+	if s.Collector.GitInterval != 3*time.Second {
+		t.Errorf("got collector git interval %s, want 3s", s.Collector.GitInterval)
+	}
+}
+
 // TestServerSendsSnapshotOnConnect pins the connect-time send specifically.
 // The interval is long enough that no broadcast can arrive within the read
 // deadline below, so the frame this test reads can only have come from

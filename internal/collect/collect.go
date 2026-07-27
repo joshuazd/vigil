@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	defaultGitWorkers = 8
-	defaultPRInterval = 30 * time.Second
+	defaultGitWorkers  = 8
+	defaultGitInterval = 3 * time.Second
+	defaultPRInterval  = 30 * time.Second
 
 	// prWorkers caps concurrent gh invocations. Each due branch costs two of
 	// them against a per-hour API quota, so this stays below GitWorkers.
@@ -20,18 +21,30 @@ const (
 )
 
 type Collector struct {
-	Cmd        fetch.Commander
-	GitWorkers int
-	PRInterval time.Duration
+	Cmd         fetch.Commander
+	GitWorkers  int
+	GitInterval time.Duration
+	PRInterval  time.Duration
 
 	// clock is nil outside tests; see now.
 	clock func() time.Time
 
+	// gitMemo holds the last git status per pane path so Snapshot can run on
+	// tmux_interval without refetching git every tick. Only Snapshot's own
+	// goroutine touches it: fillGit reads it before its fan-out and rewrites
+	// it after the fan-out has joined.
+	gitMemo map[string]gitMemoEntry
+
 	// prMemo holds the last PR result per branch+git-root so Snapshot can run
-	// on git_interval without refetching PRs every tick. Only Snapshot's own
+	// on tmux_interval without refetching PRs every tick. Only Snapshot's own
 	// goroutine touches it: fillPRs reads it before its fan-out and rewrites
 	// it after the fan-out has joined.
 	prMemo map[string]prMemoEntry
+}
+
+type gitMemoEntry struct {
+	status    session.GitStatus
+	fetchedAt time.Time
 }
 
 type prMemoEntry struct {
@@ -44,11 +57,15 @@ func New(cfg *config.Config, cmd fetch.Commander) *Collector {
 	if workers <= 0 {
 		workers = defaultGitWorkers
 	}
+	gitInterval := cfg.GetSettingDuration("git_interval")
+	if gitInterval <= 0 {
+		gitInterval = defaultGitInterval
+	}
 	prInterval := cfg.GetSettingDuration("pr_interval")
 	if prInterval <= 0 {
 		prInterval = defaultPRInterval
 	}
-	return &Collector{Cmd: cmd, GitWorkers: workers, PRInterval: prInterval}
+	return &Collector{Cmd: cmd, GitWorkers: workers, GitInterval: gitInterval, PRInterval: prInterval}
 }
 
 func (c *Collector) now() time.Time {
@@ -97,9 +114,27 @@ func runParallel[T any](items []T, workers int, do func(T)) {
 }
 
 func (c *Collector) fillGit(ctx context.Context, sessions []*session.Session) {
-	runParallel(sessions, c.GitWorkers, func(s *session.Session) {
+	now := c.now()
+
+	var due []*session.Session
+	memo := make(map[string]gitMemoEntry, len(sessions))
+	for _, s := range sessions {
+		if prev, ok := c.gitMemo[s.PanePath]; ok && now.Sub(prev.fetchedAt) < c.GitInterval {
+			s.Git = prev.status
+			memo[s.PanePath] = prev
+			continue
+		}
+		due = append(due, s)
+	}
+
+	runParallel(due, c.GitWorkers, func(s *session.Session) {
 		s.Git = fetch.FetchGitStatus(ctx, c.Cmd, s.PanePath)
 	})
+
+	for _, s := range due {
+		memo[s.PanePath] = gitMemoEntry{status: s.Git, fetchedAt: now}
+	}
+	c.gitMemo = memo
 }
 
 type branchRoot struct {

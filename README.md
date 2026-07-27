@@ -74,6 +74,7 @@ All configuration is optional. Create `~/.config/vigil/config.toml` to customize
 
 ```toml
 [settings]
+tmux_interval = 1             # Tmux polling interval (seconds)
 git_interval = 3              # Git polling interval (seconds)
 pr_interval = 30              # PR polling interval (seconds)
 cache_ttl = 30                # Cache staleness threshold (seconds)
@@ -110,7 +111,7 @@ The default merge uses `--squash --delete-branch`. Override `[hooks] merge` for 
 
 Environment variables override TOML settings for quick testing:
 
-`VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`, `VIGIL_AUTO_CLEANUP`
+`VIGIL_TMUX_INTERVAL`, `VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`, `VIGIL_AUTO_CLEANUP`
 
 ## Development
 

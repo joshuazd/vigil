@@ -29,6 +29,7 @@ type settingDef struct {
 }
 
 var settingDefaults = map[string]settingDef{
+	"tmux_interval":         {"VIGIL_TMUX_INTERVAL", "1"},
 	"git_interval":          {"VIGIL_GIT_INTERVAL", "3"},
 	"pr_interval":           {"VIGIL_PR_INTERVAL", "30"},
 	"cache_ttl":             {"VIGIL_CACHE_TTL", "30"},

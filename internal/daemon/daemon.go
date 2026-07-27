@@ -21,7 +21,7 @@ import (
 
 var ErrAlreadyRunning = errors.New("daemon already running")
 
-const defaultInterval = 3 * time.Second
+const defaultInterval = 1 * time.Second
 
 type Server struct {
 	Collector  *collect.Collector
@@ -40,7 +40,7 @@ type Server struct {
 }
 
 func New(cfg *config.Config, cmd fetch.Commander) *Server {
-	interval := cfg.GetSettingDuration("git_interval")
+	interval := cfg.GetSettingDuration("tmux_interval")
 	if interval <= 0 {
 		interval = defaultInterval
 	}

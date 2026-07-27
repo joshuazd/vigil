@@ -85,7 +85,7 @@ Clients connect and receive a full snapshot on connect, then a full snapshot on 
 
 As built, the connect-time snapshot exists only once the daemon has completed its first *successful* poll; before that a connecting client gets nothing until the next successful poll, and the client bounds that wait with a read deadline (5s) after which it falls back to self-polling.
 
-The daemon polls tmux and git on `git_interval` but refreshes PR state per branch on `pr_interval`, memoized inside `collect.Collector`, so its `gh` budget matches the TUI's rather than being 10x it. A failed `gh` fetch reuses the last known PR for that branch instead of reporting no PR.
+As built, the daemon runs a single `Snapshot` per tick at `tmux_interval` (default 1s), matching the TUI's self-polling tmux cadence so bell highlighting is never more than a tick stale. Git state is gated inside `Snapshot` on `git_interval` (default 3s, keyed per pane path) and PR state per branch on `pr_interval` (default 30s), each via its own memo in `collect.Collector`, so the `gh` and git budgets match the TUI's self-polling rather than being 3x-30x it. A failed `gh` fetch reuses the last known PR for that branch instead of reporting no PR.
 
 Snapshots carry shared state only. Which session is "current" and which is "last" are properties of a tmux *client*, not of the world, so each client resolves those itself on receiving a snapshot. `session.Session` already marks both fields `json:"-"`, so the type enforces this.
 

@@ -131,6 +131,21 @@ func TestGetSettingDefault(t *testing.T) {
 	}
 }
 
+func TestGetSettingDefaultTmuxInterval(t *testing.T) {
+	cfg := &Config{}
+	if cfg.GetSetting("tmux_interval") != "1" {
+		t.Errorf("got %q, want 1", cfg.GetSetting("tmux_interval"))
+	}
+}
+
+func TestGetSettingEnvOverridesTmuxInterval(t *testing.T) {
+	cfg := &Config{}
+	t.Setenv("VIGIL_TMUX_INTERVAL", "2")
+	if cfg.GetSetting("tmux_interval") != "2" {
+		t.Errorf("got %q, want 2", cfg.GetSetting("tmux_interval"))
+	}
+}
+
 func TestGetSettingFromTOML(t *testing.T) {
 	cfg := &Config{Settings: map[string]any{"git_interval": int64(5)}}
 	if cfg.GetSetting("git_interval") != "5" {

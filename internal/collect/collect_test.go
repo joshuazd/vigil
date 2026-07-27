@@ -262,3 +262,148 @@ func TestSnapshotKeepsLastPRWhenFetchFails(t *testing.T) {
 		t.Errorf("got PR %+v, want the previous pointer %+v", second[0].PR, first[0].PR)
 	}
 }
+
+func TestNewDefaultsGitInterval(t *testing.T) {
+	t.Setenv("VIGIL_GIT_INTERVAL", "0")
+	c := New(&config.Config{}, fetch.NewMockCommander())
+	if c.GitInterval != defaultGitInterval {
+		t.Errorf("got git interval %s, want %s", c.GitInterval, defaultGitInterval)
+	}
+}
+
+// countGitCalls counts calls to "git rev-parse --show-toplevel", the first
+// (and therefore one-per-attempt) call FetchGitStatus makes. Counting every
+// "git" call would also pick up "git remote get-url origin", which the PR
+// fetch path runs on its own cadence to resolve owner/repo.
+func countGitCalls(cmd *fetch.MockCommander) int {
+	n := 0
+	for _, call := range cmd.Calls {
+		if call.Name == "git" && len(call.Args) == 2 && call.Args[0] == "rev-parse" && call.Args[1] == "--show-toplevel" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestSnapshotSkipsGitFetchWithinGitInterval(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	c := New(&config.Config{}, cmd)
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	firstCalls := countGitCalls(cmd)
+	if firstCalls == 0 {
+		t.Fatal("first Snapshot should have made git calls")
+	}
+
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if got := countGitCalls(cmd); got != firstCalls {
+		t.Errorf("got %d git calls after two Snapshots, want %d (memo should skip the refetch)", got, firstCalls)
+	}
+}
+
+func TestSnapshotRefetchesGitAfterGitInterval(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	now := time.Unix(1700000000, 0)
+	c := New(&config.Config{}, cmd)
+	c.clock = func() time.Time { return now }
+
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	firstCalls := countGitCalls(cmd)
+
+	now = now.Add(c.GitInterval)
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if got := countGitCalls(cmd); got <= firstCalls {
+		t.Errorf("got %d git calls, want more than %d (the git interval has elapsed)", got, firstCalls)
+	}
+}
+
+// TestSnapshotAppliesMemoizedGitStatusWhenSkipped pins the highest-blast-radius
+// failure mode: a tick that skips the git fetch must still populate Git from
+// the memo. A fillGit that skips without applying the memo leaves Git zeroed,
+// blanking every git column two ticks out of three at the daemon's cadence.
+func TestSnapshotAppliesMemoizedGitStatusWhenSkipped(t *testing.T) {
+	cmd := singleBranchCommander()
+
+	c := New(&config.Config{}, cmd)
+	first, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	if first[0].Git.Branch != "feature" {
+		t.Fatalf("first Snapshot: got branch %q, want feature", first[0].Git.Branch)
+	}
+
+	second, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if second[0].Git.Branch != "feature" {
+		t.Errorf("second Snapshot: got branch %q, want feature (memoized Git should carry over on a skipped tick)", second[0].Git.Branch)
+	}
+	if second[0].Git.GitRoot != "/repo/alpha" {
+		t.Errorf("second Snapshot: got gitRoot %q, want /repo/alpha", second[0].Git.GitRoot)
+	}
+}
+
+func TestSnapshotGitGatingIndependentOfPRElapsing(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	now := time.Unix(1700000000, 0)
+	c := New(&config.Config{}, cmd)
+	c.clock = func() time.Time { return now }
+
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	firstGit, firstGh := countGitCalls(cmd), countGhCalls(cmd)
+
+	now = now.Add(c.GitInterval)
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if got := countGitCalls(cmd); got <= firstGit {
+		t.Errorf("got %d git calls, want more than %d (git interval elapsed)", got, firstGit)
+	}
+	if got := countGhCalls(cmd); got != firstGh {
+		t.Errorf("got %d gh calls, want %d (PR interval has not elapsed)", got, firstGh)
+	}
+}
+
+func TestSnapshotPRGatingIndependentOfGitElapsing(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	now := time.Unix(1700000000, 0)
+	c := New(&config.Config{}, cmd)
+	c.clock = func() time.Time { return now }
+	c.GitInterval = 10 * time.Second
+	c.PRInterval = 1 * time.Second
+
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	firstGit, firstGh := countGitCalls(cmd), countGhCalls(cmd)
+
+	now = now.Add(c.PRInterval)
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if got := countGitCalls(cmd); got != firstGit {
+		t.Errorf("got %d git calls, want %d (git interval has not elapsed)", got, firstGit)
+	}
+	if got := countGhCalls(cmd); got <= firstGh {
+		t.Errorf("got %d gh calls, want more than %d (PR interval elapsed)", got, firstGh)
+	}
+}
