@@ -87,6 +87,11 @@ type Model struct {
 
 	// Help
 	help help.Model
+
+	// epoch identifies the current polling generation. Every switch between
+	// daemon snapshots and self-polling bumps it, which retires the previous
+	// generation's ticks and any snapshot or loss still in flight from it.
+	epoch int
 }
 
 // New creates a new Model.
@@ -165,8 +170,8 @@ func (m Model) Init() tea.Cmd {
 		// notification expiry (evaluated at render time) behaves the same on
 		// both paths.
 		cmds = append(cmds,
-			listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName),
-			renderTickCmd(1*time.Second),
+			listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName, m.epoch),
+			renderTickCmd(1*time.Second, m.epoch),
 		)
 		return tea.Batch(cmds...)
 	}
@@ -175,9 +180,9 @@ func (m Model) Init() tea.Cmd {
 	cmds = append(cmds,
 		m.fetchTmuxCmd(),
 		m.fetchGitCmd(),
-		tmuxTickCmd(1*time.Second),
-		gitTickCmd(m.cfg.GetSettingDuration("git_interval")),
-		prTickCmd(m.cfg.GetSettingDuration("pr_interval")),
+		tmuxTickCmd(1*time.Second, m.epoch),
+		gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch),
+		prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch),
 	)
 
 	return tea.Batch(cmds...)
@@ -198,19 +203,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case TmuxTickMsg:
-		return m, tea.Batch(m.fetchTmuxCmd(), tmuxTickCmd(1*time.Second))
+		if msg.Epoch != m.epoch {
+			return m, nil
+		}
+		return m, tea.Batch(m.fetchTmuxCmd(), tmuxTickCmd(1*time.Second, m.epoch))
 
 	case GitTickMsg:
-		return m, tea.Batch(m.fetchGitCmd(), gitTickCmd(m.cfg.GetSettingDuration("git_interval")))
+		if msg.Epoch != m.epoch {
+			return m, nil
+		}
+		return m, tea.Batch(m.fetchGitCmd(), gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch))
 
 	case PRTickMsg:
-		return m, tea.Batch(m.fetchPRsCmd(), prTickCmd(m.cfg.GetSettingDuration("pr_interval")))
+		if msg.Epoch != m.epoch {
+			return m, nil
+		}
+		return m, tea.Batch(m.fetchPRsCmd(), prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch))
 
 	case SnapshotMsg:
 		return m.handleSnapshot(msg)
 
 	case DaemonLostMsg:
-		return m.handleDaemonLost()
+		return m.handleDaemonLost(msg)
 
 	case RenderTickMsg:
 		// Render-only heartbeat for the daemon path: Bubble Tea always
@@ -224,11 +238,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// own tmuxTickCmd(1*time.Second) after falling back, and without
 		// this guard the render tick would keep rescheduling itself
 		// forever, leaving two independent 1s tickers running side by side
-		// for the rest of the process's life.
-		if m.daemonDecoder == nil {
+		// for the rest of the process's life. The epoch check retires it
+		// when the daemon connection it belonged to has since been
+		// replaced or torn down.
+		if msg.Epoch != m.epoch || m.daemonDecoder == nil {
 			return m, nil
 		}
-		return m, renderTickCmd(1 * time.Second)
+		return m, renderTickCmd(1*time.Second, m.epoch)
 
 	case TmuxUpdatedMsg:
 		return m.handleTmuxUpdated(msg)
@@ -668,6 +684,11 @@ func (m *Model) placeCursor() {
 // handleTmuxUpdated, it does not merge into existing sessions: the snapshot
 // already carries git and PR state, and merging would discard it.
 func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
+	if msg.Epoch != m.epoch {
+		// In flight when the connection was retired. Applying it would
+		// overwrite self-polled state with data from a dead daemon.
+		return m, nil
+	}
 	if !m.daemonReady {
 		// The first snapshot arrived within the deadline set in New; clear
 		// it so a healthy daemon is never dropped for going idle between
@@ -702,12 +723,15 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.refreshDetailCmd())
 	}
 	cmds = append(cmds,
-		listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName))
+		listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName, m.epoch))
 
 	return m, tea.Batch(cmds...)
 }
 
-func (m Model) handleDaemonLost() (tea.Model, tea.Cmd) {
+func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
+	if msg.Epoch != m.epoch {
+		return m, nil
+	}
 	if m.daemonConn == nil && m.daemonDecoder == nil {
 		// Should be unreachable: exactly one listenDaemonCmd is ever in
 		// flight, and it is the one whose error produced this message.
@@ -720,14 +744,15 @@ func (m Model) handleDaemonLost() (tea.Model, tea.Cmd) {
 		m.daemonConn = nil
 		m.daemonDecoder = nil
 	}
+	m.epoch++
 	m.daemonReady = false
 	m.addNotification("daemon lost, polling directly", "warning")
 	return m, tea.Batch(
 		m.fetchTmuxCmd(),
 		m.fetchGitCmd(),
-		tmuxTickCmd(1*time.Second),
-		gitTickCmd(m.cfg.GetSettingDuration("git_interval")),
-		prTickCmd(m.cfg.GetSettingDuration("pr_interval")),
+		tmuxTickCmd(1*time.Second, m.epoch),
+		gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch),
+		prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch),
 	)
 }
 
@@ -851,23 +876,23 @@ func (m Model) handlePRUpdated(msg PRUpdatedMsg) (tea.Model, tea.Cmd) {
 
 // --- Commands ---
 
-func tmuxTickCmd(interval time.Duration) tea.Cmd {
+func tmuxTickCmd(interval time.Duration, epoch int) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return TmuxTickMsg(t)
+		return TmuxTickMsg{Time: t, Epoch: epoch}
 	})
 }
 
-func gitTickCmd(interval time.Duration) tea.Cmd {
+func gitTickCmd(interval time.Duration, epoch int) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return GitTickMsg(t)
+		return GitTickMsg{Time: t, Epoch: epoch}
 	})
 }
 
 // renderTickCmd triggers a repaint with no fetch work, so the daemon path
 // gets the same render cadence tmuxTickCmd gives self-polling.
-func renderTickCmd(interval time.Duration) tea.Cmd {
+func renderTickCmd(interval time.Duration, epoch int) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return RenderTickMsg(t)
+		return RenderTickMsg{Time: t, Epoch: epoch}
 	})
 }
 
@@ -877,9 +902,9 @@ func delayedPRRefreshCmd() tea.Cmd {
 	})
 }
 
-func prTickCmd(interval time.Duration) tea.Cmd {
+func prTickCmd(interval time.Duration, epoch int) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return PRTickMsg(t)
+		return PRTickMsg{Time: t, Epoch: epoch}
 	})
 }
 

@@ -34,11 +34,12 @@ func listenDaemonCmd(
 	ctx context.Context,
 	cmd fetch.Commander,
 	fallbackCurrent string,
+	epoch int,
 ) tea.Cmd {
 	return func() tea.Msg {
 		snap, err := decoder.Next()
 		if err != nil {
-			return DaemonLostMsg{}
+			return DaemonLostMsg{Epoch: epoch}
 		}
 
 		current := fetch.CurrentSession(ctx, cmd)
@@ -59,6 +60,6 @@ func listenDaemonCmd(
 			s.IsLast = s.Name == last
 		}
 
-		return SnapshotMsg{Sessions: snap.Sessions}
+		return SnapshotMsg{Sessions: snap.Sessions, Epoch: epoch}
 	}
 }

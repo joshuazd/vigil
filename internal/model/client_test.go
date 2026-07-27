@@ -30,6 +30,12 @@ func newTestModel() Model {
 	}
 }
 
+func fixtureSessions() []*session.Session {
+	return []*session.Session{
+		{Name: "alpha", Git: session.GitStatus{Branch: "feature/a", Modified: 2}},
+	}
+}
+
 // fakeConn is a net.Conn that only implements SetReadDeadline, recording
 // every call. It embeds a nil net.Conn, so any other method panics if
 // exercised; handleSnapshot must never call anything but SetReadDeadline.
@@ -102,7 +108,7 @@ func TestListenDaemonEmitsSnapshotMsg(t *testing.T) {
 	})
 
 	cmd := fetch.NewMockCommander()
-	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "")()
+	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "", 0)()
 
 	snap, ok := msg.(SnapshotMsg)
 	if !ok {
@@ -129,7 +135,7 @@ func TestListenDaemonResolvesPerClientFlags(t *testing.T) {
 	cmd.OnArgs("tmux display-message -p #{session_name}", "beta", nil)
 	cmd.OnArgs("tmux display-message -p #{client_last_session}", "gamma", nil)
 
-	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "")()
+	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "", 0)()
 	snap := msg.(SnapshotMsg)
 
 	byName := map[string]*session.Session{}
@@ -157,7 +163,7 @@ func TestListenDaemonClearsLastWhenSessionGone(t *testing.T) {
 	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
 	cmd.OnArgs("tmux display-message -p #{client_last_session}", "vanished", nil)
 
-	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "")()
+	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "", 0)()
 	snap := msg.(SnapshotMsg)
 	if snap.Sessions[0].IsLast {
 		t.Error("no session should be marked last when the last session is gone")
@@ -173,7 +179,7 @@ func TestListenDaemonFallsBackToKnownCurrent(t *testing.T) {
 	// MockCommander returns "" for unregistered commands, standing in for
 	// running outside tmux where display-message yields nothing.
 	cmd := fetch.NewMockCommander()
-	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "alpha")()
+	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "alpha", 0)()
 	snap := msg.(SnapshotMsg)
 	if !snap.Sessions[0].IsCurrent {
 		t.Error("should fall back to the current session detected at startup")
@@ -184,7 +190,7 @@ func TestListenDaemonEmitsDaemonLostOnClose(t *testing.T) {
 	conn := serveOneSnapshot(t, nil)
 
 	cmd := fetch.NewMockCommander()
-	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "")()
+	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "", 0)()
 	if _, ok := msg.(DaemonLostMsg); !ok {
 		t.Fatalf("got %T, want DaemonLostMsg", msg)
 	}
@@ -246,7 +252,7 @@ func TestHandleDaemonLostClosesConnection(t *testing.T) {
 	m.daemonDecoder = protocol.NewDecoder(conn)
 	m.daemonReady = true
 
-	next, _ := m.handleDaemonLost()
+	next, _ := m.handleDaemonLost(DaemonLostMsg{Epoch: m.epoch})
 	m2 := next.(Model)
 
 	if m2.daemonConn != nil {
@@ -270,7 +276,7 @@ func TestHandleDaemonLostClosesConnection(t *testing.T) {
 func TestHandleDaemonLostIsIdempotent(t *testing.T) {
 	m := newTestModel()
 
-	next, cmd := m.handleDaemonLost()
+	next, cmd := m.handleDaemonLost(DaemonLostMsg{Epoch: m.epoch})
 	m2 := next.(Model)
 
 	if len(m2.notifications) != 0 {
@@ -290,12 +296,12 @@ func TestHandleDaemonLostIsIdempotent(t *testing.T) {
 func TestRenderTickStopsWhenDaemonGone(t *testing.T) {
 	m := newTestModel()
 
-	if _, cmd := m.Update(RenderTickMsg(time.Now())); cmd != nil {
+	if _, cmd := m.Update(RenderTickMsg{Time: time.Now(), Epoch: m.epoch}); cmd != nil {
 		t.Error("render tick should not reschedule once the daemon is gone (nil daemonDecoder)")
 	}
 
 	m.daemonDecoder = protocol.NewDecoder(strings.NewReader(""))
-	if _, cmd := m.Update(RenderTickMsg(time.Now())); cmd == nil {
+	if _, cmd := m.Update(RenderTickMsg{Time: time.Now(), Epoch: m.epoch}); cmd == nil {
 		t.Error("render tick should keep rescheduling while a daemon is connected")
 	}
 }
@@ -450,7 +456,7 @@ func TestNewArmsFirstSnapshotReadDeadline(t *testing.T) {
 
 	done := make(chan tea.Msg, 1)
 	go func() {
-		done <- listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName)()
+		done <- listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName, m.epoch)()
 	}()
 
 	select {
@@ -506,7 +512,7 @@ func TestListenDaemonEmitsDaemonLostOnReadTimeout(t *testing.T) {
 	}
 
 	cmd := fetch.NewMockCommander()
-	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "")()
+	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "", 0)()
 	if _, ok := msg.(DaemonLostMsg); !ok {
 		t.Fatalf("got %T, want DaemonLostMsg", msg)
 	}
