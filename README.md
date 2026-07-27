@@ -34,9 +34,15 @@ vigil
 
 # Show help
 vigil --help
+
+# Run the shared state daemon (optional: polls tmux/git/PR state on an
+# interval and broadcasts it to every connected vigil client)
+vigil daemon
 ```
 
 Vigil discovers all tmux sessions, reads git status from each session's working directory, and fetches PR state via `gh`. Sessions are color-coded by state: idle, pending review, CI failing, mergeable, etc.
+
+If `vigil daemon` is running, `vigil` consumes its broadcast snapshots instead of polling on its own. If the daemon isn't running, is unreachable, or doesn't send a snapshot within a few seconds of connecting, `vigil` falls back to polling tmux/git/PR state itself - both modes render identically.
 
 ## Keybindings
 

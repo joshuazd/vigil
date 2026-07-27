@@ -16,6 +16,9 @@ Go + Bubble Tea TUI. Single static binary.
 - `internal/action/` — Merge, approve, cleanup, rebase, draft, dispatch actions
 - `internal/config/` — TOML config loading, hook template expansion and execution
 - `internal/cache/` — JSON session cache for instant startup
+- `internal/collect/` - UI-independent session state collection (shared by the daemon and the TUI's self-polling fallback)
+- `internal/protocol/` - newline-delimited JSON snapshot protocol over a unix socket
+- `internal/daemon/` - `vigil daemon`: polls tmux/git/PR state on `git_interval` (default 3s), broadcasting each snapshot to every connected client, including one immediately to a client that just connected
 
 ## Testing
 
@@ -46,3 +49,5 @@ make install   # copy to ~/.local/bin/vigil
 - Draft toggle (`D`) with batch support
 - Auto-cleanup merged sessions (configurable via `auto_cleanup` setting, off by default)
 - Cache interop with previous Python version (same JSON format)
+- The TUI dials the daemon socket on startup and consumes its broadcast snapshots when reachable; it falls back to self-polling if the daemon is never reached, does not send a first snapshot within a bounded wait, or is lost mid-session
+- Both paths are permanently supported and must render identically (git/PR data, sort order, notifications)
