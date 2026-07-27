@@ -1321,10 +1321,23 @@ func TestStatusBarShowsHealth(t *testing.T) {
 	}
 }
 
+// TestStatusBarOmitsEmptyHealth covers both shapes an unguarded empty health
+// segment would take: a doubled separator when another segment follows it, and
+// a dangling one when nothing does. A session fixture is required for the first
+// - with no sessions there is no following segment, and the doubled separator
+// can never appear whether the guard exists or not.
 func TestStatusBarOmitsEmptyHealth(t *testing.T) {
-	out := RenderStatusBar(nil, nil, session.SortCreated, 80, "")
+	sessions := []*session.Session{
+		{Name: "SC-1 one", Git: session.GitStatus{Branch: "a"}},
+	}
+	out := StripANSI(RenderStatusBar(sessions, nil, session.SortCreated, 80, ""))
 	if strings.Contains(out, "·  ·") {
-		t.Errorf("empty health left a stray separator in %q", out)
+		t.Errorf("empty health left a doubled separator in %q", out)
+	}
+
+	bare := strings.TrimRight(StripANSI(RenderStatusBar(nil, nil, session.SortCreated, 80, "")), " ")
+	if strings.HasSuffix(bare, "·") {
+		t.Errorf("empty health left a dangling separator in %q", bare)
 	}
 }
 
@@ -1929,12 +1942,12 @@ func TestTableRendersCursorRowWithinWidth(t *testing.T) {
 }
 ```
 
-`StripANSI` does not exist yet; Step 3 adds it to `layout.go`.
+`StripANSI` already exists in `notification.go` (task 4 added it there). Use it; do not redeclare it.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./internal/view/ -run 'Layout|Truncate|Table' -v`
-Expected: FAIL to compile - `LayoutForWidth`, `TruncateVisible`, `truncateName`, `StripANSI` are undefined.
+Expected: FAIL to compile - `LayoutForWidth`, `TruncateVisible`, `truncateName` are undefined.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -2117,22 +2130,16 @@ func truncateName(name string, width int) string {
 	return string(runes[:width-1]) + "…"
 }
 
-// StripANSI removes escape sequences. Exported alongside VisibleWidth so that
-// callers rendering into a fixed-width pane - and the tests that check they
-// did - have one definition of "what is actually on screen" to work from.
-// Reuses the pattern clampNotification already uses.
-func StripANSI(s string) string {
-	return ansiPattern.ReplaceAllString(s, "")
-}
-
 // VisibleWidth returns how many terminal columns s occupies, ignoring ANSI
-// escapes.
+// escapes. Exported so callers rendering into a fixed-width pane - and the
+// tests that check they did - have one definition of "what is actually on
+// screen" to work from.
 func VisibleWidth(s string) int {
 	return visibleLen(s)
 }
 ```
 
-Use `StripANSI` in the view tests below in place of an unexported `stripANSI`.
+`StripANSI` already exists: task 4 needed it for the status bar tests and added it to `notification.go`, next to the `ansiPattern` it uses. Leave it there and do not redeclare it here.
 
 `internal/view/table.go` - delete the old `const` block (its names move to `layout.go`) and render against the layout:
 
