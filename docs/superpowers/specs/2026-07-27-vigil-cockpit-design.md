@@ -208,24 +208,34 @@ were found during implementation rather than during design.
 
 ### Must be resolved before phase 2 ships
 
-- **The daemon has no start-time mutual exclusion.** With a stale socket file present,
-  two daemons can both unlink and both bind, leaving two live daemons with the first
-  orphaned yet still polling and still writing the shared cache. Mapping `EADDRINUSE`
-  to `ErrAlreadyRunning` covers the friendly-message case only. This is dormant today
-  because nothing autostarts the daemon, and it becomes live the moment phase 2 has
-  `vigil` spawn the daemon on demand from N panels - that is precisely the race, run
-  concurrently. The fix is an flock'd lock file.
-- **One wedged client stalls the poll loop.** The daemon sends to clients sequentially
-  with a 5 second write deadline, and the connect-time send runs on the accept
-  goroutine, so a client that connects and never reads also blocks new connections.
-  Correct at one or two clients; a panel per session changes that. A single-writer
-  design (accept hands new connections to the `Run` loop over a channel) removes both
-  symptoms and the double-send window below.
-- **No reconnect, and no staleness signal for a live-but-silent daemon.** The client's
-  first-snapshot read deadline is cleared once the first snapshot arrives, so a daemon
-  that is alive but not broadcasting freezes the TUI on stale data indefinitely with no
-  indicator. Fallback is one-way and permanent. Acceptable while self-polling is a
-  supported mode and there is one client; not acceptable with a panel per session.
+- **RESOLVED (task 1).** ~~**The daemon has no start-time mutual exclusion.** With a
+  stale socket file present, two daemons can both unlink and both bind, leaving two
+  live daemons with the first orphaned yet still polling and still writing the shared
+  cache. Mapping `EADDRINUSE` to `ErrAlreadyRunning` covers the friendly-message case
+  only. This is dormant today because nothing autostarts the daemon, and it becomes
+  live the moment phase 2 has `vigil` spawn the daemon on demand from N panels - that
+  is precisely the race, run concurrently. The fix is an flock'd lock file.~~ Startup
+  now serializes on an flock'd lock file held across the stale-socket removal and the
+  bind.
+- **RESOLVED (task 2).** ~~**One wedged client stalls the poll loop.** The daemon
+  sends to clients sequentially with a 5 second write deadline, and the connect-time
+  send runs on the accept goroutine, so a client that connects and never reads also
+  blocks new connections. Correct at one or two clients; a panel per session changes
+  that. A single-writer design (accept hands new connections to the `Run` loop over a
+  channel) removes both symptoms and the double-send window below.~~ Every client now
+  gets its own writer goroutine and a one-deep latest-wins queue, and accept hands
+  connections to `Run` over a channel, so a stalled client can neither block the poll
+  loop nor block new connections.
+- **RESOLVED (tasks 3, 4).** ~~**No reconnect, and no staleness signal for a
+  live-but-silent daemon.** The client's first-snapshot read deadline is cleared once
+  the first snapshot arrives, so a daemon that is alive but not broadcasting freezes
+  the TUI on stale data indefinitely with no indicator. Fallback is one-way and
+  permanent. Acceptable while self-polling is a supported mode and there is one
+  client; not acceptable with a panel per session.~~ A self-polling client now probes
+  the socket every 2s and reconnects when the daemon returns; the reconnect is
+  epoch-guarded so a stale probe from a retired generation cannot install itself. A
+  connected but silent daemon now shows `daemon stale Ns` in the status bar after
+  three poll intervals.
 
 ### Landmine to check before phase 3
 
@@ -246,6 +256,27 @@ Prefer a `pane_id` or a pane title over a positional target.
   concurrency-safe for its call log, not its handler maps.
 - A permanently failing `gh` now shows the last known PR indefinitely on both paths,
   with no staleness marker. That is the deliberate trade behind memoizing PR state.
+
+### Still open after phase 2
+
+- Collapsing the TUI's self-polling onto `internal/collect` (still duplicated, still
+  able to drift).
+- Lazy review-thread fetching (the daemon still spends two GraphQL calls per PR per
+  cycle).
+- The daemon-up versus daemon-down TUI comparison was never run as a timing
+  observation.
+- A permanently failing `gh` still shows the last known PR indefinitely with no
+  staleness marker. The new marker covers a silent *daemon*, not a silent `gh`.
+- `internal/view`'s tests prove less than they appear to about styling. Under `go
+  test` there is no tty and no forced color profile, so lipgloss emits zero ANSI
+  bytes and every "styled" cell in those tests is a plain string. The synthetic-string
+  test for escape-aware truncation is the only coverage of that behavior. This is a
+  real bound on what the view suite verifies and should not be discovered a third
+  time.
+- A live panel resized across a tier boundary is unobserved. Three panes at fixed
+  widths were verified rendering real sessions, but not one pane resized through the
+  boundaries. `tea.WindowSizeMsg` handling is unchanged pre-existing code, so the risk
+  is low, but that is not the same as having checked it.
 
 ### Process note
 
