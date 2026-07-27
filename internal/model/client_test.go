@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
@@ -209,17 +211,17 @@ func TestHandleSnapshotClearsFirstSnapshotDeadline(t *testing.T) {
 		t.Errorf("want deadline cleared to the zero time, got %v", conn.deadlines[0])
 	}
 
-	next, _ = m2.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{{Name: "alpha"}}})
-	m3 := next.(Model)
+	_, _ = m2.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{{Name: "alpha"}}})
 	if len(conn.deadlines) != 1 {
 		t.Errorf("deadline should only be touched once, got %d calls", len(conn.deadlines))
 	}
-	_ = m3
 }
 
 // TestHandleSnapshotNilConnDoesNotPanic covers the nil-guard: daemonConn can
 // be nil (e.g. in tests, or hypothetically if wiring ever changes), and
-// handleSnapshot must not dereference it unconditionally.
+// handleSnapshot must not dereference it unconditionally. The daemonReady
+// assertion here is redundant with TestHandleSnapshotClearsFirstSnapshotDeadline;
+// this test's only real value is that it does not panic with a nil conn.
 func TestHandleSnapshotNilConnDoesNotPanic(t *testing.T) {
 	m := newTestModel()
 	next, _ := m.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{{Name: "alpha"}}})
@@ -256,6 +258,127 @@ func TestHandleDaemonLostClosesConnection(t *testing.T) {
 	}
 	if err := conn.Close(); err == nil {
 		t.Error("connection should already be closed by handleDaemonLost")
+	}
+}
+
+// TestHandleDaemonLostIsIdempotent guards against a future call site adding
+// a second in-flight listenDaemonCmd: handleDaemonLost must not restart the
+// fallback poll loops (or add a second warning) if the daemon connection is
+// already gone.
+func TestHandleDaemonLostIsIdempotent(t *testing.T) {
+	m := newTestModel()
+
+	next, cmd := m.handleDaemonLost()
+	m2 := next.(Model)
+
+	if len(m2.notifications) != 0 {
+		t.Errorf("want no notification when there was no daemon connection to lose, got %d", len(m2.notifications))
+	}
+	if cmd != nil {
+		t.Error("want a nil command when there was no daemon connection to lose")
+	}
+}
+
+// TestHandleSnapshotWarmsCachesAndClearsInitialLoad is the test that guards
+// the actual point of this task: a daemon snapshot's git/PR state must
+// survive into the model's caches unmerged and unmutated, and the
+// self-polling-only initialLoad flag must still clear via the shared
+// checkStateTransitions() call.
+func TestHandleSnapshotWarmsCachesAndClearsInitialLoad(t *testing.T) {
+	m := newTestModel()
+	m.initialLoad = true
+
+	pr := &session.PRStatus{Number: 7}
+	sess := &session.Session{
+		Name: "alpha",
+		Git:  session.GitStatus{Branch: "feature/x"},
+		PR:   pr,
+	}
+
+	next, _ := m.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{sess}})
+	m2 := next.(Model)
+
+	if got, ok := m2.gitCache["alpha"]; !ok || got.Branch != "feature/x" {
+		t.Errorf("gitCache[alpha] = %+v, ok=%v, want Branch=feature/x", got, ok)
+	}
+	if got := m2.prCache["feature/x"]; got != pr {
+		t.Errorf("prCache[feature/x] = %v, want %v (same pointer)", got, pr)
+	}
+	if m2.initialLoad {
+		t.Error("initialLoad should be cleared after the first snapshot, same as the self-polling handlers")
+	}
+	if !m2.initialPRDone {
+		t.Error("initialPRDone should be set when the snapshot actually carries PR data")
+	}
+	if len(m2.sessions) != 1 || m2.sessions[0] != sess {
+		t.Error("handleSnapshot should hold onto the daemon's session pointer directly, not merge or copy it")
+	}
+}
+
+// TestHandleSnapshotLeavesInitialPRDoneFalseWithoutPRData covers the fix for
+// blank PR columns after a fallback: if the daemon's own PR fetch failed or
+// is still pending, a snapshot can carry sessions with no PR data at all.
+// Marking initialPRDone in that case would suppress handleGitUpdated's
+// eager first PR fetch after falling back to self-polling, leaving PR
+// columns blank for a full pr_interval (30s by default) instead of one.
+func TestHandleSnapshotLeavesInitialPRDoneFalseWithoutPRData(t *testing.T) {
+	m := newTestModel()
+	next, _ := m.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{
+		{Name: "alpha", Git: session.GitStatus{Branch: "feature/x"}},
+	}})
+	m2 := next.(Model)
+	if m2.initialPRDone {
+		t.Error("initialPRDone should stay false when no session in the snapshot carries PR data")
+	}
+}
+
+// TestNewArmsFirstSnapshotReadDeadline proves New actually sets the read
+// deadline on the freshly dialed connection, rather than merely proving
+// listenDaemonCmd maps some error to DaemonLostMsg (already covered by
+// TestListenDaemonEmitsDaemonLostOnClose). It points protocol.SocketPath at
+// a throwaway directory via XDG_RUNTIME_DIR, listens there without ever
+// accepting or writing anything (standing in for a daemon whose first poll
+// failed), and shortens the package var so the test doesn't wait out the
+// real 5s. If New's SetReadDeadline call is removed, decoder.Next() blocks
+// forever and this test fails on the 2s bound below instead of hanging the
+// suite (the leaked goroutine dies when t.Cleanup closes the listener at
+// the end of the test, or otherwise when the test binary exits).
+func TestNewArmsFirstSnapshotReadDeadline(t *testing.T) {
+	dir := shortTempDir(t)
+	sockDir := filepath.Join(dir, "vigil")
+	if err := os.Mkdir(sockDir, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+
+	sockPath := filepath.Join(sockDir, "vigild.sock")
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	orig := firstSnapshotTimeout
+	firstSnapshotTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { firstSnapshotTimeout = orig })
+
+	m := New(&config.Config{}, fetch.NewMockCommander())
+	if m.daemonDecoder == nil {
+		t.Fatal("New did not dial the daemon; want it to have connected to the listener above")
+	}
+
+	done := make(chan tea.Msg, 1)
+	go func() {
+		done <- listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName)()
+	}()
+
+	select {
+	case msg := <-done:
+		if _, ok := msg.(DaemonLostMsg); !ok {
+			t.Fatalf("got %T, want DaemonLostMsg", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("listenDaemonCmd did not return within 2s: New's first-snapshot read deadline is not armed")
 	}
 }
 

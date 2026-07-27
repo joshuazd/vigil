@@ -15,6 +15,12 @@ type GitTickMsg time.Time
 // PRTickMsg triggers a PR polling cycle.
 type PRTickMsg time.Time
 
+// RenderTickMsg triggers a repaint with no fetch work. The daemon path uses
+// it to get the same 1s render cadence self-polling gets for free from
+// TmuxTickMsg, so time-based rendering (like notification expiry) behaves
+// the same whether or not a daemon is connected.
+type RenderTickMsg time.Time
+
 // TmuxUpdatedMsg carries tmux session metadata (fast, no git/PR).
 type TmuxUpdatedMsg struct {
 	Sessions []*session.Session

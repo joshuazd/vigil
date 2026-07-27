@@ -162,6 +162,29 @@ func New(cfg *config.Config, cmd fetch.Commander) Model {
 func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
+	if m.daemonDecoder != nil {
+		// Skip the cache-load command entirely: the daemon sends its latest
+		// snapshot immediately on connect (see internal/daemon's accept()),
+		// which arrives about as fast as cache.Load parses the cache file
+		// and is strictly fresher, so there is no first-paint benefit to
+		// loading the cache too. There is a real cost to doing both: with
+		// tea.Batch's no-ordering guarantee, a cache-load TmuxUpdatedMsg
+		// arriving after the first SnapshotMsg would route through
+		// handleTmuxUpdated and rebuild sessions from stale cache data,
+		// dropping newly created sessions and resetting HasBell, which can
+		// fire a spurious state-transition notification and hook.
+		//
+		// renderTickCmd keeps the 1s repaint heartbeat self-polling gets
+		// for free from tmuxTickCmd, without triggering any fetch work, so
+		// notification expiry (evaluated at render time) behaves the same
+		// on both paths.
+		cmds = append(cmds,
+			listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName),
+			renderTickCmd(1*time.Second),
+		)
+		return tea.Batch(cmds...)
+	}
+
 	// Load cache for instant display (skip if already loaded in New for popup mode)
 	if len(m.sessions) == 0 {
 		cachePath := cache.CachePath()
@@ -171,12 +194,6 @@ func (m Model) Init() tea.Cmd {
 				return TmuxUpdatedMsg{Sessions: cached}
 			})
 		}
-	}
-
-	if m.daemonDecoder != nil {
-		cmds = append(cmds,
-			listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName))
-		return tea.Batch(cmds...)
 	}
 
 	// Start independent poll cycles: tmux (1s), git (configurable), PR (configurable)
@@ -219,6 +236,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DaemonLostMsg:
 		return m.handleDaemonLost()
+
+	case RenderTickMsg:
+		// Render-only heartbeat for the daemon path: Bubble Tea always
+		// calls View() after Update, so this does nothing but keep the
+		// screen repainting at the same 1s cadence self-polling gets from
+		// tmuxTickCmd, which is what lets notification expiry (evaluated
+		// in View against a 3s TTL) behave the same on both paths.
+		return m, renderTickCmd(1 * time.Second)
 
 	case TmuxUpdatedMsg:
 		return m.handleTmuxUpdated(msg)
@@ -638,11 +663,19 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	m.sessions = msg.Sessions
 
 	// Keep the caches warm so a later fall back to self-polling starts
-	// with data rather than blank columns.
+	// with data rather than blank columns. A snapshot delivers git and PR
+	// together, so if any session actually has PR data, there is no
+	// self-polling-style wait for a branch to show up before fetching PRs.
+	// If the daemon's PR fetch failed or is still pending, leave the flag
+	// alone so a later fallback still does its own eager PR fetch instead
+	// of leaving the PR column blank for a full pr_interval.
 	for _, s := range m.sessions {
 		m.gitCache[s.Name] = s.Git
 		if s.Git.Branch != "" && s.PR != nil {
 			m.prCache[s.Git.Branch] = s.PR
+		}
+		if s.PR != nil {
+			m.initialPRDone = true
 		}
 	}
 
@@ -658,10 +691,6 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// A snapshot delivers git and PR data together, so there is no
-	// self-polling-style wait for a branch to show up before fetching PRs.
-	m.initialPRDone = true
-
 	cmds := m.checkStateTransitions()
 	if m.detailOpen {
 		cmds = append(cmds, m.refreshDetailCmd())
@@ -673,6 +702,13 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleDaemonLost() (tea.Model, tea.Cmd) {
+	if m.daemonConn == nil && m.daemonDecoder == nil {
+		// Should be unreachable: exactly one listenDaemonCmd is ever in
+		// flight, and it is the one whose error produced this message.
+		// Guarded anyway so a future call site cannot silently double
+		// every poll loop by re-running the fallback commands below.
+		return m, nil
+	}
 	if m.daemonConn != nil {
 		_ = m.daemonConn.Close()
 		m.daemonConn = nil
@@ -833,6 +869,14 @@ func tmuxTickCmd(interval time.Duration) tea.Cmd {
 func gitTickCmd(interval time.Duration) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return GitTickMsg(t)
+	})
+}
+
+// renderTickCmd triggers a repaint with no fetch work, so the daemon path
+// gets the same render cadence tmuxTickCmd gives self-polling.
+func renderTickCmd(interval time.Duration) tea.Cmd {
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
+		return RenderTickMsg(t)
 	})
 }
 

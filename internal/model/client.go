@@ -16,7 +16,10 @@ import (
 // milliseconds; a daemon whose first poll failed has nothing to send and
 // would otherwise block Next() forever. On timeout, listenDaemonCmd's error
 // path emits DaemonLostMsg and the TUI falls back to self-polling.
-const firstSnapshotTimeout = 5 * time.Second
+//
+// A var, not a const, so tests can shorten it rather than waiting out the
+// real 5s.
+var firstSnapshotTimeout = 5 * time.Second
 
 func dialDaemon(path string) (net.Conn, error) {
 	return net.DialTimeout("unix", path, 300*time.Millisecond)
