@@ -81,12 +81,23 @@ func Save(path string, sessions []*session.Session) error {
 		return err
 	}
 
-	// Atomic write via temp file + rename
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// Atomic write via temp file + rename. The temp file needs a unique name:
+	// the daemon and a self-polling TUI both write this cache, and a shared
+	// fixed name lets two writers interleave into one file and rename the
+	// corruption into place.
+	tmp, err := os.CreateTemp(dir, "cache-*.json")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // Load reads sessions from cache. Returns nil if missing, stale, or invalid.

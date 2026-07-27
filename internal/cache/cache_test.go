@@ -111,6 +111,36 @@ func TestWrongVersionReturnsNil(t *testing.T) {
 	}
 }
 
+// TestSaveUsesUniqueTempFile pins the unique temp name. A fixed path+".tmp"
+// lets two writers (the daemon plus a self-polling TUI) interleave into one
+// temp file and rename the corruption into place, so Save must not depend on
+// that name being available. Occupying it with a directory makes any write to
+// it fail, which a fixed-name Save cannot survive.
+func TestSaveUsesUniqueTempFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cache.json")
+	if err := os.Mkdir(p+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Save(p, []*session.Session{makeSession("test")}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if loaded := Load(p, 30*time.Second); loaded == nil || len(loaded) != 1 {
+		t.Fatalf("got %v, want the saved session back", loaded)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "cache.json" && e.Name() != "cache.json.tmp" {
+			t.Errorf("Save left %q behind, want the temp file cleaned up", e.Name())
+		}
+	}
+}
+
 func TestFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cache.json")
