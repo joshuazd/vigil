@@ -201,6 +201,62 @@ Inverting the containment gets the same picture on screen with tmux doing the te
 
 **Dispatch from vigil only, dropping the menu bar.** Fewest moving parts, but loses the ability to dispatch without a terminal focused, which is the part of the current workflow that works well.
 
+## Carried forward from phases 0-1
+
+Recorded here because phase 2 planning starts from this document, and because these
+were found during implementation rather than during design.
+
+### Must be resolved before phase 2 ships
+
+- **The daemon has no start-time mutual exclusion.** With a stale socket file present,
+  two daemons can both unlink and both bind, leaving two live daemons with the first
+  orphaned yet still polling and still writing the shared cache. Mapping `EADDRINUSE`
+  to `ErrAlreadyRunning` covers the friendly-message case only. This is dormant today
+  because nothing autostarts the daemon, and it becomes live the moment phase 2 has
+  `vigil` spawn the daemon on demand from N panels - that is precisely the race, run
+  concurrently. The fix is an flock'd lock file.
+- **One wedged client stalls the poll loop.** The daemon sends to clients sequentially
+  with a 5 second write deadline, and the connect-time send runs on the accept
+  goroutine, so a client that connects and never reads also blocks new connections.
+  Correct at one or two clients; a panel per session changes that. A single-writer
+  design (accept hands new connections to the `Run` loop over a channel) removes both
+  symptoms and the double-send window below.
+- **No reconnect, and no staleness signal for a live-but-silent daemon.** The client's
+  first-snapshot read deadline is cleared once the first snapshot arrives, so a daemon
+  that is alive but not broadcasting freezes the TUI on stale data indefinitely with no
+  indicator. Fallback is one-way and permanent. Acceptable while self-polling is a
+  supported mode and there is one client; not acceptable with a panel per session.
+
+### Landmine to check before phase 3
+
+`launch_claude_in_pane` targets the pane positionally as `:claude.1`, while this
+document's panel geometry uses `split-window -vb` / `-hb`, which inserts the new pane
+*before* the existing one. tmux pane indexes are positional, so adding a panel likely
+renumbers the Claude pane to `.2` and phase 0's respawn would then target the panel.
+Prefer a `pane_id` or a pane title over a positional target.
+
+### Worth knowing
+
+- `internal/collect` and the TUI's self-polling in `model.go` now implement the same
+  job twice and have already drifted once (the extraction silently dropped branch
+  deduplication). Collapsing the fallback onto `collect` is the durable fix.
+- Two dependencies are correct today but unrecorded in code: concurrent `send` on one
+  connection is frame-safe only because `protocol.Encode` performs exactly one `Write`
+  and Go takes a per-fd write lock, and `internal/fetch`'s `MockCommander` is only
+  concurrency-safe for its call log, not its handler maps.
+- A permanently failing `gh` now shows the last known PR indefinitely on both paths,
+  with no staleness marker. That is the deliberate trade behind memoizing PR state.
+
+### Process note
+
+Five tests written into the phases 0-1 plan would have passed with their subject
+deleted; the implementations were mostly correct while the verification was not. Plan-
+authored tests need an explicit "would this fail if the code it names were removed?"
+pass before dispatch. Two related traps recurred: `net.UnixListener.Close()` unlinks
+its socket by default, so a test that closes a listener proves nothing about explicit
+removal; and a test fixture that stands in for the script under test hides ordering
+bugs in that script.
+
 ## Plan decomposition
 
 This spec is deliberately larger than one implementation plan. The phases are the decomposition: each gets its own plan and its own implementation cycle, written when the previous phase has been lived on.
