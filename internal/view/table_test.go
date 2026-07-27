@@ -22,6 +22,51 @@ func tableFixture() []*session.Session {
 	}
 }
 
+// wideCellFixture is tableFixture's counterpart for exercising truncation
+// itself: tableFixture's cells are all short enough to fit even the
+// narrowest surviving column untruncated, so a renderRow bug that drops a
+// TruncateVisible call is invisible against it. This fixture's single
+// session has a name, a git cell, and a PR cell each wide enough to overflow
+// the compact/full column widths, so truncation is load-bearing rather than
+// a no-op.
+func wideCellFixture() []*session.Session {
+	staleAge := 172800 // 2 days: renders a stale marker and exceeds colGit untruncated
+	return []*session.Session{
+		{
+			Name: "SC-999999 an extremely long session name that overflows every name tier",
+			Git: session.GitStatus{
+				Branch:        "feature/wide",
+				Modified:      30,
+				Added:         120,
+				Deleted:       70,
+				Unpushed:      50,
+				RebaseAgeSecs: &staleAge,
+			},
+			PR: &session.PRStatus{
+				Number: 4521, State: "OPEN", Checks: "fail",
+				ReviewDecision: "CHANGES_REQUESTED", UnresolvedComments: 3, HasConflicts: true,
+			},
+		},
+	}
+}
+
+// tableTestFixtures pairs a name with the sessions it renders, for tests
+// that must exercise both a fixture whose cells fit untruncated and one
+// whose cells do not. A func, not a package var, so each test gets its own
+// unshared session slices.
+func tableTestFixtures() []struct {
+	name     string
+	sessions []*session.Session
+} {
+	return []struct {
+		name     string
+		sessions []*session.Session
+	}{
+		{"tableFixture", tableFixture()},
+		{"wideCellFixture", wideCellFixture()},
+	}
+}
+
 // TestTableNeverExceedsItsWidth is the panel's hard requirement. A per-line
 // width check alone cannot tell "the row fit" from "the row wrapped into two
 // lines that each fit" - lipgloss Width() word-wraps oversized content rather
@@ -31,15 +76,17 @@ func tableFixture() []*session.Session {
 // per-line check alone would miss.
 func TestTableNeverExceedsItsWidth(t *testing.T) {
 	const height = 2
-	for _, width := range []int{12, 20, 26, 30, 40, 43, 50, 62, 80, 104, 200} {
-		out := RenderTable(tableFixture(), 0, map[string]bool{}, 86400, width, height, "")
-		lines := strings.Split(out, "\n")
-		if len(lines) != height {
-			t.Errorf("width %d: got %d lines, want %d (a wrapped row inflates this)", width, len(lines), height)
-		}
-		for i, line := range lines {
-			if got := visibleLen(line); got > width {
-				t.Errorf("width %d line %d: %d visible columns\n%q", width, i, got, line)
+	for _, fx := range tableTestFixtures() {
+		for _, width := range []int{12, 20, 26, 30, 40, 43, 50, 62, 80, 104, 200} {
+			out := RenderTable(fx.sessions, 0, map[string]bool{}, 86400, width, height, "")
+			lines := strings.Split(out, "\n")
+			if len(lines) != height {
+				t.Errorf("%s width %d: got %d lines, want %d (a wrapped row inflates this)", fx.name, width, len(lines), height)
+			}
+			for i, line := range lines {
+				if got := visibleLen(line); got > width {
+					t.Errorf("%s width %d line %d: %d visible columns\n%q", fx.name, width, i, got, line)
+				}
 			}
 		}
 	}
@@ -81,15 +128,17 @@ func TestTableDropsGitInAPanelWidthRow(t *testing.T) {
 // is required to catch it: N sessions in, N lines out.
 func TestTableRendersCursorRowWithinWidth(t *testing.T) {
 	const height = 2
-	for _, width := range []int{20, 40, 104} {
-		out := RenderTable(tableFixture(), 0, map[string]bool{}, 86400, width, height, "")
-		lines := strings.Split(out, "\n")
-		if len(lines) != height {
-			t.Errorf("width %d: got %d lines, want %d (the cursor row wrapped)", width, len(lines), height)
-		}
-		cursorRow := lines[0]
-		if got := visibleLen(cursorRow); got > width {
-			t.Errorf("width %d: cursor row is %d visible columns", width, got)
+	for _, fx := range tableTestFixtures() {
+		for _, width := range []int{20, 40, 104} {
+			out := RenderTable(fx.sessions, 0, map[string]bool{}, 86400, width, height, "")
+			lines := strings.Split(out, "\n")
+			if len(lines) != height {
+				t.Errorf("%s width %d: got %d lines, want %d (the cursor row wrapped)", fx.name, width, len(lines), height)
+			}
+			cursorRow := lines[0]
+			if got := visibleLen(cursorRow); got > width {
+				t.Errorf("%s width %d: cursor row is %d visible columns", fx.name, width, got)
+			}
 		}
 	}
 }
