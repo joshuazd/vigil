@@ -1,36 +1,57 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/daemon"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/model"
 )
 
 var version = "dev"
 
+func parseArgs(args []string) (string, error) {
+	if len(args) == 0 {
+		return "tui", nil
+	}
+	switch args[0] {
+	case "daemon":
+		return "daemon", nil
+	case "--help", "-h":
+		return "help", nil
+	case "--version", "-v":
+		return "version", nil
+	default:
+		return "", fmt.Errorf("unknown argument: %s", args[0])
+	}
+}
+
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "--help", "-h":
-			fmt.Println("vigil — TUI mission control for tmux sessions")
-			fmt.Println()
-			fmt.Println("Usage: vigil [--help] [--version]")
-			fmt.Println()
-			fmt.Println("Config: ~/.config/vigil/config.toml")
-			os.Exit(0)
-		case "--version", "-v":
-			fmt.Println("vigil " + version)
-			os.Exit(0)
-		}
+	command, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
+		printUsage(os.Stderr)
+		os.Exit(2)
 	}
 
-	// Check dependencies
+	switch command {
+	case "help":
+		printUsage(os.Stdout)
+		return
+	case "version":
+		fmt.Println("vigil " + version)
+		return
+	}
+
 	for _, dep := range []string{"tmux", "git", "gh"} {
 		if _, err := exec.LookPath(dep); err != nil {
 			fmt.Fprintf(os.Stderr, "vigil: %s not found in PATH\n", dep)
@@ -38,20 +59,47 @@ func main() {
 		}
 	}
 
-	// Load config
 	cfg, err := config.Load(config.ConfigPath())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "vigil: %v (using defaults)\n", err)
 	}
-
-	// Create commander
 	cmd := &fetch.ExecCommander{}
 
-	// Create and run app
+	switch command {
+	case "daemon":
+		if err := runDaemon(cfg, cmd); err != nil {
+			fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
+			os.Exit(1)
+		}
+	default:
+		if err := runTUI(cfg, cmd); err != nil {
+			fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
+			os.Exit(1)
+		}
+	}
+}
+
+func runDaemon(cfg *config.Config, cmd fetch.Commander) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return daemon.New(cfg, cmd).Run(ctx)
+}
+
+func runTUI(cfg *config.Config, cmd fetch.Commander) error {
 	m := model.New(cfg, cmd)
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
-		os.Exit(1)
-	}
+	_, err := p.Run()
+	return err
+}
+
+func printUsage(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "vigil - TUI mission control for tmux sessions")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Usage:")
+	_, _ = fmt.Fprintln(w, "  vigil            Run the dashboard")
+	_, _ = fmt.Fprintln(w, "  vigil daemon     Run the state daemon in the foreground")
+	_, _ = fmt.Fprintln(w, "  vigil --help")
+	_, _ = fmt.Fprintln(w, "  vigil --version")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Config: ~/.config/vigil/config.toml")
 }
