@@ -111,3 +111,12 @@ func TestSocketPathIsAbsolute(t *testing.T) {
 		t.Errorf("got %q, want an absolute path", p)
 	}
 }
+
+func TestSocketPathFallbackToTempDir(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("HOME", "")
+	p := SocketPath()
+	if !strings.HasPrefix(p, "/") {
+		t.Errorf("got %q, want an absolute path even with no XDG_RUNTIME_DIR or HOME", p)
+	}
+}

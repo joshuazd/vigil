@@ -23,8 +23,10 @@ func SocketPath() string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
 		return filepath.Join(dir, "vigil", "vigild.sock")
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "state", "vigil", "vigild.sock")
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".local", "state", "vigil", "vigild.sock")
+	}
+	return filepath.Join(os.TempDir(), "vigil", "vigild.sock")
 }
 
 type Snapshot struct {
