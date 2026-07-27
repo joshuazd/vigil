@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,6 +42,7 @@ func (c *ExecCommander) Run(ctx context.Context, dir string, name string, args .
 
 // MockCommander records calls and returns preset responses.
 type MockCommander struct {
+	mu           sync.Mutex
 	Calls        []MockCall
 	Handlers     map[string]MockHandler
 	HandlerFuncs map[string]func(ctx context.Context, dir string, args []string) (string, error)
@@ -71,7 +73,9 @@ func (m *MockCommander) OnArgs(key string, output string, err error) {
 }
 
 func (m *MockCommander) Run(ctx context.Context, dir string, name string, args ...string) (string, error) {
+	m.mu.Lock()
 	m.Calls = append(m.Calls, MockCall{Dir: dir, Name: name, Args: args})
+	m.mu.Unlock()
 
 	// Try dynamic handler funcs first (same key resolution order)
 	if m.HandlerFuncs != nil {
