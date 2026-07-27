@@ -55,13 +55,27 @@ panel-per-session affordable in phase 2 without multiplying the `gh` budget.
   directly from inside tmux produces popup-in-popup weirdness; the menu-bar path sets
   `DISPATCH_IN_POPUP=1` and does not.
 - **Phase 1's daemon runs correctly**: socket created, second instance refused with
-  `vigil: daemon already running`, SIGTERM removes the socket, silent when healthy.
-- **Not yet done: the daemon-up versus daemon-down TUI comparison.** Phase 1's
-  invisibility claim rests on static analysis and unit tests, not observation. Worth
-  doing before phase 2 leans on the daemon. What to watch is timing, not appearance:
-  how fast a new session appears, how fast a bell highlights, and whether any PR column
-  ever blanks or any spurious `-> idle` notification fires. `gh api rate_limit` before
-  and after ten minutes with the daemon up is the direct check on the polling budget.
+  `vigil: daemon already running`, SIGTERM removes the socket, silent when healthy. Run
+  under real conditions and observed working.
+- **Phase 0 confirmed working in production**, beyond the single dispatch test: three
+  concurrent live sessions were observed running
+  `zsh -c claude ... --append-system-prompt "$(cat <worktree>/.git/worktrees/<name>/vigil-launch-prompt.txt)" ... ; exec "${SHELL}"`,
+  which is exactly the designed shape.
+- **PR cadence gating verified by measurement.** With the daemon polling 8 sessions and
+  no TUI client attached, a 300s sample consumed **160 GraphQL calls and 0 core**,
+  extrapolating to ~1,920/hour against a 5,000/hour limit. That matches
+  8 sessions x 2 calls x 10 cycles exactly, so `pr_interval` gating is behaving as
+  designed. With the original bug the same window would have been roughly 1,600 calls,
+  about 19,200/hour, roughly 4x over the limit.
+- **Note `gh` routes PR reads through GraphQL**, not REST, so GraphQL's 5,000/hour is
+  the budget that matters. `core` stays at 0.
+- **Still not done: the daemon-up versus daemon-down TUI comparison.** The daemon has
+  been run, but no TUI client had connected at the time of checking (`lsof` on the
+  socket showed only the daemon itself), so the invisibility claim still rests on static
+  analysis and unit tests rather than observation. To do it, run `vigil` with the daemon
+  up and watch timing rather than appearance: how fast a new session appears, how fast a
+  bell highlights, and whether any PR column blanks or any spurious `-> idle`
+  notification fires. Then compare with the daemon stopped.
 
 ## Polling cadences
 
@@ -81,6 +95,21 @@ that is roughly 12,000 calls/hour against a 5,000/hour token. Once limited,
 `FetchPRStatus` returns nil, every session flips to `idle`, and each fires a
 notification plus the `notify` hook, then flaps back. Do not remove the memos, and if
 you add a fourth concern, gate it too.
+
+## Cheap win available in phase 2
+
+An idle daemon costs ~38% of the GraphQL budget (measured above), and the user's own
+dispatch and review work draws on the same pool. Two levers, in increasing effort:
+
+1. **`pr_interval = 60`** in `~/.config/vigil/config.toml` halves it to ~960/hour, with
+   no code change. PR state rarely moves faster than a minute.
+2. **Only one of the two GraphQL calls per PR is broadly needed.** `FetchPRStatus` makes
+   a `gh pr view --json` call plus a `gh api graphql` call for review threads
+   (`internal/fetch/pr.go`). The review-thread data is only consumed by the detail
+   panel's review-comments mode, i.e. for the *selected* session. Fetching it lazily for
+   the selection rather than for every session on every cycle roughly halves the daemon's
+   cost. This matters more in phase 2, where a panel per session means more clients but
+   the same single poller.
 
 ## Must be fixed before phase 2 ships
 
