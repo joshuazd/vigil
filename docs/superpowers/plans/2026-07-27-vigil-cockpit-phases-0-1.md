@@ -1427,9 +1427,12 @@ func writeStaleSocketFile(path string) error {
 	if err != nil {
 		return err
 	}
-	// Close the listener but leave the file behind, which is what a
-	// SIGKILLed daemon leaves on disk.
-	return l.(*net.UnixListener).Close()
+	// Close without unlinking, reproducing what a SIGKILLed daemon leaves
+	// on disk. Close() removes the socket file by default, which would
+	// make this helper a no-op and the test vacuous.
+	ul := l.(*net.UnixListener)
+	ul.SetUnlinkOnClose(false)
+	return ul.Close()
 }
 ```
 
