@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/cache"
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
+	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/view"
 )
@@ -70,6 +72,11 @@ type Model struct {
 
 	// Commander for subprocess calls
 	cmd fetch.Commander
+
+	// Daemon connection (nil when self-polling)
+	daemonConn    net.Conn
+	daemonDecoder *protocol.Decoder
+	daemonReady   bool
 
 	// Context for cancellation
 	ctx    context.Context
@@ -139,6 +146,16 @@ func New(cfg *config.Config, cmd fetch.Commander) Model {
 		}
 	}
 
+	if conn, err := dialDaemon(protocol.SocketPath()); err == nil {
+		// Bound the wait for the first snapshot: a daemon whose very first
+		// poll failed has nothing to send and would otherwise leave a
+		// connected client blocked in Next() forever. handleSnapshot clears
+		// this deadline once the first snapshot arrives.
+		_ = conn.SetReadDeadline(time.Now().Add(firstSnapshotTimeout))
+		m.daemonConn = conn
+		m.daemonDecoder = protocol.NewDecoder(conn)
+	}
+
 	return m
 }
 
@@ -154,6 +171,12 @@ func (m Model) Init() tea.Cmd {
 				return TmuxUpdatedMsg{Sessions: cached}
 			})
 		}
+	}
+
+	if m.daemonDecoder != nil {
+		cmds = append(cmds,
+			listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName))
+		return tea.Batch(cmds...)
 	}
 
 	// Start independent poll cycles: tmux (1s), git (configurable), PR (configurable)
@@ -190,6 +213,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PRTickMsg:
 		return m, tea.Batch(m.fetchPRsCmd(), prTickCmd(m.cfg.GetSettingDuration("pr_interval")))
+
+	case SnapshotMsg:
+		return m.handleSnapshot(msg)
+
+	case DaemonLostMsg:
+		return m.handleDaemonLost()
 
 	case TmuxUpdatedMsg:
 		return m.handleTmuxUpdated(msg)
@@ -591,6 +620,74 @@ func (m Model) handleRebasePush() (tea.Model, tea.Cmd) {
 }
 
 // --- Data handlers ---
+
+// handleSnapshot applies a complete daemon snapshot. Unlike
+// handleTmuxUpdated, it does not merge into existing sessions: the snapshot
+// already carries git and PR state, and merging would discard it.
+func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
+	if !m.daemonReady {
+		// The first snapshot arrived within the deadline set in New; clear
+		// it so a healthy daemon is never dropped for going idle between
+		// poll cycles.
+		if m.daemonConn != nil {
+			_ = m.daemonConn.SetReadDeadline(time.Time{})
+		}
+		m.daemonReady = true
+	}
+
+	m.sessions = msg.Sessions
+
+	// Keep the caches warm so a later fall back to self-polling starts
+	// with data rather than blank columns.
+	for _, s := range m.sessions {
+		m.gitCache[s.Name] = s.Git
+		if s.Git.Branch != "" && s.PR != nil {
+			m.prCache[s.Git.Branch] = s.PR
+		}
+	}
+
+	session.SortSessions(m.sessions, m.sortMode)
+
+	if !m.cursorPlaced && m.popupMode && m.currentSessionName != "" {
+		for i, s := range m.visibleSessions() {
+			if s.Name == m.currentSessionName {
+				m.cursor = i
+				m.cursorPlaced = true
+				break
+			}
+		}
+	}
+
+	// A snapshot delivers git and PR data together, so there is no
+	// self-polling-style wait for a branch to show up before fetching PRs.
+	m.initialPRDone = true
+
+	cmds := m.checkStateTransitions()
+	if m.detailOpen {
+		cmds = append(cmds, m.refreshDetailCmd())
+	}
+	cmds = append(cmds,
+		listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName))
+
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) handleDaemonLost() (tea.Model, tea.Cmd) {
+	if m.daemonConn != nil {
+		_ = m.daemonConn.Close()
+		m.daemonConn = nil
+		m.daemonDecoder = nil
+	}
+	m.daemonReady = false
+	m.addNotification("daemon lost, polling directly", "warning")
+	return m, tea.Batch(
+		m.fetchTmuxCmd(),
+		m.fetchGitCmd(),
+		tmuxTickCmd(1*time.Second),
+		gitTickCmd(m.cfg.GetSettingDuration("git_interval")),
+		prTickCmd(m.cfg.GetSettingDuration("pr_interval")),
+	)
+}
 
 func (m Model) handleTmuxUpdated(msg TmuxUpdatedMsg) (tea.Model, tea.Cmd) {
 	// Merge tmux metadata into existing sessions, preserving git/PR data
