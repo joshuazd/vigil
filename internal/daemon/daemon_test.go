@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,18 +15,40 @@ import (
 	"github.com/jzinkduda/vigil/internal/protocol"
 )
 
+// maxSockPath is the largest usable length for a unix socket path
+// (sockaddr_un.sun_path is 104 bytes on macOS/BSD, including the null
+// terminator). t.TempDir() embeds the full test function name plus a
+// counter, which routinely exceeds this on macOS, so the socket lives
+// under a short, fixed directory instead.
+const maxSockPath = 103
+
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "vigil-daemon-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func testServer(t *testing.T) *Server {
 	t.Helper()
 	cmd := fetch.NewMockCommander()
 	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}",
 		"1700000000|alpha|/tmp/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
-	dir := t.TempDir()
+	sockDir := shortTempDir(t)
+	sockPath := filepath.Join(sockDir, "test.sock")
+	if len(sockPath) > maxSockPath {
+		t.Fatalf("socket path %q is %d bytes, want <= %d (sun_path limit)", sockPath, len(sockPath), maxSockPath)
+	}
+	cacheDir := t.TempDir()
 	return &Server{
 		Collector:  collect.New(&config.Config{}, cmd),
 		Interval:   50 * time.Millisecond,
-		SocketPath: filepath.Join(dir, "test.sock"),
-		CachePath:  filepath.Join(dir, "cache.json"),
+		SocketPath: sockPath,
+		CachePath:  filepath.Join(cacheDir, "cache.json"),
 	}
 }
 
