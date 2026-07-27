@@ -56,14 +56,26 @@ func testServer(t *testing.T) *Server {
 	}
 }
 
+// TestServerSendsSnapshotOnConnect pins the connect-time send specifically.
+// The interval is long enough that no broadcast can arrive within the read
+// deadline below, so the frame this test reads can only have come from
+// accept's one-shot send. The wait for s.latest is what makes that
+// deterministic: the socket is listenable before the first poll finishes, and
+// a client that connects before then has nothing to be sent.
 func TestServerSendsSnapshotOnConnect(t *testing.T) {
 	s := testServer(t)
+	s.Interval = 10 * time.Second
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.Run(ctx) }()
 	waitForSocket(t, s.SocketPath)
+	waitForCondition(t, 2*time.Second, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.latest != nil
+	})
 
 	conn, err := net.Dial("unix", s.SocketPath)
 	if err != nil {
@@ -166,6 +178,28 @@ func TestServerRefusesWhenAlreadyRunning(t *testing.T) {
 	}
 }
 
+// TestListenErrorMapsAddrInUse covers the EADDRINUSE mapping Run relies on
+// when a second daemon binds between this one's clearStaleSocket check and its
+// own bind. That race cannot be staged through Run itself (a live socket is
+// rejected earlier, by clearStaleSocket), so the mapping is exercised on the
+// real bind error a busy path produces.
+func TestListenErrorMapsAddrInUse(t *testing.T) {
+	path := filepath.Join(shortTempDir(t), "test.sock")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	_, err = net.Listen("unix", path)
+	if err == nil {
+		t.Fatal("second Listen on a busy path succeeded, want a bind error")
+	}
+	if mapped := listenError(err); !errors.Is(mapped, ErrAlreadyRunning) {
+		t.Errorf("listenError(%v) = %v, want ErrAlreadyRunning", err, mapped)
+	}
+}
+
 func TestServerReplacesStaleSocket(t *testing.T) {
 	s := testServer(t)
 	if err := writeStaleSocketFile(s.SocketPath); err != nil {
@@ -204,7 +238,11 @@ func TestServerRejectsNonSocketAtPath(t *testing.T) {
 	}
 }
 
-func TestServerRemovesSocketOnShutdown(t *testing.T) {
+// TestServerLeavesNoSocketFileOnShutdown asserts the socket path is free
+// again after shutdown, not merely that the listener stopped accepting: a
+// leftover socket file is what makes the next daemon's clearStaleSocket do
+// stale-socket recovery instead of a clean bind.
+func TestServerLeavesNoSocketFileOnShutdown(t *testing.T) {
 	s := testServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -214,6 +252,9 @@ func TestServerRemovesSocketOnShutdown(t *testing.T) {
 	cancel()
 	<-done
 
+	if _, err := os.Stat(s.SocketPath); !os.IsNotExist(err) {
+		t.Errorf("socket file still at %s after shutdown (stat err %v)", s.SocketPath, err)
+	}
 	if _, err := net.Dial("unix", s.SocketPath); err == nil {
 		t.Error("socket still accepting connections after shutdown")
 	}

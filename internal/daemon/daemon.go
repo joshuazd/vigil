@@ -63,10 +63,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	listener, err := net.Listen("unix", s.SocketPath)
 	if err != nil {
-		if errors.Is(err, syscall.EADDRINUSE) {
-			return ErrAlreadyRunning
-		}
-		return err
+		return listenError(err)
 	}
 	defer func() {
 		_ = listener.Close()
@@ -90,6 +87,16 @@ func (s *Server) Run(ctx context.Context) error {
 			s.poll(ctx)
 		}
 	}
+}
+
+// listenError translates a bind failure into ErrAlreadyRunning. clearStaleSocket
+// already rejects a socket a live daemon answers on, so EADDRINUSE here means
+// another daemon won a startup race between that check and the bind.
+func listenError(err error) error {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return ErrAlreadyRunning
+	}
+	return err
 }
 
 // clearStaleSocket removes a socket file left behind by a dead daemon.
