@@ -30,17 +30,26 @@ func (c *countingEffects) count() int {
 }
 
 // drain runs every command a batch produced, so effects dispatched as tea.Cmds
-// have actually executed by the time the assertion reads the counter.
-func drain(cmd tea.Cmd) {
+// have actually executed by the time the assertion reads the counter, and
+// returns every leaf message produced along the way (BatchMsg wrappers are
+// unwrapped, not returned themselves), so a test can inspect what a specific
+// command actually returned instead of assuming its shape.
+func drain(cmd tea.Cmd) []tea.Msg {
 	if cmd == nil {
-		return
+		return nil
 	}
 	msg := cmd()
 	if batch, ok := msg.(tea.BatchMsg); ok {
+		var msgs []tea.Msg
 		for _, c := range batch {
-			drain(c)
+			msgs = append(msgs, drain(c)...)
 		}
+		return msgs
 	}
+	if msg == nil {
+		return nil
+	}
+	return []tea.Msg{msg}
 }
 
 func idleSession(name string) *session.Session {
