@@ -22,6 +22,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
+	"github.com/jzinkduda/vigil/internal/transition"
 	"github.com/jzinkduda/vigil/internal/view"
 )
 
@@ -33,9 +34,15 @@ const spawnCooldown = 15 * time.Second
 
 type Model struct {
 	// Data
-	sessions   []*session.Session
-	prCache    map[string]*session.PRStatus
-	prevStates map[string]session.SessionState
+	sessions []*session.Session
+	prCache  map[string]*session.PRStatus
+
+	// detector tracks per-session state across snapshots to produce
+	// transition events; effects runs their side effects. Both are shared
+	// with internal/transition so the daemon and a self-polling client agree
+	// on what counts as a transition.
+	detector *transition.Detector
+	effects  transition.EffectRunner
 
 	// UI state
 	cursor          int
@@ -63,7 +70,6 @@ type Model struct {
 	// the panel. When the question is "should acting here end the process?",
 	// ask exitsAfterAction instead of testing this directly.
 	insideTmux   bool
-	initialLoad  bool
 	cursorPlaced bool
 
 	// Current session (detected at startup)
@@ -161,13 +167,13 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 	m := Model{
 		currentSessionName: currentSession,
 		prCache:            make(map[string]*session.PRStatus),
-		prevStates:         make(map[string]session.SessionState),
+		detector:           transition.NewDetector(),
+		effects:            transition.Runner{Cfg: cfg, Cmd: cmd},
 		selected:           make(map[string]bool),
 
-		insideTmux:  insideTmux,
-		initialLoad: true,
-		detailOpen:  !panel,
-		panelMode:   panel,
+		insideTmux: insideTmux,
+		detailOpen: !panel,
+		panelMode:  panel,
 
 		cfg:       cfg,
 		cachePath: cache.CachePath(),
@@ -887,7 +893,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		if msg.Sessions != nil {
 			m.applySnapshot(msg.Sessions)
 		}
-		cmds := m.checkStateTransitions()
+		cmds := m.checkStateTransitions(true)
 		if m.detailOpen {
 			cmds = append(cmds, m.refreshDetailCmd())
 		}
@@ -914,7 +920,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	m.lastSnapshot = time.Now()
 	m.applySnapshot(msg.Sessions)
 
-	cmds := m.checkStateTransitions()
+	cmds := m.checkStateTransitions(false)
 	if m.detailOpen {
 		cmds = append(cmds, m.refreshDetailCmd())
 	}
@@ -1254,67 +1260,29 @@ func (m Model) batchToggleDraftCmd() tea.Cmd {
 
 // --- State transitions ---
 
-func (m *Model) checkStateTransitions() []tea.Cmd {
+// checkStateTransitions renders the transitions in the current snapshot and,
+// when this client owns the poll loop, runs their side effects. Toasts and
+// auto-focus are per-client on purpose: each panel has its own screen and its
+// own cursor. Hooks and cleanups are not, which is why local gates them.
+func (m *Model) checkStateTransitions(local bool) []tea.Cmd {
+	events := m.detector.Detect(m.sessions)
+	notify := m.cfg.GetSettingBool("notifications_enabled")
+
 	var cmds []tea.Cmd
-	notificationsEnabled := m.cfg.GetSettingBool("notifications_enabled")
-	autoCleanup := m.cfg.GetSettingBool("auto_cleanup")
-
-	for _, s := range m.sessions {
-		newState := s.State()
-		oldState, existed := m.prevStates[s.Name]
-
-		if !existed {
-			m.prevStates[s.Name] = newState
-			continue
+	for _, ev := range events {
+		if notify {
+			m.addNotification(fmt.Sprintf("%s → %s", ev.Session, ev.New), notifSeverity(ev.New))
 		}
-
-		if oldState == newState {
-			continue
-		}
-
-		m.prevStates[s.Name] = newState
-
-		if m.initialLoad {
-			continue
-		}
-
-		// Notification
-		if notificationsEnabled {
-			m.addNotification(fmt.Sprintf("%s → %s", s.Name, newState), notifSeverity(newState))
-
-			// Notify hook
-			hookVars := map[string]string{
-				"session":   s.Name,
-				"old_state": oldState.String(),
-				"new_state": newState.String(),
-			}
-			cfg := m.cfg
-			cmd := m.cmd
-			ctx := m.ctx
+		if local {
+			ev := ev
+			effects, ctx := m.effects, m.ctx
 			cmds = append(cmds, func() tea.Msg {
-				_, _ = cfg.RunHook(ctx, cmd, "notify", hookVars, "", 5_000_000_000)
+				effects.Run(ctx, ev)
 				return nil
 			})
 		}
-
-		// Auto-cleanup
-		if autoCleanup && newState == session.Done && !s.IsCurrent {
-			s := s // capture
-			cmds = append(cmds, func() tea.Msg {
-				out, err := action.CleanupSession(context.Background(), m.cfg, m.cmd, s.Name, s.PanePath, s.Git.Branch, s.Git.GitRoot)
-				if err != nil {
-					return ActionResultMsg{Action: "auto-cleanup", Session: s.Name, OK: false, Message: out}
-				}
-				return ActionResultMsg{Action: "auto-cleanup", Session: s.Name, OK: true, Message: out}
-			})
-		}
 	}
 
-	if m.initialLoad {
-		m.initialLoad = false
-	}
-
-	// Auto-focus
 	if !m.insideTmux && m.cfg.GetSettingBool("auto_focus") && time.Since(m.lastManualNav) > autoFocusCooldown {
 		m.maybeAutoFocus()
 	}

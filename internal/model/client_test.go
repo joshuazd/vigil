@@ -17,19 +17,21 @@ import (
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
+	"github.com/jzinkduda/vigil/internal/transition"
 )
 
 func newTestModel() Model {
 	cmd := fetch.NewMockCommander()
 	cfg := &config.Config{}
 	return Model{
-		prCache:    make(map[string]*session.PRStatus),
-		prevStates: make(map[string]session.SessionState),
-		selected:   make(map[string]bool),
-		cfg:        cfg,
-		cmd:        cmd,
-		ctx:        context.Background(),
-		collector:  collect.New(cfg, cmd),
+		prCache:   make(map[string]*session.PRStatus),
+		detector:  transition.NewDetector(),
+		effects:   transition.Runner{Cfg: &config.Config{}, Cmd: fetch.NewMockCommander()},
+		selected:  make(map[string]bool),
+		cfg:       cfg,
+		cmd:       cmd,
+		ctx:       context.Background(),
+		collector: collect.New(cfg, cmd),
 	}
 }
 
@@ -336,14 +338,15 @@ func TestRenderTickStopsWhenDaemonGone(t *testing.T) {
 	}
 }
 
-// TestHandleSnapshotWarmsCachesAndClearsInitialLoad is the test that guards
-// the actual point of this task: a daemon snapshot's PR state must survive
-// into the model's caches unmerged and unmutated, and the self-polling-only
-// initialLoad flag must still clear via the shared checkStateTransitions()
-// call.
-func TestHandleSnapshotWarmsCachesAndClearsInitialLoad(t *testing.T) {
+// TestHandleSnapshotWarmsCaches is the test that guards the actual point of
+// this task: a daemon snapshot's PR state must survive into the model's
+// caches unmerged and unmutated. It used to also assert that the
+// self-polling-only initialLoad flag cleared; that field is gone now that
+// transition.Detector's own empty-map priming (internal/transition) is what
+// suppresses notifications on the first snapshot, covered by
+// TestTheFirstSnapshotDoesNotToast in transition_test.go.
+func TestHandleSnapshotWarmsCaches(t *testing.T) {
 	m := newTestModel()
-	m.initialLoad = true
 	m.daemonDecoder = liveDecoder()
 
 	pr := &session.PRStatus{Number: 7}
@@ -358,9 +361,6 @@ func TestHandleSnapshotWarmsCachesAndClearsInitialLoad(t *testing.T) {
 
 	if got := m2.prCache["feature/x"]; got != pr {
 		t.Errorf("prCache[feature/x] = %v, want %v (same pointer)", got, pr)
-	}
-	if m2.initialLoad {
-		t.Error("initialLoad should be cleared after the first snapshot, same as the self-polling handlers")
 	}
 	if len(m2.sessions) != 1 || m2.sessions[0] != sess {
 		t.Error("handleSnapshot should hold onto the daemon's session pointer directly, not merge or copy it")
