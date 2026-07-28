@@ -280,7 +280,15 @@ func (m Model) Init() tea.Cmd {
 	// Not startPoll: newModel already set pollInFlight for this branch, since
 	// Init cannot report its own mutation back to the runtime (see there).
 	// Calling startPoll here would see that flag and refuse to poll at all.
-	cmds = append(cmds, m.collectCmd(false), probeTickCmd(m.epoch))
+	//
+	// This is one of exactly two places that start a self-poll chain (the
+	// other is handleDaemonLost). The first collectCmd is for immediacy - the
+	// chain would poll on its own within pollInterval regardless.
+	cmds = append(cmds,
+		m.collectCmd(false),
+		collectTickCmd(m.pollInterval(), m.epoch),
+		probeTickCmd(m.epoch),
+	)
 	return tea.Batch(cmds...)
 }
 
@@ -302,16 +310,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSnapshot(msg)
 
 	case CollectTickMsg:
-		// Paces the self-poll loop: one is scheduled per completed local
-		// poll, never a free-running ticker. Not redundant with startPoll's
-		// own daemon check: an epoch mismatch means this tick belongs to a
-		// retired generation and must not touch the current one at all,
-		// which startPoll has no way to know on its own.
+		// An epoch mismatch means this tick belongs to a retired generation:
+		// drop it without rescheduling, or a reconnect would leave two chains
+		// running for the life of the process.
 		if msg.Epoch != m.epoch {
 			return m, nil
 		}
+		// A daemon has taken over; the chain ends here and handleDaemonLost
+		// starts a fresh one if that daemon later dies.
+		if m.daemonConn != nil {
+			return m, nil
+		}
+		// The reschedule is unconditional and does not depend on startPoll
+		// succeeding. A tick consumed while a poll is already in flight would
+		// otherwise vanish - tea.Tick is one-shot - and kill the loop.
 		c := m.startPoll(false)
-		return m, c
+		return m, tea.Batch(c, collectTickCmd(m.pollInterval(), m.epoch))
 
 	case DaemonLostMsg:
 		return m.handleDaemonLost(msg)
@@ -846,14 +860,15 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		m.pollInFlight = false
 
 		if msg.Epoch != m.epoch {
-			// A retired generation's data is not applied. But if this
-			// client is self-polling now, this straggler was the only thing
-			// that could ever set pollInFlight back to false, and
-			// handleDaemonLost's startPoll call was refused while it was in
-			// flight - so restart the loop for the current generation here,
-			// or the fallback is wedged for the rest of the process's life.
-			// startPoll's own daemon check makes this a no-op if a daemon
-			// has taken over instead.
+			// A retired generation's data is not applied. But this straggler
+			// was the only thing that could ever set pollInFlight back to
+			// false, so handleDaemonLost's own startPoll call was refused
+			// while it was in flight and the current generation has not
+			// actually polled yet - poll now rather than waiting out a full
+			// pollInterval. Deliberately no tick: the current generation's
+			// chain already exists (handleDaemonLost scheduled it), and a
+			// second one here would fork it. startPoll's own daemon check
+			// makes this a no-op if a daemon has taken over instead.
 			c := m.startPoll(false)
 			return m, c
 		}
@@ -867,16 +882,11 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		if m.detailOpen {
 			cmds = append(cmds, m.refreshDetailCmd())
 		}
-		// Only the ambient chain schedules its own continuation. A forced
-		// poll (Refresh key, an action result) is an extra poll layered on
-		// top of that chain, not a replacement link in it: the tick that was
-		// already pending for the ambient poll still fires on its own, so a
-		// forced poll scheduling one too would fork the chain into two
-		// self-perpetuating ticks - and every further forced poll would fork
-		// it again, permanently doubling the rate each time.
-		if !msg.Forced {
-			cmds = append(cmds, collectTickCmd(m.pollInterval(), m.epoch))
-		}
+		// A completed poll schedules no tick. The chain is continued by the
+		// tick handler instead, where every consumption of a tick is visible:
+		// continuing it from here meant a tick consumed without producing a
+		// completion (one that landed while a poll was already in flight) left
+		// the chain with no successor at all.
 		return m, tea.Batch(cmds...)
 	}
 
@@ -944,7 +954,12 @@ func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
 	// used to open a race between two concurrent Collector.Snapshot calls.
 	m.daemonReady = false
 	m.addNotification("daemon lost, polling directly", "warning")
-	c := tea.Batch(m.startPoll(false), probeTickCmd(m.epoch))
+	// The second of the two places that start a self-poll chain (Init is the
+	// other). The tick is scheduled unconditionally, even if startPoll refuses
+	// because a straggler from the retired generation is still running: the
+	// chain belongs to this new generation, not to that poll.
+	poll := m.startPoll(false)
+	c := tea.Batch(poll, collectTickCmd(m.pollInterval(), m.epoch), probeTickCmd(m.epoch))
 	return m, c
 }
 

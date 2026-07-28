@@ -17,8 +17,10 @@ type RenderTickMsg struct {
 	Epoch int
 }
 
-// CollectTickMsg paces the self-polling loop. One is scheduled per completed
-// poll, so there is never a free-running ticker and never two polls at once.
+// CollectTickMsg paces the self-polling loop. Its handler is the only thing
+// that consumes one and the only thing that schedules the next, so exactly one
+// is outstanding per self-polling generation: a heartbeat, independent of
+// whether the poll it asks for is actually issued.
 type CollectTickMsg struct {
 	Epoch int
 }
@@ -65,12 +67,6 @@ type SnapshotMsg struct {
 	Sessions []*session.Session
 	Epoch    int
 	Local    bool
-
-	// Forced marks a poll that was requested out of band - the r key, or an
-	// action result - rather than by the ambient tick chain. Only an ambient
-	// poll's completion schedules the next tick: a forced poll that scheduled
-	// one too would fork the chain and permanently double the poll rate.
-	Forced bool
 }
 
 // DaemonLostMsg reports that the daemon stream ended, so the TUI should

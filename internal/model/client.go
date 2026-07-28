@@ -69,10 +69,10 @@ func dialDaemonCmd(path string, epoch int) tea.Cmd {
 }
 
 // collectCmd runs one self-polling cycle. It returns a SnapshotMsg on every
-// outcome, failures included: handleSnapshot schedules the next poll from this
-// message, so an outcome that produced nothing would stop the fallback loop for
-// the life of the process. Nil Sessions means the poll failed and handleSnapshot
-// must leave the existing sessions alone.
+// outcome, failures included: that message is what clears pollInFlight, so an
+// outcome that produced nothing would leave startPoll refusing every future
+// poll for the life of the process. Nil Sessions means the poll failed and
+// handleSnapshot must leave the existing sessions alone.
 //
 // force invalidates the collector's git and PR memos before collecting, so a
 // caller that just changed state (an action, the Refresh key) does not have
@@ -92,16 +92,18 @@ func (m Model) collectCmd(force bool) tea.Cmd {
 		}
 		sessions, err := collector.Snapshot(ctx)
 		if err != nil {
-			return SnapshotMsg{Epoch: epoch, Local: true, Forced: force}
+			return SnapshotMsg{Epoch: epoch, Local: true}
 		}
 		annotateClientFlags(ctx, cmd, sessions, fallbackCurrent)
-		return SnapshotMsg{Sessions: sessions, Epoch: epoch, Local: true, Forced: force}
+		return SnapshotMsg{Sessions: sessions, Epoch: epoch, Local: true}
 	}
 }
 
-// collectTickCmd paces the self-poll loop: one is scheduled per completed
-// poll (from handleSnapshot's Local branch), never on a free-running ticker,
-// so there is never more than one poll-or-pending-tick per epoch.
+// collectTickCmd is one link of the self-poll chain. A chain is started once
+// per self-polling generation (Init, handleDaemonLost) and continued only by
+// the CollectTickMsg handler, which always schedules the next link whether or
+// not it managed to issue a poll - so a generation has exactly one chain and
+// never zero.
 func collectTickCmd(interval time.Duration, epoch int) tea.Cmd {
 	return tea.Tick(interval, func(time.Time) tea.Msg {
 		return CollectTickMsg{Epoch: epoch}

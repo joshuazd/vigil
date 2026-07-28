@@ -183,12 +183,13 @@ func setPollInterval(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { defaultPollInterval = orig })
 }
 
-// TestLocalSnapshotSchedulesTheNextPoll is the pacing regression pin: a local
-// snapshot must reschedule via a paced CollectTickMsg, not by appending
-// another collectCmd directly. An immediate reschedule would run the self-poll
-// loop as fast as tmux answers - tens of subprocess calls a second, forever -
-// instead of once per pollInterval.
-func TestLocalSnapshotSchedulesTheNextPoll(t *testing.T) {
+// TestAmbientPollCompletionSchedulesNoTick pins where chain continuation
+// lives. It used to live here, in poll completion, which meant a tick could be
+// consumed without ever producing a completion - a tick that landed while a
+// poll was already in flight was refused by startPoll and, tea.Tick being
+// one-shot, simply vanished. Continuation belongs to the tick handler, the one
+// place that sees every consumption, so a completed poll must add nothing.
+func TestAmbientPollCompletionSchedulesNoTick(t *testing.T) {
 	setPollInterval(t, time.Millisecond)
 	cmd := collectFixtureCommander()
 	m := newTestModel()
@@ -197,16 +198,16 @@ func TestLocalSnapshotSchedulesTheNextPoll(t *testing.T) {
 
 	_, next := m.handleSnapshot(SnapshotMsg{Sessions: fixtureSessions(), Local: true, Epoch: m.epoch})
 
-	if !collectedAgain(next, m.epoch) {
-		t.Fatal("a local snapshot scheduled no further poll, so the fallback loop is dead")
+	if got := countCollectTicks(next); got != 0 {
+		t.Errorf("a completed poll scheduled %d ticks, want 0: the tick handler owns the chain", got)
 	}
 }
 
-// TestAFailedLocalPollStillSchedulesTheNextOne is the same property on the
-// branch that actually threatens it. A poll that errored carries no sessions,
-// and if that branch forgets to reschedule the client goes quiet for the life
-// of the process with no indication.
-func TestAFailedLocalPollStillSchedulesTheNextOne(t *testing.T) {
+// TestAFailedPollSchedulesNoTickAndKeepsTheSessions covers the other outcome
+// of the same branch. A poll that errored carries no sessions, and applying it
+// verbatim would blank the table; it must not schedule a tick either, for the
+// same reason an ambient one must not.
+func TestAFailedPollSchedulesNoTickAndKeepsTheSessions(t *testing.T) {
 	setPollInterval(t, time.Millisecond)
 	cmd := collectFixtureCommander()
 	m := newTestModel()
@@ -216,11 +217,175 @@ func TestAFailedLocalPollStillSchedulesTheNextOne(t *testing.T) {
 
 	updated, next := m.handleSnapshot(SnapshotMsg{Local: true, Epoch: m.epoch})
 
-	if !collectedAgain(next, m.epoch) {
-		t.Fatal("a failed local poll scheduled no further poll")
+	if got := countCollectTicks(next); got != 0 {
+		t.Errorf("a failed poll scheduled %d ticks, want 0", got)
 	}
 	if got := updated.(Model).sessions; len(got) != 1 {
 		t.Errorf("a failed poll blanked the session list: %+v", got)
+	}
+}
+
+// TestATickAlwaysReschedules is the core of the fix: the tick handler's
+// reschedule must not depend on startPoll succeeding. With a poll already in
+// flight startPoll returns nil, and if the reschedule were gated on that the
+// consumed tick would have no successor - no tick pending, no poll in flight -
+// and the self-poll loop would be dead for the rest of the generation.
+func TestATickAlwaysReschedules(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
+	m := newTestModel()
+	m.pollInFlight = true
+
+	_, next := m.Update(CollectTickMsg{Epoch: m.epoch})
+
+	if got := countCollectTicks(next); got != 1 {
+		t.Fatalf("a tick consumed while a poll was in flight produced %d ticks, want exactly 1", got)
+	}
+}
+
+// TestTheRescheduledTickCarriesTheCurrentEpoch is the other half of the
+// reschedule: a link stamped with anything but the current epoch is dropped by
+// the epoch guard the moment it fires, which is a wedge with extra steps.
+func TestTheRescheduledTickCarriesTheCurrentEpoch(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
+	m := newTestModel()
+	m.epoch = 7
+	m.pollInFlight = true // so the batch is the tick alone
+
+	_, next := m.Update(CollectTickMsg{Epoch: 7})
+
+	if !collectedAgain(next, 7) {
+		t.Error("the rescheduled tick was not stamped with the current epoch")
+	}
+}
+
+// TestTickConsumedByAnInFlightForcedPollKeepsTheChainAlive drives the exact
+// sequence a reviewer wedged the loop with: a forced poll (the r key) is in
+// flight, the ambient tick fires and is refused, then the forced poll lands.
+// A forced poll invalidates the memos and so runs slower than an ambient one,
+// which makes this the likely case rather than a corner one. Every step is a
+// real Update call, and the loop has to still be running afterwards.
+func TestTickConsumedByAnInFlightForcedPollKeepsTheChainAlive(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	next, forced := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = next.(Model)
+	if forced == nil || !m.pollInFlight {
+		t.Fatal("Refresh did not put a forced poll in flight")
+	}
+
+	// The ambient tick fires while that forced poll is still running.
+	next, afterTick := m.Update(CollectTickMsg{Epoch: m.epoch})
+	m = next.(Model)
+	if got := countCollectTicks(afterTick); got != 1 {
+		t.Fatalf("the refused tick left %d successors, want 1: the chain is dead", got)
+	}
+
+	// The forced poll lands. It contributes nothing, which is correct - the
+	// tick above already carried the chain forward.
+	next, afterForced := m.Update(forced())
+	m = next.(Model)
+	if got := countCollectTicks(afterForced); got != 0 {
+		t.Fatalf("the forced poll's completion scheduled %d ticks, want 0", got)
+	}
+	if m.pollInFlight {
+		t.Fatal("the forced poll's completion did not clear pollInFlight")
+	}
+
+	// The chain's next link, now that nothing is in flight, must both poll and
+	// continue the chain.
+	next, afterNext := m.Update(CollectTickMsg{Epoch: m.epoch})
+	if !next.(Model).pollInFlight {
+		t.Error("the next tick issued no poll, so the chain is alive but idle")
+	}
+	if got := countCollectTicks(afterNext); got != 1 {
+		t.Errorf("the next tick produced %d successors, want 1", got)
+	}
+}
+
+// TestRepeatedForcedPollsLeaveExactlyOneChain: forced polls ride alongside the
+// chain and never extend it, so no number of r presses can accumulate chains.
+// Two chains never recover on their own - each link mints its own successor -
+// so the poll rate would double, and double again, for the life of the process.
+func TestRepeatedForcedPollsLeaveExactlyOneChain(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	ticks := 0
+	for i := 1; i <= 3; i++ {
+		next, forced := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+		m = next.(Model)
+		if forced == nil {
+			t.Fatalf("press %d: Refresh issued no command", i)
+		}
+		next, after := m.Update(forced())
+		m = next.(Model)
+		ticks += countCollectTicks(after)
+	}
+	if ticks != 0 {
+		t.Errorf("three forced polls added %d chain links, want 0", ticks)
+	}
+
+	// And the one chain that does exist still produces exactly one successor.
+	_, afterTick := m.Update(CollectTickMsg{Epoch: m.epoch})
+	if got := countCollectTicks(afterTick); got != 1 {
+		t.Errorf("the chain produced %d successors after the forced polls, want 1", got)
+	}
+}
+
+// TestTickEndsTheChainWhenADaemonConnects: a daemon-fed client has no chain of
+// its own. Rescheduling anyway would leave a tick chain running for a client
+// that can never poll (startPoll refuses while daemonConn is set) - and, if the
+// daemon were later installed without the epoch bump that retires this chain
+// today, a second chain once the daemon died.
+func TestTickEndsTheChainWhenADaemonConnects(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
+	m := newTestModel()
+	m.daemonConn = &fakeConn{}
+
+	if _, cmd := m.Update(CollectTickMsg{Epoch: m.epoch}); cmd != nil {
+		t.Error("a tick kept the chain alive after a daemon took over")
+	}
+}
+
+// TestInitStartsExactlyOneChain and TestDaemonLostStartsExactlyOneChain pin the
+// only two places a chain is ever created. Neither is covered by the tick tests
+// above - those assume a chain already exists - and without one of them a
+// self-polling generation would never tick at all.
+func TestInitStartsExactlyOneChain(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
+	setProbeInterval(t, time.Millisecond)
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	if got := countCollectTicks(m.Init()); got != 1 {
+		t.Errorf("Init started %d chains, want exactly 1", got)
+	}
+}
+
+func TestDaemonLostStartsExactlyOneChain(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
+	setProbeInterval(t, time.Millisecond)
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close() })
+	m.daemonConn = client
+	m.daemonDecoder = protocol.NewDecoder(client)
+
+	_, lost := m.Update(DaemonLostMsg{Epoch: m.epoch})
+	if got := countCollectTicks(lost); got != 1 {
+		t.Errorf("handleDaemonLost started %d chains, want exactly 1", got)
 	}
 }
 
@@ -263,7 +428,11 @@ func TestStartPollRefusesASecondPollInFlight(t *testing.T) {
 // though it passes in isolation. Driving it through two Update calls, the way
 // the real runtime would deliver two CollectTickMsgs back to back, is what
 // would catch a regression where the mutation was made on a copy instead.
+//
+// The second tick still returns a command - its own chain link, unconditionally
+// - so what this asserts is that the command carries no second poll.
 func TestStartPollMutatesTheReturnedModel(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
 	cmd := collectFixtureCommander()
 	m := newTestModel()
 	m.cmd = cmd
@@ -278,9 +447,34 @@ func TestStartPollMutatesTheReturnedModel(t *testing.T) {
 	}
 
 	_, cmd2 := next.Update(CollectTickMsg{Epoch: m.epoch})
-	if cmd2 != nil {
-		t.Error("a second CollectTickMsg issued a poll while one was already in flight")
+	if got := pollsIssued(cmd2); got != 0 {
+		t.Errorf("a second CollectTickMsg issued %d polls while one was already in flight, want 0", got)
 	}
+}
+
+// pollsIssued walks a command tree, invoking each command, and counts how many
+// produced a local SnapshotMsg - i.e. how many collectCmds it carried.
+//
+// Never call this and countCollectTicks on the same tea.Cmd: both invoke it,
+// and a second invocation of a one-shot tea.Tick reads from an already-drained
+// timer channel and blocks forever.
+func pollsIssued(cmd tea.Cmd) int {
+	if cmd == nil {
+		return 0
+	}
+	switch msg := cmd().(type) {
+	case SnapshotMsg:
+		if msg.Local {
+			return 1
+		}
+	case tea.BatchMsg:
+		n := 0
+		for _, c := range msg {
+			n += pollsIssued(c)
+		}
+		return n
+	}
+	return 0
 }
 
 // TestRefreshKeyForcesAPollWhenSelfPolling restores the 'r' keybinding's
@@ -441,6 +635,26 @@ func runAll(cmd tea.Cmd) <-chan tea.Msg {
 	return out
 }
 
+// awaitSnapshot reads from a runAll channel until a SnapshotMsg comes out,
+// discarding whatever else the command tree carried (a chain link, a probe).
+func awaitSnapshot(t *testing.T, msgs <-chan tea.Msg) tea.Msg {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case msg, ok := <-msgs:
+			if !ok {
+				t.Fatal("the command tree produced no SnapshotMsg")
+			}
+			if _, isSnapshot := msg.(SnapshotMsg); isSnapshot {
+				return msg
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for a SnapshotMsg")
+		}
+	}
+}
+
 // TestReconnectRaceDoesNotDoublePollOrWedge drives the exact sequence an
 // adversarial review reproduced under -race: a poll (P1) issued for epoch E
 // is still running when a reconnect bumps to E+1, and that daemon dies
@@ -455,6 +669,7 @@ func runAll(cmd tea.Cmd) <-chan tea.Msg {
 // landing, regardless of which epoch it belonged to.
 func TestReconnectRaceDoesNotDoublePollOrWedge(t *testing.T) {
 	setProbeInterval(t, time.Millisecond)
+	setPollInterval(t, time.Millisecond)
 
 	release := make(chan struct{})
 	cmd := fetch.NewMockCommander()
@@ -474,14 +689,15 @@ func TestReconnectRaceDoesNotDoublePollOrWedge(t *testing.T) {
 	m.epoch = 5
 
 	// P1: a CollectTickMsg for the current epoch issues the first poll, which
-	// immediately blocks inside Snapshot at the gated tmux call.
+	// immediately blocks inside Snapshot at the gated tmux call. The tick's
+	// batch also carries the chain's next link; run both the way the runtime
+	// would and pick P1's result out below.
 	next, pollCmd := m.Update(CollectTickMsg{Epoch: 5})
 	m = next.(Model)
 	if pollCmd == nil || !m.pollInFlight {
 		t.Fatal("CollectTickMsg should have issued P1 and marked a poll in flight")
 	}
-	p1Done := make(chan tea.Msg, 1)
-	go func() { p1Done <- pollCmd() }()
+	p1Done := runAll(pollCmd)
 
 	// The daemon reconnects while P1 is still running, bumping to E+1.
 	server, client := net.Pipe()
@@ -508,7 +724,7 @@ func TestReconnectRaceDoesNotDoublePollOrWedge(t *testing.T) {
 	lostResults := runAll(lostCmd)
 	close(release)
 
-	p1Msg := <-p1Done
+	p1Msg := awaitSnapshot(t, p1Done)
 	snap, ok := p1Msg.(SnapshotMsg)
 	if !ok || !snap.Local || snap.Epoch != 5 {
 		t.Fatalf("got %+v, want a local SnapshotMsg for epoch 5 (P1)", p1Msg)
@@ -573,15 +789,13 @@ func countCollectTicks(cmd tea.Cmd) int {
 	return 0
 }
 
-// TestForcedPollDoesNotForkTheChain is the regression pin for the fork this
-// round of review found: handleSnapshot's Local branch used to schedule a
-// CollectTickMsg on every completed poll, ambient or forced. A forced poll
-// completing while an ambient tick is already pending would then add a
-// second, independent chain link on top of it - the ambient tick still fires
-// on its own schedule, so the two chains run forever afterward, each
-// producing its own tick from then on, doubling the effective poll rate for
-// the rest of the process's life.
-func TestForcedPollDoesNotForkTheChain(t *testing.T) {
+// TestForcedPollCompletionSchedulesNoTick is the ambient-vs-forced distinction
+// that SnapshotMsg.Forced used to carry, restated as the invariant that
+// replaced it: no completed poll of any kind extends the chain, so nothing has
+// to be able to tell them apart. A forced poll rides alongside the chain for
+// one snapshot's worth of data and ends.
+func TestForcedPollCompletionSchedulesNoTick(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
 	cmd := collectFixtureCommander()
 	m := newTestModel()
 	m.cmd = cmd
@@ -594,50 +808,21 @@ func TestForcedPollDoesNotForkTheChain(t *testing.T) {
 	m = next.(Model)
 
 	forcedMsg := forcedCmd()
-	snap, ok := forcedMsg.(SnapshotMsg)
-	if !ok || !snap.Forced {
-		t.Fatalf("got %+v, want a forced SnapshotMsg", forcedMsg)
+	if snap, ok := forcedMsg.(SnapshotMsg); !ok || !snap.Local {
+		t.Fatalf("got %+v, want a local SnapshotMsg from the forced poll", forcedMsg)
 	}
 
 	_, after := m.Update(forcedMsg)
 	if got := countCollectTicks(after); got != 0 {
-		t.Errorf("a forced poll's completion scheduled %d ticks, want 0: it must not fork the chain "+
-			"the pending ambient tick already continues", got)
+		t.Errorf("a forced poll's completion scheduled %d ticks, want 0", got)
 	}
 }
 
-// TestRepeatedForcedPollsDoNotAccumulateChains is the same property under
-// repetition: each forced poll's completion clears pollInFlight (the same as
-// an ambient one), so nothing stops a second, third, or Nth Refresh press
-// from each starting its own poll - none of them may add a chain link either.
-func TestRepeatedForcedPollsDoNotAccumulateChains(t *testing.T) {
-	cmd := collectFixtureCommander()
-	m := newTestModel()
-	m.cmd = cmd
-	m.collector = collect.New(&config.Config{}, cmd)
-
-	for i := 1; i <= 3; i++ {
-		next, forcedCmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
-		if forcedCmd == nil {
-			t.Fatalf("press %d: Refresh issued no command", i)
-		}
-		m = next.(Model)
-
-		forcedMsg := forcedCmd()
-		next, after := m.Update(forcedMsg)
-		m = next.(Model)
-		if got := countCollectTicks(after); got != 0 {
-			t.Errorf("press %d: forced poll's completion scheduled %d ticks, want 0", i, got)
-		}
-	}
-}
-
-// TestFailedForcedPollDoesNotForkTheChain covers the branch that actually
-// threatens this fix: collectCmd's error path builds its SnapshotMsg
-// separately from the success path, so it is the one place Forced could be
-// dropped without any other test noticing (a failed poll still carries no
-// sessions either way).
-func TestFailedForcedPollDoesNotForkTheChain(t *testing.T) {
+// TestAFailedForcedPollSchedulesNoTick covers collectCmd's error path, which
+// builds its SnapshotMsg separately from the success path and is therefore the
+// one place the two could diverge again.
+func TestAFailedForcedPollSchedulesNoTick(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
 	cmd := fetch.NewMockCommander()
 	cmd.On("tmux", "", context.DeadlineExceeded)
 
@@ -651,12 +836,63 @@ func TestFailedForcedPollDoesNotForkTheChain(t *testing.T) {
 	}
 	msg := forcedCmd()
 	snap, ok := msg.(SnapshotMsg)
-	if !ok || !snap.Forced || snap.Sessions != nil {
-		t.Fatalf("got %+v, want a forced SnapshotMsg with no sessions (a failed poll)", msg)
+	if !ok || !snap.Local || snap.Sessions != nil {
+		t.Fatalf("got %+v, want a local SnapshotMsg with no sessions (a failed poll)", msg)
 	}
 
 	_, after := m.Update(msg)
 	if got := countCollectTicks(after); got != 0 {
 		t.Errorf("a failed forced poll's completion scheduled %d ticks, want 0", got)
+	}
+}
+
+// TestRefreshKeyReachesInvalidateEndToEnd covers the wiring
+// TestStartPollForceReachesInvalidateEndToEnd stops one call short of: that one
+// calls startPoll(true) itself, so nothing verified that the r key is what
+// passes force. Changing keys.Refresh to startPoll(false) left every other
+// test in this package green while silently turning 'r' into "wait out
+// pr_interval like any other tick".
+func TestRefreshKeyReachesInvalidateEndToEnd(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}",
+		"1700000000|alpha|/tmp/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
+			return "/repo/alpha", nil
+		},
+		"git branch --show-current": func(context.Context, string, []string) (string, error) {
+			return "feature", nil
+		},
+	}
+	cmd.On("gh", `{"number": 1, "state": "OPEN"}`, nil)
+
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	first := m.startPoll(false)
+	if first == nil {
+		t.Fatal("the first poll was refused")
+	}
+	if _, ok := first().(SnapshotMsg); !ok {
+		t.Fatal("the first poll did not produce a SnapshotMsg")
+	}
+	if got := countCalls(cmd, "gh"); got != 1 {
+		t.Fatalf("got %d gh calls after the first poll, want 1", got)
+	}
+	m.pollInFlight = false // stand in for that poll's SnapshotMsg having landed
+
+	next, refresh := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = next.(Model)
+	if refresh == nil {
+		t.Fatal("Refresh issued no command while self-polling")
+	}
+	if _, ok := refresh().(SnapshotMsg); !ok {
+		t.Fatal("Refresh did not produce a SnapshotMsg")
+	}
+	if got := countCalls(cmd, "gh"); got != 2 {
+		t.Errorf("got %d gh calls after pressing r, want 2 (r must invalidate the PR memo)", got)
 	}
 }

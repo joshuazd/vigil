@@ -85,16 +85,12 @@ func TestStaleLocalSnapshotRestartsTheLoopWhenSelfPolling(t *testing.T) {
 	if next.(Model).pollInFlight != true {
 		t.Error("restarting the loop should mark a new poll in flight")
 	}
+	// One command, and it is a poll: deliberately no tick. handleDaemonLost
+	// already created this generation's chain, and a second one here would
+	// fork it - two self-perpetuating chains that never recover.
 	msg, ok := got().(SnapshotMsg)
 	if !ok || !msg.Local || msg.Epoch != 1 {
-		t.Fatalf("got %+v, want a fresh local poll for the current epoch (1)", msg)
-	}
-	// The restart goes through startPoll(false), the same call an ambient
-	// tick makes, not startPoll(true): its own completion must extend the
-	// new generation's chain, or the generation the straggler just restarted
-	// would have no chain of its own at all.
-	if msg.Forced {
-		t.Error("the straggler restart issued a forced poll, which would not extend the new generation's chain")
+		t.Fatalf("got %+v, want a fresh local poll for the current epoch (1) and nothing else", msg)
 	}
 }
 
@@ -114,13 +110,19 @@ func TestStaleLocalSnapshotDoesNothingWhenDaemonConnected(t *testing.T) {
 	}
 }
 
+// TestCurrentTicksReschedule is the positive half of the table above: a
+// current-epoch tick must extend its own chain.
+//
+// A completed local SnapshotMsg is deliberately NOT in this table either: poll
+// completions do not extend the chain at all any more, precisely because a tick
+// can be consumed without producing one. See
+// TestAmbientPollCompletionSchedulesNoTick.
 func TestCurrentTicksReschedule(t *testing.T) {
 	cases := []struct {
 		name  string
 		msg   tea.Msg
 		setup func(*Model)
 	}{
-		{"local snapshot", SnapshotMsg{Sessions: fixtureSessions(), Epoch: 7, Local: true}, nil},
 		{"render", RenderTickMsg{Time: time.Now(), Epoch: 7}, func(m *Model) {
 			m.daemonDecoder = liveDecoder()
 		}},
