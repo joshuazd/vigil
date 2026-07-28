@@ -3,6 +3,8 @@ package model
 import (
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/view"
 )
@@ -123,5 +125,76 @@ func TestCommentsModeFetchesOnceThenSuppressesRefetch(t *testing.T) {
 	}
 	if cmd := m2.refreshDetailCmd(); cmd != nil {
 		t.Error("refetched comments after a completed fetch that answered with none")
+	}
+}
+
+// TestRefreshDetailCmdNilPRProducesNoCommand pins the PR nil-check in the
+// DetailPRComments case of refreshDetailCmd: the branch is set, so only the
+// PR guard stands between this and an immediate s.PR.Number dereference
+// (refreshDetailCmd evaluates that before ever returning a tea.Cmd, so a
+// missing guard here panics on the call itself, not merely once the
+// returned command runs).
+func TestRefreshDetailCmdNilPRProducesNoCommand(t *testing.T) {
+	m := newTestModel()
+	m.sessions = []*session.Session{{
+		Name: "alpha",
+		Git:  session.GitStatus{Branch: "feature/x", GitRoot: "/repo"},
+		PR:   nil,
+	}}
+	m.detailOpen = true
+	mode := view.DetailPRComments
+	m.detailMode = &mode
+
+	if cmd := m.refreshDetailCmd(); cmd != nil {
+		t.Error("want no fetch command for a session with no PR")
+	}
+}
+
+// TestRefreshDetailCmdEmptyBranchProducesNoCommand is the sibling of the nil
+// PR case: PR is set, but the branch is empty. Only the Git.Branch == ""
+// check catches this - if it were dropped, refreshDetailCmd would return a
+// live command keyed on an empty branch string.
+func TestRefreshDetailCmdEmptyBranchProducesNoCommand(t *testing.T) {
+	m := newTestModel()
+	m.sessions = []*session.Session{{
+		Name: "alpha",
+		Git:  session.GitStatus{Branch: "", GitRoot: "/repo"},
+		PR:   &session.PRStatus{Number: 42, State: "OPEN"},
+	}}
+	m.detailOpen = true
+	mode := view.DetailPRComments
+	m.detailMode = &mode
+
+	if cmd := m.refreshDetailCmd(); cmd != nil {
+		t.Error("want no fetch command for a session with an empty branch")
+	}
+}
+
+// TestRefreshKeyClearsReviewCommentsCache is the escape hatch for a comment
+// cache that otherwise never invalidates: pressing r must drop any cached
+// entries so the next comments-mode render refetches, on both the
+// self-polling and daemon-fed paths (a daemon-fed client cannot force a poll
+// at all, so this clear is the only lever it has). Driven through Update
+// with a real key message, not by calling handleKey's Refresh branch
+// directly, so production is what supplies the clear.
+func TestRefreshKeyClearsReviewCommentsCache(t *testing.T) {
+	m := newTestModel()
+	s := commentSession()
+	m.sessions = []*session.Session{s}
+	m.detailOpen = true
+	mode := view.DetailPRComments
+	m.detailMode = &mode
+	m.reviewComments = map[string][]session.ReviewComment{
+		s.Git.Branch: {{Author: "reviewer", Body: "stale"}},
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m2 := next.(Model)
+
+	if _, ok := m2.reviewComments[s.Git.Branch]; ok {
+		t.Fatal("refresh did not clear the cached comments")
+	}
+	if cmd := m2.refreshDetailCmd(); cmd == nil {
+		t.Error("want refreshDetailCmd to refetch once the cache entry is cleared")
 	}
 }

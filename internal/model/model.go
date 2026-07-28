@@ -604,6 +604,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case key.Matches(msg, keys.Refresh):
+		// Cleared unconditionally, ahead of startPoll's own daemon check: this
+		// is the one escape hatch a daemon-fed client has for a stale review
+		// comment cache, since that client can never force a poll of its own.
+		// Clearing costs nothing on the self-polling path either.
+		m.reviewComments = make(map[string][]session.ReviewComment)
 		// startPoll's daemon check covers "nothing to force while a daemon
 		// is connected"; its single-flight guard covers "already polling" -
 		// either wins and invalidates the memos before the next Snapshot, or
