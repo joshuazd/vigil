@@ -527,14 +527,14 @@ From `internal/model/model.go` delete:
 - `handleTmuxUpdated`, `handleGitUpdated`, `handlePRUpdated`
 - `tmuxTickCmd`, `gitTickCmd`, `prTickCmd`
 - the `TmuxTickMsg`, `GitTickMsg`, `PRTickMsg`, `TmuxUpdatedMsg`, `GitUpdatedMsg`, `PRUpdatedMsg` cases from the `Update` switch
-- the `gitCache`, `initialPRDone` and `initialLoad` struct fields and their initialisers in `newModel`
+- the `gitCache` and `initialPRDone` struct fields and their initialisers in `newModel`
 - the `m.gitCache[s.Name] = s.Git` line from `warmCaches`
 
 From `internal/model/messages.go` delete `TmuxTickMsg`, `GitTickMsg`, `PRTickMsg`, `TmuxUpdatedMsg`, `GitUpdatedMsg`, `PRUpdatedMsg`.
 
 `RenderTickMsg` and `renderTickCmd` stay - the daemon path still needs a repaint heartbeat.
 
-`initialLoad` is removed here but the `if m.initialLoad` guards inside `checkStateTransitions` are not replaced until Task 6. For this task, delete those two guard blocks and accept that a first snapshot will emit a notification per session; Task 6's `Detector` restores the suppression. Note it in the commit message so a bisect lands on the right explanation.
+**Leave `initialLoad`, `prevStates` and `checkStateTransitions` alone.** They are Task 6's to replace. `initialLoad` is read only inside `checkStateTransitions`, which this task does not touch, so there is no reason to disturb it here - and removing it early would leave the tree emitting a notification per session on the first snapshot until Task 6 landed.
 
 - [ ] **Step 6: Fix the compile fallout in the tests**
 
@@ -1759,7 +1759,7 @@ frozen at today's values rather than recomputed: deriving them moves width
 - Consumes: nothing.
 - Produces:
   - `func fetchReviewThreads(ctx context.Context, cmd Commander, gitRoot string, prNumber int) int` - count only.
-  - `func FetchReviewComments(ctx context.Context, cmd Commander, gitRoot, branch string, prNumber int) []session.ReviewComment` - the on-demand path Task 10 calls.
+  - `func FetchReviewComments(ctx context.Context, cmd Commander, gitRoot string, prNumber int) []session.ReviewComment` - the on-demand path Task 10 calls. No `branch` parameter: it is not needed, and an unused one would trip the linter.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1823,7 +1823,7 @@ func TestFetchReviewCommentsReturnsBodies(t *testing.T) {
 		},
 	}
 
-	comments := FetchReviewComments(context.Background(), cmd, "/repo", "feature/x", 42)
+	comments := FetchReviewComments(context.Background(), cmd, "/repo", 42)
 	if len(comments) != 1 {
 		t.Fatalf("got %d comments, want 1", len(comments))
 	}
@@ -1910,7 +1910,7 @@ func fetchReviewThreads(ctx context.Context, cmd Commander, gitRoot string, prNu
 // FetchReviewComments fetches the review comment bodies for one PR. Called for
 // the selected session when the detail panel is showing comments, never from a
 // poll.
-func FetchReviewComments(ctx context.Context, cmd Commander, gitRoot, branch string, prNumber int) []session.ReviewComment {
+func FetchReviewComments(ctx context.Context, cmd Commander, gitRoot string, prNumber int) []session.ReviewComment {
 	var comments []session.ReviewComment
 	for _, t := range reviewThreadNodes(ctx, cmd, gitRoot, prNumber, reviewCommentsQuery) {
 		tm, ok := t.(map[string]any)
@@ -1965,7 +1965,7 @@ func reviewThreadNodes(ctx context.Context, cmd Commander, gitRoot string, prNum
 }
 ```
 
-`branch` is unused in `FetchReviewComments` but is in the signature so the call site reads like the other `Fetch*` functions; if `golangci-lint` objects, drop the parameter and update Task 10's call.
+`FetchReviewComments` takes no `branch`: the GraphQL query addresses the PR by number, so it would be unused and the linter would say so.
 
 In `FetchPRStatus`, replace the review-threads block:
 
@@ -2198,7 +2198,7 @@ func (m Model) refreshDetailCmd() tea.Cmd {
 		return func() tea.Msg {
 			return PRCommentsMsg{
 				Branch:   branch,
-				Comments: fetch.FetchReviewComments(ctx, cmd, gitRoot, branch, number),
+				Comments: fetch.FetchReviewComments(ctx, cmd, gitRoot, number),
 			}
 		}
 	}
