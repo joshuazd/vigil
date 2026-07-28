@@ -88,11 +88,14 @@ type DelayedPRRefreshMsg struct{}
 // DetailRefreshMsg triggers a detail panel content refresh.
 type DetailRefreshMsg struct{}
 
-// SnapshotMsg carries a full session snapshot received from the daemon,
-// with per-client flags already resolved.
+// SnapshotMsg carries a full session snapshot, with per-client flags already
+// resolved. Local says this client collected it itself rather than receiving it
+// from a daemon, which is what makes this client the owner of the poll loop and
+// therefore responsible for state-transition side effects.
 type SnapshotMsg struct {
 	Sessions []*session.Session
 	Epoch    int
+	Local    bool
 }
 
 // DaemonLostMsg reports that the daemon stream ended, so the TUI should

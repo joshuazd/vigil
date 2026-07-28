@@ -18,6 +18,7 @@ import (
 
 	"github.com/jzinkduda/vigil/internal/action"
 	"github.com/jzinkduda/vigil/internal/cache"
+	"github.com/jzinkduda/vigil/internal/collect"
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
@@ -113,6 +114,11 @@ type Model struct {
 	// daemon snapshots and self-polling bumps it, which retires the previous
 	// generation's ticks and any snapshot or loss still in flight from it.
 	epoch int
+
+	// collector runs the self-polling path. Only collectCmd touches it, and
+	// only one collectCmd is ever in flight, which is what keeps its memos
+	// single-goroutine: Collector.Snapshot is not safe against reentry.
+	collector *collect.Collector
 }
 
 // New creates a Model for the full dashboard.
@@ -153,10 +159,11 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		detailOpen:  !panel,
 		panelMode:   panel,
 
-		cfg:    cfg,
-		cmd:    cmd,
-		ctx:    ctx,
-		cancel: cancel,
+		cfg:       cfg,
+		cmd:       cmd,
+		ctx:       ctx,
+		cancel:    cancel,
+		collector: collect.New(cfg, cmd),
 
 		dispatchInput: ti,
 		help:          help.New(),

@@ -62,6 +62,27 @@ func dialDaemonCmd(path string, epoch int) tea.Cmd {
 	}
 }
 
+// collectCmd runs one self-polling cycle. It returns a SnapshotMsg on every
+// outcome, failures included: handleSnapshot schedules the next poll from this
+// message, so an outcome that produced nothing would stop the fallback loop for
+// the life of the process. Nil Sessions means the poll failed and handleSnapshot
+// must leave the existing sessions alone.
+func (m Model) collectCmd() tea.Cmd {
+	collector := m.collector
+	ctx := m.ctx
+	cmd := m.cmd
+	fallbackCurrent := m.currentSessionName
+	epoch := m.epoch
+	return func() tea.Msg {
+		sessions, err := collector.Snapshot(ctx)
+		if err != nil {
+			return SnapshotMsg{Epoch: epoch, Local: true}
+		}
+		annotateClientFlags(ctx, cmd, sessions, fallbackCurrent)
+		return SnapshotMsg{Sessions: sessions, Epoch: epoch, Local: true}
+	}
+}
+
 // annotateClientFlags fills in the fields that belong to this tmux client
 // rather than to the snapshot: which session is current and which was last.
 // The daemon serves many clients and cannot know either.
