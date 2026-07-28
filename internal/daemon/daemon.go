@@ -17,20 +17,13 @@ import (
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/transition"
 )
 
 var ErrAlreadyRunning = errors.New("daemon already running")
 
 const defaultInterval = 1 * time.Second
-
-// effectDoneBuffer bounds effectDone. inFlightEffects allows at most one
-// in-flight effect per session, so the number of pending sends can never
-// exceed the number of distinct sessions with an effect currently running -
-// nowhere near this many concurrent tmux sessions is realistic. Sized this
-// generously, a send can never block, so it is safe on either side of
-// pendingEffects.Done() without risking a deadlock on a missing receiver.
-const effectDoneBuffer = 256
 
 type Server struct {
 	Collector  *collect.Collector
@@ -59,16 +52,17 @@ type Server struct {
 	// them before Run returns.
 	pendingEffects sync.WaitGroup
 
-	// inFlightEffects and effectDone serialize effects per session: a bell
-	// flip while a merged session's auto-cleanup is still running would
-	// otherwise detect two Done events and start two CleanupSession calls
-	// against the same worktree. Both are touched only from Run's goroutine -
-	// poll dispatches and drains, and Run's select loop drains between polls -
-	// so, like clients, neither needs a mutex. Lazily initialized so a
-	// zero-valued Server built directly in a test (with Detector and Effects
-	// still set) does not need to know about them.
+	// effectsMu guards inFlightEffects, which serializes only the effect that
+	// is actually destructive: a bell flip on a merged session yields two
+	// New == session.Done events, and without this, both could start a
+	// CleanupSession against the same worktree concurrently. Every other
+	// transition dispatches unconditionally and untracked, so the notify
+	// hook fires once per real transition on both the daemon-fed and
+	// self-polling paths. A dedicated mutex rather than mu: mu is about a
+	// different piece of state (latest), and the dispatching goroutine, not
+	// just poll, needs to take this one (to delete on completion).
+	effectsMu       sync.Mutex
 	inFlightEffects map[string]struct{}
-	effectDone      chan string
 
 	// pollFailing is only read and written from poll, which Run only ever
 	// calls from its own goroutine, so it needs no mutex.
@@ -94,7 +88,6 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 			Logf: logger.Printf,
 		},
 		inFlightEffects: make(map[string]struct{}),
-		effectDone:      make(chan string, effectDoneBuffer),
 	}
 }
 
@@ -140,20 +133,11 @@ func (s *Server) Run(ctx context.Context) error {
 			accepted.Wait()
 			s.closeClients()
 			s.pendingEffects.Wait()
-			// A completion racing the ctx.Done() case in this same select
-			// may already be sitting in effectDone, unread; drain it so
-			// inFlightEffects does not report it as still running. Nothing
-			// depends on this once Run is returning - it's tidiness, not
-			// correctness. effectDoneBuffer is what keeps the sends
-			// themselves from ever blocking.
-			s.drainEffectDone()
 			return nil
 		case conn := <-incoming:
 			s.addClient(conn)
 		case <-ticker.C:
 			s.poll(ctx)
-		case name := <-s.effectDone:
-			delete(s.inFlightEffects, name)
 		}
 	}
 }
@@ -233,43 +217,41 @@ func (s *Server) poll(ctx context.Context) {
 	if s.Detector == nil || s.Effects == nil {
 		return
 	}
-	if s.inFlightEffects == nil {
-		s.inFlightEffects = make(map[string]struct{})
-	}
-	if s.effectDone == nil {
-		s.effectDone = make(chan string, effectDoneBuffer)
-	}
-	s.drainEffectDone()
 	for _, ev := range s.Detector.Detect(sessions) {
+		ev := ev
+		if ev.New != session.Done {
+			// Every other transition dispatches ungated: the notify hook
+			// must fire once per real transition on this path exactly as it
+			// does on the self-polling path, and only cleanup is destructive
+			// enough to need serializing.
+			s.pendingEffects.Add(1)
+			go func() {
+				defer s.pendingEffects.Done()
+				s.Effects.Run(ctx, ev)
+			}()
+			continue
+		}
+
+		s.effectsMu.Lock()
+		if s.inFlightEffects == nil {
+			s.inFlightEffects = make(map[string]struct{})
+		}
 		if _, running := s.inFlightEffects[ev.Session]; running {
-			s.logf("skipping effect for %s: a previous effect for this session has not finished", ev.Session)
+			s.effectsMu.Unlock()
+			s.logf("transition effects for %s still running, skipping a repeat Done", ev.Session)
 			continue
 		}
 		s.inFlightEffects[ev.Session] = struct{}{}
-		ev := ev
+		s.effectsMu.Unlock()
+
 		s.pendingEffects.Add(1)
 		go func() {
 			defer s.pendingEffects.Done()
 			s.Effects.Run(ctx, ev)
-			s.effectDone <- ev.Session
+			s.effectsMu.Lock()
+			delete(s.inFlightEffects, ev.Session)
+			s.effectsMu.Unlock()
 		}()
-	}
-}
-
-// drainEffectDone empties effectDone into inFlightEffects deletions without
-// blocking. poll calls it before dispatching so a session whose effect
-// finished between ticks is no longer treated as in-flight; Run's shutdown
-// path calls it once more after pendingEffects.Wait() to sweep up anything
-// still sitting in the buffer (see the ctx.Done() case for why that is safe
-// rather than a race).
-func (s *Server) drainEffectDone() {
-	for {
-		select {
-		case name := <-s.effectDone:
-			delete(s.inFlightEffects, name)
-		default:
-			return
-		}
 	}
 }
 
