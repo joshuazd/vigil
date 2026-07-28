@@ -4,6 +4,13 @@
 package transition
 
 import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/jzinkduda/vigil/internal/action"
+	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
@@ -52,4 +59,59 @@ func (d *Detector) Detect(sessions []*session.Session) []Event {
 	}
 	d.prev = next
 	return events
+}
+
+const (
+	hookTimeout    = 5 * time.Second
+	cleanupTimeout = 60 * time.Second
+)
+
+// EffectRunner is the seam. config.RunHook shells out through exec rather than
+// through fetch.Commander, so an interface is what lets a caller assert that an
+// effect fired exactly once.
+type EffectRunner interface {
+	Run(ctx context.Context, ev Event)
+}
+
+// Runner performs the side effects of one transition. Exactly one process runs
+// these per event: the daemon when clients are attached to one, a self-polling
+// client otherwise. Logf is where failures go, because the daemon has no screen.
+type Runner struct {
+	Cfg  *config.Config
+	Cmd  fetch.Commander
+	Logf func(format string, args ...any)
+}
+
+func (r Runner) Run(ctx context.Context, ev Event) {
+	if r.Cfg.GetSettingBool("notifications_enabled") {
+		out, err := r.Cfg.RunHook(ctx, r.Cmd, "notify", map[string]string{
+			"session":   ev.Session,
+			"old_state": ev.Old.String(),
+			"new_state": ev.New.String(),
+		}, "", hookTimeout)
+		if err != nil && !errors.As(err, new(*config.HookNotConfigured)) {
+			r.logf("notify hook for %s: %v (output: %s)", ev.Session, err, out)
+		}
+	}
+
+	if !r.Cfg.GetSettingBool("auto_cleanup") || ev.New != session.Done {
+		return
+	}
+	// Not from a field on Event: the daemon does not annotate IsCurrent, so it
+	// would read false and clean up the session the user is sitting in.
+	if fetch.CurrentSession(ctx, r.Cmd) == ev.Session {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
+	defer cancel()
+	out, err := action.CleanupSession(cctx, r.Cfg, r.Cmd, ev.Session, ev.PanePath, ev.Branch, ev.GitRoot)
+	if err != nil {
+		r.logf("auto-cleanup of %s failed: %v (output: %s)", ev.Session, err, out)
+	}
+}
+
+func (r Runner) logf(format string, args ...any) {
+	if r.Logf != nil {
+		r.Logf(format, args...)
+	}
 }

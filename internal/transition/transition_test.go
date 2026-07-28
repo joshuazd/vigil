@@ -1,8 +1,14 @@
 package transition
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
@@ -114,5 +120,172 @@ func TestDetectPrimesNonZeroStateWithoutSpoofing(t *testing.T) {
 	}
 	if events := d.Detect([]*session.Session{idle("alpha")}); len(events) != 1 {
 		t.Fatalf("got %d events after state change from pending to idle, want 1", len(events))
+	}
+}
+
+func doneEvent(name string) Event {
+	return Event{Session: name, PanePath: "/tmp/" + name, Old: session.Review, New: session.Done}
+}
+
+// TestRunSkipsCleanupForTheCurrentSession is the guard that replaces the
+// model's !s.IsCurrent check. The daemon never annotates IsCurrent, so an
+// Event cannot carry it and Run has to ask tmux itself. The fixture enables
+// auto_cleanup and names a Done session, so cleanup is the only thing that
+// could run: if the guard is gone, tmux kill-session shows up in the calls.
+func TestRunSkipsCleanupForTheCurrentSession(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
+	cfg := &config.Config{
+		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
+	}
+
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), doneEvent("alpha"))
+
+	for _, c := range cmd.Calls {
+		if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "kill-session" {
+			t.Fatal("cleaned up the session the user is sitting in")
+		}
+	}
+}
+
+func TestRunCleansUpADoneSessionThatIsNotCurrent(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux display-message -p #{session_name}", "beta", nil)
+	cfg := &config.Config{
+		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
+	}
+
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), doneEvent("alpha"))
+
+	var killed bool
+	for _, c := range cmd.Calls {
+		if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "kill-session" {
+			killed = true
+		}
+	}
+	if !killed {
+		t.Fatalf("no kill-session in %+v", cmd.Calls)
+	}
+}
+
+func TestRunSkipsCleanupWhenDisabled(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux display-message -p #{session_name}", "beta", nil)
+	cfg := &config.Config{Settings: map[string]any{"notifications_enabled": "false"}}
+
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), doneEvent("alpha"))
+
+	for _, c := range cmd.Calls {
+		if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "kill-session" {
+			t.Fatal("cleaned up with auto_cleanup at its default of false")
+		}
+	}
+}
+
+func TestRunSkipsCleanupForANonDoneTransition(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux display-message -p #{session_name}", "beta", nil)
+	cfg := &config.Config{
+		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
+	}
+
+	ev := Event{Session: "alpha", PanePath: "/tmp/alpha", Old: session.Idle, New: session.Blocked}
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), ev)
+
+	for _, c := range cmd.Calls {
+		if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "kill-session" {
+			t.Fatal("cleaned up a session that only went blocked")
+		}
+	}
+}
+
+// TestRunFiresTheNotifyHook asserts through the commander. RunHook invokes
+// `sh -c` through fetch.Commander, so a mock records the script without any
+// process running.
+func TestRunFiresTheNotifyHook(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cfg := &config.Config{
+		Settings: map[string]any{"notifications_enabled": "true"},
+		Hooks:    map[string]any{"notify": "notify-send {session} {new_state}"},
+	}
+
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), doneEvent("alpha"))
+
+	var script string
+	for _, c := range cmd.Calls {
+		if c.Name == "sh" && len(c.Args) > 1 {
+			script = c.Args[1]
+		}
+	}
+	if script == "" {
+		t.Fatalf("no hook invocation in %+v", cmd.Calls)
+	}
+	if !strings.Contains(script, "'alpha'") {
+		t.Errorf("got %q, want the session name expanded", script)
+	}
+	if !strings.Contains(script, "'done'") {
+		t.Errorf("got %q, want the new state expanded", script)
+	}
+}
+
+func TestRunSkipsTheHookWhenNotificationsAreOff(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cfg := &config.Config{
+		Settings: map[string]any{"notifications_enabled": "false"},
+		Hooks:    map[string]any{"notify": "notify-send x"},
+	}
+
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), doneEvent("alpha"))
+
+	for _, c := range cmd.Calls {
+		if c.Name == "sh" {
+			t.Fatalf("the hook ran with notifications disabled: %+v", c)
+		}
+	}
+}
+
+// TestRunDoesNotLogADeliberatelyDisabledHook covers the one path that produces
+// HookNotConfigured. notify has a default template, so this is reachable only
+// when a user sets notify = "" on purpose, and logging it would put a line in
+// the daemon log on every transition forever.
+func TestRunDoesNotLogADeliberatelyDisabledHook(t *testing.T) {
+	cfg := &config.Config{
+		Settings: map[string]any{"notifications_enabled": "true"},
+		Hooks:    map[string]any{"notify": ""},
+	}
+	var logged []string
+	r := Runner{
+		Cfg:  cfg,
+		Cmd:  fetch.NewMockCommander(),
+		Logf: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+	}
+
+	r.Run(context.Background(), doneEvent("alpha"))
+
+	if len(logged) != 0 {
+		t.Fatalf("logged %v for a hook the user disabled on purpose", logged)
+	}
+}
+
+// TestRunLogsARealHookFailure is the other half: the check above must not
+// swallow genuine failures, or a broken notify hook fails silently forever.
+func TestRunLogsARealHookFailure(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.On("sh", "boom", errors.New("exit status 1"))
+	cfg := &config.Config{
+		Settings: map[string]any{"notifications_enabled": "true"},
+		Hooks:    map[string]any{"notify": "definitely-not-a-command"},
+	}
+	var logged []string
+	r := Runner{
+		Cfg:  cfg,
+		Cmd:  cmd,
+		Logf: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+	}
+
+	r.Run(context.Background(), doneEvent("alpha"))
+
+	if len(logged) != 1 {
+		t.Fatalf("logged %v, want exactly one line for a failing hook", logged)
 	}
 }
