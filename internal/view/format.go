@@ -75,15 +75,6 @@ func StateIndicatorWithBg(s *session.Session, bg *lipgloss.Color) string {
 	return styledFg(color, bg).Render(dot)
 }
 
-// SessionName returns the session name, truncated to 50 chars.
-func SessionName(s *session.Session) string {
-	name := s.Name
-	if len(name) > 50 {
-		name = name[:50] + "…"
-	}
-	return name
-}
-
 // GitCol returns the formatted git status column.
 func GitCol(s *session.Session, staleThreshold int) string {
 	return GitColWithBg(s, staleThreshold, nil)

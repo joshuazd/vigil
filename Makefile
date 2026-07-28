@@ -9,8 +9,10 @@ build:
 install: build
 	\cp vigil ~/.local/bin/vigil
 
+# -race is not optional here: the daemon's entire design is a concurrency
+# claim, and TestRunWaitsForWriters only fails reliably under the detector.
 test:
-	$(GO) test ./...
+	$(GO) test -race ./...
 
 lint:
 	golangci-lint run

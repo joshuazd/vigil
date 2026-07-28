@@ -8,6 +8,13 @@ import (
 // ansiPattern matches CSI ANSI escapes; mirror of the helper in internal/action.
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
+// StripANSI removes escape sequences. Exported so tests asserting on rendered
+// output - what is actually on screen, not the styled string - have one
+// definition to work from instead of reimplementing it per package.
+func StripANSI(s string) string {
+	return ansiPattern.ReplaceAllString(s, "")
+}
+
 // clampNotification normalizes a notification string for safe rendering as a
 // single table row: strips ANSI sequences, takes the last non-empty line, and
 // truncates to width with an ellipsis if needed. Returns "" for empty input

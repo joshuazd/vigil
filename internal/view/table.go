@@ -8,20 +8,13 @@ import (
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
-const (
-	colIndicator = 3
-	colIndex     = 2
-	colState     = 2
-	colSession   = 52
-	colGit       = 18
-	colPR        = 22
-)
-
-// RenderTable renders the session table rows.
+// RenderTable renders the session table rows, dropping columns to fit width.
 func RenderTable(sessions []*session.Session, cursor int, selected map[string]bool, staleThreshold int, width, height int, notification string) string {
 	if len(sessions) == 0 {
 		return DimStyle.Render("  No sessions")
 	}
+
+	layout := LayoutForWidth(width)
 
 	var b strings.Builder
 	rendered := 0
@@ -30,7 +23,7 @@ func RenderTable(sessions []*session.Session, cursor int, selected map[string]bo
 			break
 		}
 		isCursor := i == cursor
-		line := renderRow(s, i, selected[s.Name], staleThreshold, width, isCursor)
+		line := renderRow(s, i, selected[s.Name], staleThreshold, width, isCursor, layout)
 		if rendered > 0 {
 			b.WriteString("\n")
 		}
@@ -49,31 +42,46 @@ func RenderTable(sessions []*session.Session, cursor int, selected map[string]bo
 	return b.String()
 }
 
-func renderRow(s *session.Session, index int, selected bool, staleThreshold int, width int, isCursor bool) string {
+func renderRow(s *session.Session, index int, selected bool, staleThreshold int, width int, isCursor bool, layout TableLayout) string {
 	var bg *lipgloss.Color
 	if isCursor {
 		bg = &BarBg
 	}
 
-	indicator := IndicatorWithBg(s, selected, bg)
-	idx := indexCol(index, bg)
-	dot := StateIndicatorWithBg(s, bg)
-	name := SessionName(s)
-	git := GitColWithBg(s, staleThreshold, bg)
-	pr := PRColWithBg(s, bg)
+	name := truncateName(s.Name, layout.Name)
+
+	var cells []string
+	if layout.Indicator {
+		cells = append(cells, IndicatorWithBg(s, selected, bg))
+	}
+	if layout.Index {
+		cells = append(cells, indexCol(index, bg))
+	}
+	if layout.State {
+		cells = append(cells, StateIndicatorWithBg(s, bg))
+	}
 
 	if isCursor {
 		p := PlainOnBar()
-		name = p.Render(name) + p.Render(strings.Repeat(" ", max(0, colSession-len(name))))
-		git = git + p.Render(strings.Repeat(" ", max(0, colGit-visibleLen(git))))
-		sep := p.Render(" ")
-		line := strings.Join([]string{indicator, idx, dot, name, git, pr}, sep)
-		return CursorStyle.Width(width).Render(line)
+		cells = append(cells, p.Render(name)+p.Render(strings.Repeat(" ", max(0, layout.Name-visibleLen(name)))))
+		if layout.Git > 0 {
+			git := TruncateVisible(GitColWithBg(s, staleThreshold, bg), layout.Git)
+			cells = append(cells, git+p.Render(strings.Repeat(" ", max(0, layout.Git-visibleLen(git)))))
+		}
+		if layout.PR > 0 {
+			cells = append(cells, TruncateVisible(PRColWithBg(s, bg), layout.PR))
+		}
+		return CursorStyle.Width(width).Render(strings.Join(cells, p.Render(" ")))
 	}
 
-	name = padRight(name, colSession)
-	git = padRight(git, colGit)
-	return fmt.Sprintf("%s %s %s %s %s %s", indicator, idx, dot, name, git, pr)
+	cells = append(cells, padRight(name, layout.Name))
+	if layout.Git > 0 {
+		cells = append(cells, padRight(TruncateVisible(GitColWithBg(s, staleThreshold, bg), layout.Git), layout.Git))
+	}
+	if layout.PR > 0 {
+		cells = append(cells, TruncateVisible(PRColWithBg(s, bg), layout.PR))
+	}
+	return strings.Join(cells, " ")
 }
 
 // indexCol renders the 0-9 index for quick-jump, or blank for 10+.

@@ -26,6 +26,8 @@ func parseArgs(args []string) (string, error) {
 	switch args[0] {
 	case "daemon":
 		return "daemon", nil
+	case "--panel":
+		return "panel", nil
 	case "--help", "-h":
 		return "help", nil
 	case "--version", "-v":
@@ -71,6 +73,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
 			os.Exit(1)
 		}
+	case "panel":
+		if err := runPanel(cfg, cmd); err != nil {
+			fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		if err := runTUI(cfg, cmd); err != nil {
 			fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
@@ -92,12 +99,22 @@ func runTUI(cfg *config.Config, cmd fetch.Commander) error {
 	return err
 }
 
+// runPanel renders the compact session list for a single tmux pane. It shares
+// every code path with the dashboard, so panel and dashboard can never
+// disagree about state.
+func runPanel(cfg *config.Config, cmd fetch.Commander) error {
+	p := tea.NewProgram(model.NewPanel(cfg, cmd), tea.WithAltScreen())
+	_, err := p.Run()
+	return err
+}
+
 func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "vigil - TUI mission control for tmux sessions")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  vigil            Run the dashboard")
 	_, _ = fmt.Fprintln(w, "  vigil daemon     Run the state daemon in the foreground")
+	_, _ = fmt.Fprintln(w, "  vigil --panel    Run the compact session list for a tmux pane")
 	_, _ = fmt.Fprintln(w, "  vigil --help")
 	_, _ = fmt.Fprintln(w, "  vigil --version")
 	_, _ = fmt.Fprintln(w)

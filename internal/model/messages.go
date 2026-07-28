@@ -1,25 +1,43 @@
 package model
 
 import (
+	"net"
 	"time"
 
+	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
-// TmuxTickMsg triggers a tmux metadata polling cycle.
-type TmuxTickMsg time.Time
+// TmuxTickMsg triggers a tmux metadata polling cycle. Epoch is the polling
+// generation it was scheduled in: Bubble Tea ticks cannot be cancelled, so a
+// tick from a superseded generation is dropped instead of rescheduling
+// itself. Without that, every switch between daemon and self-polling would
+// leave the previous mode's tickers running for the life of the process.
+type TmuxTickMsg struct {
+	Time  time.Time
+	Epoch int
+}
 
 // GitTickMsg triggers a git polling cycle.
-type GitTickMsg time.Time
+type GitTickMsg struct {
+	Time  time.Time
+	Epoch int
+}
 
 // PRTickMsg triggers a PR polling cycle.
-type PRTickMsg time.Time
+type PRTickMsg struct {
+	Time  time.Time
+	Epoch int
+}
 
 // RenderTickMsg triggers a repaint with no fetch work. The daemon path uses
 // it to get the same 1s render cadence self-polling gets for free from
 // TmuxTickMsg, so time-based rendering (like notification expiry) behaves
 // the same whether or not a daemon is connected.
-type RenderTickMsg time.Time
+type RenderTickMsg struct {
+	Time  time.Time
+	Epoch int
+}
 
 // TmuxUpdatedMsg carries tmux session metadata (fast, no git/PR).
 type TmuxUpdatedMsg struct {
@@ -74,11 +92,29 @@ type DetailRefreshMsg struct{}
 // with per-client flags already resolved.
 type SnapshotMsg struct {
 	Sessions []*session.Session
+	Epoch    int
 }
 
 // DaemonLostMsg reports that the daemon stream ended, so the TUI should
 // resume self-polling.
-type DaemonLostMsg struct{}
+type DaemonLostMsg struct {
+	Epoch int
+}
+
+// ProbeTickMsg schedules the next attempt to reach the daemon. It only fires
+// while self-polling: reaching a daemon that came up is what keeps one poller
+// serving many clients instead of N clients each spending the gh budget.
+type ProbeTickMsg struct {
+	Epoch int
+}
+
+// DaemonProbeResultMsg reports one dial attempt. A nil Conn means the dial
+// failed and probing should continue.
+type DaemonProbeResultMsg struct {
+	Epoch   int
+	Conn    net.Conn
+	Decoder *protocol.Decoder
+}
 
 // ConfirmAction represents a pending destructive action awaiting confirmation.
 type ConfirmAction int

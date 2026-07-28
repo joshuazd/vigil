@@ -28,7 +28,8 @@ Go + Bubble Tea TUI. Single static binary.
 - `internal/cache/` — JSON session cache for instant startup
 - `internal/collect/` - UI-independent session state collection (shared by the daemon and the TUI's self-polling fallback)
 - `internal/protocol/` - newline-delimited JSON snapshot protocol over a unix socket
-- `internal/daemon/` - `vigil daemon`: runs one `Snapshot` per tick at `tmux_interval` (default 1s) so tmux metadata (including bell flags) is never more than a tick stale; git state is gated inside `Snapshot` on `git_interval` (default 3s) and PR state per branch on `pr_interval` (default 30s), each via its own memo. It broadcasts each snapshot to every connected client. A client that connects gets the latest snapshot immediately, but only once the daemon has completed a first successful poll; before that it gets nothing until the next successful poll, and falls back to self-polling if that takes longer than 5s
+- `internal/daemon/` - `vigil daemon`: runs one `Snapshot` per tick at `tmux_interval` (default 1s) so tmux metadata (including bell flags) is never more than a tick stale; git state is gated inside `Snapshot` on `git_interval` (default 3s) and PR state per branch on `pr_interval` (default 30s), each via its own memo. Startup serializes on an flock'd lock file beside the socket (`vigild.sock.lock`), held across the stale-socket removal and the bind, so racing daemons cannot both bind. Every client gets its own writer goroutine and a one-deep latest-wins queue, so a client that stops reading can neither stall the poll loop nor block new connections
+- `vigil --panel` - the same `Model` with `panelMode` set: compact status bar, width-responsive table, no detail panel and no footer. A panel starts the daemon if none is running; the dashboard does not
 
 ## Testing
 
@@ -63,3 +64,7 @@ make install   # copy to ~/.local/bin/vigil
 - Both paths are permanently supported and must render identically (git/PR data, sort order, notifications)
 - `model.New` loads the session cache synchronously for every mode, so first paint is never blank on either path; nothing about the cache is emitted as a message
 - A session missing PR data falls back to the last known PR for its branch (`prCache` client-side, a per-branch memo in `collect.Collector` daemon-side), so one failed `gh` call cannot blank the PR column or fire a spurious idle transition
+- The table drops columns as width shrinks (`view.LayoutForWidth`). At width >= 104 the layout is exactly what it always was: the name column is capped at 52 and never stretches
+- Every self-rescheduling tick carries an `epoch`. Bubble Tea ticks cannot be cancelled, so switching between daemon snapshots and self-polling bumps the epoch and the previous generation's ticks retire themselves
+- A client that loses the daemon self-polls and probes the socket every 2s until it is back. A connected but silent daemon shows `daemon stale Ns` in the status bar after three poll intervals
+- Panel geometry is tmux's concern, not vigil's: vigil renders to fit whatever pane it is given and never chooses or changes its own size. The toggle that measures the client and splits belongs on the dotfiles side (`scripts/vigil-panel`, bound to `prefix p`), which is a separate repository and a separate change
