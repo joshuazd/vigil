@@ -102,6 +102,8 @@ func MostRecentSession(ctx context.Context, cmd Commander, exclude string) strin
 // cannot be reached, so a caller deciding whether to destroy something can
 // fail closed too. Splits on the last "|" because a session name can itself
 // contain "|"; session_attached is always digits, so that split is unambiguous.
+// Trims per line rather than over the whole output: a session name can start
+// with whitespace, which strings.TrimSpace(out) would eat from the first line.
 func AttachedSessions(ctx context.Context, cmd Commander) (map[string]bool, error) {
 	out, err := cmd.Run(ctx, "", "tmux", "list-sessions",
 		"-F", "#{session_name}|#{session_attached}")
@@ -109,7 +111,11 @@ func AttachedSessions(ctx context.Context, cmd Commander) (map[string]bool, erro
 		return nil, err
 	}
 	attached := make(map[string]bool)
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
 		i := strings.LastIndex(line, "|")
 		if i < 0 {
 			continue

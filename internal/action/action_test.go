@@ -100,6 +100,33 @@ func TestCleanupSession_BuiltinKillsSession(t *testing.T) {
 	}
 }
 
+// TestCleanupSession_KillsTheExactSessionByName pins the "=" exact-match
+// prefix on kill-session's target. Without it, tmux falls back to prefix and
+// fnmatch matching on -t, so `kill-session -t alpha` can hit an unrelated
+// session like "alpha2" or "alpha|pha" instead of the one this call means to
+// destroy. SwitchClient and CapturePane in this package already use "=";
+// kill-session did not.
+func TestCleanupSession_KillsTheExactSessionByName(t *testing.T) {
+	cfg := &config.Config{}
+	cmd := fetch.NewMockCommander()
+	cmd.On("tmux", "", nil)
+
+	if _, err := CleanupSession(context.Background(), cfg, cmd, "mysession", "", "", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var killed bool
+	for _, c := range cmd.Calls {
+		if c.Name == "tmux" && len(c.Args) == 3 &&
+			c.Args[0] == "kill-session" && c.Args[1] == "-t" && c.Args[2] == "=mysession" {
+			killed = true
+		}
+	}
+	if !killed {
+		t.Fatalf("no exact `tmux kill-session -t =mysession` in %+v", cmd.Calls)
+	}
+}
+
 func TestCleanupSession_SkipsWorktreeForNonWorktree(t *testing.T) {
 	cfg := &config.Config{}
 	cmd := fetch.NewMockCommander()

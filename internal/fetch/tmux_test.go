@@ -206,6 +206,26 @@ func TestAttachedSessionsTrimsATrailingCR(t *testing.T) {
 	}
 }
 
+// TestAttachedSessionsPreservesALeadingSpaceInTheFirstName is why the trim
+// happens per line rather than over the whole output: tmux accepts a session
+// name starting with whitespace, and such a name sorts first, so it is
+// exactly the first line that strings.TrimSpace(out) would corrupt.
+func TestAttachedSessionsPreservesALeadingSpaceInTheFirstName(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", " alpha|1\nbeta|0", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !attached[" alpha"] {
+		t.Errorf("got %v, want \" alpha\" (leading space intact) attached", attached)
+	}
+	if _, strippedKey := attached["alpha"]; strippedKey {
+		t.Error("the leading space was stripped from the session name")
+	}
+}
+
 func TestBellFlags(t *testing.T) {
 	mock := NewMockCommander()
 	mock.On("tmux", "session1|0\nsession2|1\nsession3|0", nil)

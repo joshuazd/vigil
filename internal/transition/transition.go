@@ -108,7 +108,8 @@ func (r Runner) Run(ctx context.Context, ev Event) {
 		r.logf("auto-cleanup of %s skipped: cannot tell which sessions are attached: %v", ev.Session, err)
 		return
 	}
-	if attached[ev.Session] {
+	live, listed := attached[ev.Session]
+	if !listed || live {
 		return
 	}
 	cctx, cancel := context.WithTimeout(ctx, cleanupTimeout)

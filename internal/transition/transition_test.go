@@ -164,6 +164,28 @@ func TestRunSkipsCleanupForAnAttachedSession(t *testing.T) {
 	}
 }
 
+// TestRunSkipsCleanupWhenTheSessionIsAbsentFromAttachedSessions is the guard
+// against reading "tmux did not list this session" as "nobody is here." A
+// Done event exists only because a poll saw the session, so its absence from
+// AttachedSessions means AttachedSessions and reality disagree - the zero
+// value for an absent map key is false, and treating that as "unattached"
+// used to let cleanup proceed and force-remove a worktree, dirty or not.
+func TestRunSkipsCleanupWhenTheSessionIsAbsentFromAttachedSessions(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs(attachedSessionsCmd, "beta|1", nil) // alpha not listed at all
+	cfg := &config.Config{
+		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
+	}
+
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), doneEvent("alpha"))
+
+	for _, c := range cmd.Calls {
+		if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "kill-session" {
+			t.Fatal("cleaned up a session absent from AttachedSessions")
+		}
+	}
+}
+
 // TestRunSkipsCleanupWhenAttachedSessionsFails is the fail-closed guard.
 // fetch.CurrentSession returns "" on any tmux error, and "" never equals a
 // session name, so the old check read a tmux failure as "nobody is attached"
@@ -192,6 +214,9 @@ func TestRunSkipsCleanupWhenAttachedSessionsFails(t *testing.T) {
 	if len(logged) != 1 {
 		t.Fatalf("logged %v, want exactly one line for the tmux failure", logged)
 	}
+	if !strings.Contains(logged[0], "cannot tell which sessions are attached") {
+		t.Errorf("got %q, want the log to identify the tmux failure specifically, not any other skip reason", logged[0])
+	}
 }
 
 // TestRunCleansUpADoneSessionThatIsNotAttached is the test that actually
@@ -200,6 +225,10 @@ func TestRunSkipsCleanupWhenAttachedSessionsFails(t *testing.T) {
 // asserts the exact target of both destructive calls rather than "some
 // kill-session happened somewhere": two independent substring checks over a
 // flattened call log can each be satisfied by a different, unrelated call.
+// The fixture lists alpha itself with 0 clients attached (not a different
+// session attached with alpha merely absent): that is the actual path a real
+// cleanup takes, and it is the only one of the two that this test and
+// TestRunSkipsCleanupWhenTheSessionIsAbsentFromAttachedSessions do not share.
 func TestRunCleansUpADoneSessionThatIsNotAttached(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /repo/worktrees/alpha\n"), 0o644); err != nil {
@@ -207,7 +236,7 @@ func TestRunCleansUpADoneSessionThatIsNotAttached(t *testing.T) {
 	}
 
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs(attachedSessionsCmd, "beta|1", nil)
+	cmd.OnArgs(attachedSessionsCmd, "alpha|0", nil)
 	cfg := &config.Config{
 		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
 	}
@@ -218,7 +247,7 @@ func TestRunCleansUpADoneSessionThatIsNotAttached(t *testing.T) {
 	var killedAlpha, removedWorktree bool
 	for _, c := range cmd.Calls {
 		if c.Name == "tmux" && len(c.Args) == 3 &&
-			c.Args[0] == "kill-session" && c.Args[1] == "-t" && c.Args[2] == "alpha" {
+			c.Args[0] == "kill-session" && c.Args[1] == "-t" && c.Args[2] == "=alpha" {
 			killedAlpha = true
 		}
 		if c.Name == "git" && len(c.Args) == 4 &&
@@ -227,16 +256,13 @@ func TestRunCleansUpADoneSessionThatIsNotAttached(t *testing.T) {
 		}
 	}
 	if !killedAlpha {
-		t.Fatalf("no exact `tmux kill-session -t alpha` in %+v", cmd.Calls)
+		t.Fatalf("no exact `tmux kill-session -t =alpha` in %+v", cmd.Calls)
 	}
 	if !removedWorktree {
 		t.Fatalf("no exact `git worktree remove --force %s` in %+v", dir, cmd.Calls)
 	}
 }
 
-// TestRunLogsACleanupFailure is the failure counterpart to the test above:
-// builtinCleanup's own error (a git worktree remove that fails) must reach
-// the log exactly once, or a broken cleanup fails silently forever.
 // TestRunDerivesATimeoutForCleanup pins the two lines around CleanupSession
 // that no assertion above touches: a bare ctx has no deadline, and
 // cleanupTimeout must be a real number of seconds rather than accidentally
@@ -245,12 +271,12 @@ func TestRunCleansUpADoneSessionThatIsNotAttached(t *testing.T) {
 func TestRunDerivesATimeoutForCleanup(t *testing.T) {
 	dir := t.TempDir()
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs(attachedSessionsCmd, "beta|1", nil)
+	cmd.OnArgs(attachedSessionsCmd, "alpha|0", nil)
 
 	var deadline time.Time
 	var hasDeadline bool
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
-		"tmux kill-session -t alpha": func(ctx context.Context, _ string, _ []string) (string, error) {
+		"tmux kill-session -t =alpha": func(ctx context.Context, _ string, _ []string) (string, error) {
 			deadline, hasDeadline = ctx.Deadline()
 			return "", nil
 		},
@@ -272,6 +298,13 @@ func TestRunDerivesATimeoutForCleanup(t *testing.T) {
 	}
 }
 
+// TestRunLogsACleanupFailure is the failure counterpart to
+// TestRunCleansUpADoneSessionThatIsNotAttached: builtinCleanup's own error (a
+// git worktree remove that fails) must reach the log exactly once, or a
+// broken cleanup fails silently forever. Asserts the log names the failure
+// specifically and that kill-session still ran - only the worktree removal
+// failed, not the whole cleanup - so a mutation that skips cleanup entirely
+// for the wrong reason can't produce the same one-line log by accident.
 func TestRunLogsACleanupFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /repo/worktrees/alpha\n"), 0o644); err != nil {
@@ -279,7 +312,7 @@ func TestRunLogsACleanupFailure(t *testing.T) {
 	}
 
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs(attachedSessionsCmd, "", nil)
+	cmd.OnArgs(attachedSessionsCmd, "alpha|0", nil)
 	cmd.OnArgs("git worktree remove --force "+dir, "", errors.New("worktree is dirty"))
 	cfg := &config.Config{
 		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
@@ -296,6 +329,19 @@ func TestRunLogsACleanupFailure(t *testing.T) {
 
 	if len(logged) != 1 {
 		t.Fatalf("logged %v, want exactly one line for the cleanup failure", logged)
+	}
+	if !strings.Contains(logged[0], "auto-cleanup of alpha failed") || !strings.Contains(logged[0], "worktree is dirty") {
+		t.Errorf("got %q, want the log to name the session and the underlying error", logged[0])
+	}
+	var killedAlpha bool
+	for _, c := range cmd.Calls {
+		if c.Name == "tmux" && len(c.Args) == 3 &&
+			c.Args[0] == "kill-session" && c.Args[1] == "-t" && c.Args[2] == "=alpha" {
+			killedAlpha = true
+		}
+	}
+	if !killedAlpha {
+		t.Fatalf("no exact `tmux kill-session -t =alpha` in %+v - the session should still be killed even though the worktree remove failed", cmd.Calls)
 	}
 }
 
@@ -477,5 +523,8 @@ func TestRunLogsARealHookFailure(t *testing.T) {
 
 	if len(logged) != 1 {
 		t.Fatalf("logged %v, want exactly one line for a failing hook", logged)
+	}
+	if !strings.Contains(logged[0], "notify hook for alpha") || !strings.Contains(logged[0], "exit status 1") {
+		t.Errorf("got %q, want the log to name the hook, the session, and the underlying error", logged[0])
 	}
 }

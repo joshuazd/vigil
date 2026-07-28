@@ -84,7 +84,7 @@ func builtinCleanup(ctx context.Context, cmd fetch.Commander, sessionName, workt
 	var messages []string
 
 	// Kill tmux session
-	_, err := cmd.Run(ctx, "", "tmux", "kill-session", "-t", sessionName)
+	_, err := cmd.Run(ctx, "", "tmux", "kill-session", "-t", "="+sessionName)
 	if err == nil {
 		messages = append(messages, "killed session "+sessionName)
 	}
