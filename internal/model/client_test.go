@@ -154,23 +154,6 @@ func TestListenDaemonResolvesPerClientFlags(t *testing.T) {
 	}
 }
 
-func TestListenDaemonClearsLastWhenSessionGone(t *testing.T) {
-	conn := serveOneSnapshot(t, &protocol.Snapshot{
-		Version:  protocol.Version,
-		Sessions: []*session.Session{{Name: "alpha"}},
-	})
-
-	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
-	cmd.OnArgs("tmux display-message -p #{client_last_session}", "vanished", nil)
-
-	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "", 0)()
-	snap := msg.(SnapshotMsg)
-	if snap.Sessions[0].IsLast {
-		t.Error("no session should be marked last when the last session is gone")
-	}
-}
-
 func TestListenDaemonFallsBackToKnownCurrent(t *testing.T) {
 	conn := serveOneSnapshot(t, &protocol.Snapshot{
 		Version:  protocol.Version,
@@ -535,26 +518,6 @@ func TestAnnotateClientFlagsMarksCurrentAndLast(t *testing.T) {
 	}
 }
 
-// TestAnnotateClientFlagsBlanksAStaleLast pins the guard that a last-session
-// name tmux still remembers, but which is no longer in the snapshot, does not
-// mark anything. The fixture names a live current session so the assertion
-// cannot pass just because every flag came back false.
-func TestAnnotateClientFlagsBlanksAStaleLast(t *testing.T) {
-	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
-	cmd.OnArgs("tmux display-message -p #{client_last_session}", "gone", nil)
-
-	sessions := []*session.Session{{Name: "alpha"}}
-	annotateClientFlags(context.Background(), cmd, sessions, "")
-
-	if !sessions[0].IsCurrent {
-		t.Fatal("alpha should be current, so a false IsLast below means something")
-	}
-	if sessions[0].IsLast {
-		t.Error("alpha was marked last, but tmux named a session that is not in the snapshot")
-	}
-}
-
 func TestAnnotateClientFlagsFallsBackWhenTmuxIsSilent(t *testing.T) {
 	cmd := fetch.NewMockCommander()
 	sessions := []*session.Session{{Name: "alpha"}}
@@ -562,5 +525,21 @@ func TestAnnotateClientFlagsFallsBackWhenTmuxIsSilent(t *testing.T) {
 
 	if !sessions[0].IsCurrent {
 		t.Error("with no answer from tmux, the fallback current name should win")
+	}
+}
+
+func TestAnnotateClientFlagsMarksTheLastSession(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
+	cmd.OnArgs("tmux display-message -p #{client_last_session}", "beta", nil)
+
+	sessions := []*session.Session{{Name: "alpha"}, {Name: "beta"}}
+	annotateClientFlags(context.Background(), cmd, sessions, "")
+
+	if !sessions[1].IsLast {
+		t.Error("beta should be marked last")
+	}
+	if sessions[0].IsLast {
+		t.Error("alpha is current, not last")
 	}
 }

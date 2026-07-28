@@ -71,14 +71,6 @@ func annotateClientFlags(ctx context.Context, cmd fetch.Commander, sessions []*s
 		current = fallbackCurrent
 	}
 	last := fetch.LastSession(ctx, cmd)
-
-	names := make(map[string]bool, len(sessions))
-	for _, s := range sessions {
-		names[s.Name] = true
-	}
-	if !names[last] {
-		last = ""
-	}
 	for _, s := range sessions {
 		s.IsCurrent = s.Name == current
 		s.IsLast = s.Name == last
