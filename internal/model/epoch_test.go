@@ -89,6 +89,13 @@ func TestStaleLocalSnapshotRestartsTheLoopWhenSelfPolling(t *testing.T) {
 	if !ok || !msg.Local || msg.Epoch != 1 {
 		t.Fatalf("got %+v, want a fresh local poll for the current epoch (1)", msg)
 	}
+	// The restart goes through startPoll(false), the same call an ambient
+	// tick makes, not startPoll(true): its own completion must extend the
+	// new generation's chain, or the generation the straggler just restarted
+	// would have no chain of its own at all.
+	if msg.Forced {
+		t.Error("the straggler restart issued a forced poll, which would not extend the new generation's chain")
+	}
 }
 
 // TestStaleLocalSnapshotDoesNothingWhenDaemonConnected is the other half:

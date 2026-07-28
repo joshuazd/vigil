@@ -92,10 +92,10 @@ func (m Model) collectCmd(force bool) tea.Cmd {
 		}
 		sessions, err := collector.Snapshot(ctx)
 		if err != nil {
-			return SnapshotMsg{Epoch: epoch, Local: true}
+			return SnapshotMsg{Epoch: epoch, Local: true, Forced: force}
 		}
 		annotateClientFlags(ctx, cmd, sessions, fallbackCurrent)
-		return SnapshotMsg{Sessions: sessions, Epoch: epoch, Local: true}
+		return SnapshotMsg{Sessions: sessions, Epoch: epoch, Local: true, Forced: force}
 	}
 }
 

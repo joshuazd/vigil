@@ -551,3 +551,112 @@ func TestReconnectRaceDoesNotDoublePollOrWedge(t *testing.T) {
 		t.Fatalf("got %+v, want a fresh poll for the current epoch (7)", restartMsg)
 	}
 }
+
+// countCollectTicks walks a command tree, invoking each command, and counts
+// how many produced a CollectTickMsg. tea.Tick makes asserting on wall-clock
+// behavior awkward, so tests assert on the shape of what Update returned
+// instead: how many links a poll's completion added to the self-poll chain.
+func countCollectTicks(cmd tea.Cmd) int {
+	if cmd == nil {
+		return 0
+	}
+	switch msg := cmd().(type) {
+	case CollectTickMsg:
+		return 1
+	case tea.BatchMsg:
+		n := 0
+		for _, c := range msg {
+			n += countCollectTicks(c)
+		}
+		return n
+	}
+	return 0
+}
+
+// TestForcedPollDoesNotForkTheChain is the regression pin for the fork this
+// round of review found: handleSnapshot's Local branch used to schedule a
+// CollectTickMsg on every completed poll, ambient or forced. A forced poll
+// completing while an ambient tick is already pending would then add a
+// second, independent chain link on top of it - the ambient tick still fires
+// on its own schedule, so the two chains run forever afterward, each
+// producing its own tick from then on, doubling the effective poll rate for
+// the rest of the process's life.
+func TestForcedPollDoesNotForkTheChain(t *testing.T) {
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	next, forcedCmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if forcedCmd == nil {
+		t.Fatal("Refresh issued no command while self-polling")
+	}
+	m = next.(Model)
+
+	forcedMsg := forcedCmd()
+	snap, ok := forcedMsg.(SnapshotMsg)
+	if !ok || !snap.Forced {
+		t.Fatalf("got %+v, want a forced SnapshotMsg", forcedMsg)
+	}
+
+	_, after := m.Update(forcedMsg)
+	if got := countCollectTicks(after); got != 0 {
+		t.Errorf("a forced poll's completion scheduled %d ticks, want 0: it must not fork the chain "+
+			"the pending ambient tick already continues", got)
+	}
+}
+
+// TestRepeatedForcedPollsDoNotAccumulateChains is the same property under
+// repetition: each forced poll's completion clears pollInFlight (the same as
+// an ambient one), so nothing stops a second, third, or Nth Refresh press
+// from each starting its own poll - none of them may add a chain link either.
+func TestRepeatedForcedPollsDoNotAccumulateChains(t *testing.T) {
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	for i := 1; i <= 3; i++ {
+		next, forcedCmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+		if forcedCmd == nil {
+			t.Fatalf("press %d: Refresh issued no command", i)
+		}
+		m = next.(Model)
+
+		forcedMsg := forcedCmd()
+		next, after := m.Update(forcedMsg)
+		m = next.(Model)
+		if got := countCollectTicks(after); got != 0 {
+			t.Errorf("press %d: forced poll's completion scheduled %d ticks, want 0", i, got)
+		}
+	}
+}
+
+// TestFailedForcedPollDoesNotForkTheChain covers the branch that actually
+// threatens this fix: collectCmd's error path builds its SnapshotMsg
+// separately from the success path, so it is the one place Forced could be
+// dropped without any other test noticing (a failed poll still carries no
+// sessions either way).
+func TestFailedForcedPollDoesNotForkTheChain(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.On("tmux", "", context.DeadlineExceeded)
+
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	forcedCmd := m.startPoll(true)
+	if forcedCmd == nil {
+		t.Fatal("startPoll refused the forced poll")
+	}
+	msg := forcedCmd()
+	snap, ok := msg.(SnapshotMsg)
+	if !ok || !snap.Forced || snap.Sessions != nil {
+		t.Fatalf("got %+v, want a forced SnapshotMsg with no sessions (a failed poll)", msg)
+	}
+
+	_, after := m.Update(msg)
+	if got := countCollectTicks(after); got != 0 {
+		t.Errorf("a failed forced poll's completion scheduled %d ticks, want 0", got)
+	}
+}

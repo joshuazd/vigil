@@ -867,7 +867,16 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		if m.detailOpen {
 			cmds = append(cmds, m.refreshDetailCmd())
 		}
-		cmds = append(cmds, collectTickCmd(m.pollInterval(), m.epoch))
+		// Only the ambient chain schedules its own continuation. A forced
+		// poll (Refresh key, an action result) is an extra poll layered on
+		// top of that chain, not a replacement link in it: the tick that was
+		// already pending for the ambient poll still fires on its own, so a
+		// forced poll scheduling one too would fork the chain into two
+		// self-perpetuating ticks - and every further forced poll would fork
+		// it again, permanently doubling the rate each time.
+		if !msg.Forced {
+			cmds = append(cmds, collectTickCmd(m.pollInterval(), m.epoch))
+		}
 		return m, tea.Batch(cmds...)
 	}
 

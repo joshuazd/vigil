@@ -65,6 +65,12 @@ type SnapshotMsg struct {
 	Sessions []*session.Session
 	Epoch    int
 	Local    bool
+
+	// Forced marks a poll that was requested out of band - the r key, or an
+	// action result - rather than by the ambient tick chain. Only an ambient
+	// poll's completion schedules the next tick: a forced poll that scheduled
+	// one too would fork the chain and permanently double the poll rate.
+	Forced bool
 }
 
 // DaemonLostMsg reports that the daemon stream ended, so the TUI should
