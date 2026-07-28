@@ -2,10 +2,12 @@ package config
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jzinkduda/vigil/internal/fetch"
 )
@@ -234,14 +236,61 @@ func TestRunHookNoTemplateSkipsCommander(t *testing.T) {
 	_, err := cfg.RunHook(context.Background(), cmd, "cleanup", map[string]string{}, "", 0)
 
 	var notConfigured *HookNotConfigured
-	if err == nil {
-		t.Fatal("expected HookNotConfigured error")
-	}
-	if !strings.Contains(err.Error(), "not configured") {
-		t.Errorf("expected HookNotConfigured error, got: %v", err)
+	if !errors.As(err, &notConfigured) {
+		t.Fatalf("got %T (%v), want *HookNotConfigured", err, err)
 	}
 	if len(cmd.Calls) != 0 {
 		t.Errorf("expected 0 recorded calls, got %d", len(cmd.Calls))
 	}
-	_ = notConfigured
+}
+
+// TestRunHookCapturesStderr pins the property `exec 2>&1` exists for, rather
+// than the presence of that string in the script. Uses the real commander
+// because a mock cannot prove a shell redirect works.
+func TestRunHookCapturesStderr(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{"notify": "echo to-stderr >&2"}}
+
+	out, err := cfg.RunHook(context.Background(), &fetch.ExecCommander{}, "notify", map[string]string{}, "", 5*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	if !strings.Contains(out, "to-stderr") {
+		t.Fatalf("got %q, want the hook's stderr captured in the output", out)
+	}
+}
+
+// TestRunHookCapturesStderrWhenTheHookFails is the MergePR recovery contract
+// end to end: gh writes "merged" to stderr and exits 1, and MergePR reads that
+// to tell a real failure from a successful merge whose branch cleanup failed.
+func TestRunHookCapturesStderrWhenTheHookFails(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{"merge": "echo pull request merged >&2; exit 1"}}
+
+	out, err := cfg.RunHook(context.Background(), &fetch.ExecCommander{}, "merge", map[string]string{}, "", 5*time.Second)
+	if err == nil {
+		t.Fatal("want an error from a hook that exits 1")
+	}
+	if !strings.Contains(out, "merged") {
+		t.Fatalf("got out %q, want the stderr text MergePR recovers on", out)
+	}
+	if !strings.Contains(err.Error(), "merged") {
+		t.Fatalf("got err %v, want the output embedded in the error too", err)
+	}
+}
+
+// TestRunHookStderrOrderingSurvivesACompoundHook covers why the redirect is
+// `exec 2>&1;` and not a trailing " 2>&1": a trailing redirect would attach to
+// the last clause only, so an earlier clause's stderr would be lost.
+func TestRunHookStderrOrderingSurvivesACompoundHook(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{"merge": "echo first >&2 && echo second"}}
+
+	out, err := cfg.RunHook(context.Background(), &fetch.ExecCommander{}, "merge", map[string]string{}, "", 5*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	if !strings.Contains(out, "first") {
+		t.Fatalf("got %q, want the first clause's stderr - a trailing 2>&1 would drop it", out)
+	}
+	if !strings.Contains(out, "second") {
+		t.Fatalf("got %q, want the second clause's stdout too", out)
+	}
 }
