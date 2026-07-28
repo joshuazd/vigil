@@ -33,7 +33,11 @@ func dialDaemon(path string) (net.Conn, error) {
 // socket again. Fallback is a supported mode, so this is not urgent; it just
 // has to be short enough that a daemon restart does not leave a panel
 // self-polling for minutes.
-const daemonProbeInterval = 2 * time.Second
+//
+// A var, not a const, for the same reason firstSnapshotTimeout is one: tests
+// that assert a probe was scheduled have to run the tick to see it, and
+// waiting out the real interval on every run is not worth the wall clock.
+var daemonProbeInterval = 2 * time.Second
 
 func probeTickCmd(epoch int) tea.Cmd {
 	return tea.Tick(daemonProbeInterval, func(time.Time) tea.Msg {
