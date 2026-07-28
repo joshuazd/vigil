@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,10 @@ func panelModel(t *testing.T) Model {
 	m := newTestModel()
 	m.panelMode = true
 	m.detailOpen = false
+	// A panel is always in a tmux pane, so the real thing always has this set.
+	// Leaving it false made Enter fall through to the detail toggle, which is
+	// not a state any real panel can be in.
+	m.insideTmux = true
 	m.width, m.height = 40, 10
 	m.sessions = []*session.Session{
 		{Name: "SC-1 alpha", Git: session.GitStatus{Branch: "feature/a", Modified: 2}},
@@ -127,5 +132,82 @@ func TestPanelRespawnsARateLimitedDaemon(t *testing.T) {
 	next := got.(Model)
 	if _, _ = next.Update(DaemonProbeResultMsg{Epoch: next.epoch}); spawned != 1 {
 		t.Errorf("spawned %d, want the second attempt rate-limited", spawned)
+	}
+}
+
+// withCancellableCtx gives a model a context whose cancellation is observable,
+// which is how these tests tell "switched to the session" apart from "switched
+// to the session and started shutting down".
+func withCancellableCtx(t *testing.T, m Model) Model {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	m.ctx, m.cancel = ctx, cancel
+	return m
+}
+
+func tmuxCalls(t *testing.T, m Model) []fetch.MockCall {
+	t.Helper()
+	mock, ok := m.cmd.(*fetch.MockCommander)
+	if !ok {
+		t.Fatalf("test model is not using a MockCommander, got %T", m.cmd)
+	}
+	return mock.Calls
+}
+
+// TestPanelSelectSwitchesWithoutQuitting pins the bug this fixes. A panel runs
+// inside tmux, so it inherited popup mode's switch-then-quit. The pane's
+// process exiting, plus the toggle script's deliberate remain-on-exit off,
+// meant the panel deleted itself every time it was used for the one thing it
+// exists for.
+func TestPanelSelectSwitchesWithoutQuitting(t *testing.T) {
+	m := withCancellableCtx(t, panelModel(t))
+
+	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := got.(Model)
+	if cmd == nil {
+		t.Fatal("Enter produced no command")
+	}
+	cmd()
+
+	var switched bool
+	for _, c := range tmuxCalls(t, next) {
+		if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "switch-client" {
+			switched = true
+		}
+	}
+	if !switched {
+		t.Errorf("Enter did not switch to the session; tmux calls were %+v", tmuxCalls(t, next))
+	}
+	if next.ctx.Err() != nil {
+		t.Error("Enter cancelled the panel's context, so the panel is shutting down")
+	}
+}
+
+// TestPopupSelectStillQuits pins the behaviour the panel must not inherit and
+// the popup must keep: pick a session, then get out of the way.
+func TestPopupSelectStillQuits(t *testing.T) {
+	m := withCancellableCtx(t, panelModel(t))
+	m.panelMode = false
+	m.insideTmux = true
+
+	got, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("Enter produced no command in popup mode")
+	}
+	if got.(Model).ctx.Err() == nil {
+		t.Error("popup mode no longer cancels its context on select")
+	}
+}
+
+// TestPanelOpenPRDoesNotQuit covers the same root cause at its second call
+// site: o opens the PR and, in popup mode, exits afterwards.
+func TestPanelOpenPRDoesNotQuit(t *testing.T) {
+	m := withCancellableCtx(t, panelModel(t))
+	m.sessions[0].PR = &session.PRStatus{Number: 1, URL: "https://example.invalid/pr/1"}
+
+	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if got.(Model).ctx.Err() != nil {
+		t.Error("o cancelled the panel's context, so the panel is shutting down")
 	}
 }

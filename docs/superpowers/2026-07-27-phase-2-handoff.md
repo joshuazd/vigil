@@ -130,8 +130,35 @@ tick, and one panel per session would multiply that.
    hid a dropped truncation until a fixture was widened. Deliberately deferred rather than
    fixed at the end of phase 2, because it shifts every threshold and every layout test.
 
+## Found by using it, after the merge
+
+Two things that only a real panel could surface, both fixed or recorded the same day:
+
+- **Enter closed the panel.** `popupMode` was derived from `os.Getenv("TMUX") != ""`,
+  which was a correct proxy for "transient popup" until a third surface existed that also
+  runs inside tmux. `handleSelect` and `handleOpenPR` both did `m.cancel(); tea.Quit` in
+  that mode, so the panel switched to the session and then deleted itself, with
+  `remain-on-exit off` closing the pane. Fixed by splitting the concept: the field is now
+  `insideTmux`, which means only that, and `exitsAfterAction()` (`insideTmux && !panelMode`)
+  answers the question the quit sites are actually asking. A composition defect of the
+  kind phase 1's retro warned about: two correct parts, plus a third mode nobody
+  reconciled with them. No reviewer caught it because no task brief mentioned Enter.
+- **`make install` with a daemon running produced a binary that would not run.** The
+  target did `cp` in place, and since phase 2 a daemon runs from `~/.local/bin/vigil`
+  continuously. Overwriting the inode of a running image invalidates its code signature,
+  and macOS then SIGKILLs every later exec of that path (exit 137, no output). Fixed by
+  installing through a temp file and renaming. Pre-existing bug, newly reachable: before
+  phase 2 nothing ran persistently from that path.
+
 ## Landmines and sharp edges
 
+- **`daemon stale Ns` can cry wolf on a cold start.** The threshold is
+  `max(5s, 3 * tmux_interval)`, and `Snapshot` is synchronous per tick, so a freshly
+  spawned daemon's first poll (cold git plus `gh` across every session) can block the
+  broadcast for longer than that. Observed once at 5s on a first spawn; a warm daemon
+  never showed it. Harmless and self-correcting, but if it becomes annoying the fix is to
+  not start the staleness clock until the second snapshot, rather than to raise the
+  threshold.
 - **`visibleLen` counts runes, not display columns.** A CJK session name or any
   double-width glyph still overflows a pane, and the "never exceeds its width" tests
   assert against the same rune metric the renderer uses, so they cannot see it.

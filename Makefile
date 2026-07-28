@@ -6,8 +6,14 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 build:
 	$(GO) build -ldflags "-X main.version=$(VERSION)" -o vigil .
 
+# Install through a temp file and rename, never in place. Since phase 2 a
+# daemon runs from this path continuously, and overwriting the inode of a
+# running image invalidates its code signature: macOS then SIGKILLs every
+# later exec of that path. Renaming gives the new binary a fresh inode and
+# leaves the running daemon on the old one until it exits.
 install: build
-	\cp vigil ~/.local/bin/vigil
+	\cp vigil ~/.local/bin/.vigil.new
+	mv -f ~/.local/bin/.vigil.new ~/.local/bin/vigil
 
 # -race is not optional here: the daemon's entire design is a concurrency
 # claim, and TestRunWaitsForWriters only fails reliably under the detector.

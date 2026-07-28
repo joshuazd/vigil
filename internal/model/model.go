@@ -57,7 +57,13 @@ type Model struct {
 	dispatchInput  textinput.Model
 
 	// Modes
-	popupMode     bool
+	//
+	// insideTmux says only that: vigil is running inside a tmux client. It is
+	// not a mode by itself. Two very different surfaces set it - the `prefix v`
+	// popup and a session panel - and conflating them is what made Enter close
+	// the panel. When the question is "should acting here end the process?",
+	// ask exitsAfterAction instead of testing this directly.
+	insideTmux     bool
 	initialLoad   bool
 	initialPRDone bool
 	cursorPlaced  bool
@@ -133,7 +139,7 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 	ti.Placeholder = "URL or identifier..."
 	ti.CharLimit = 500
 
-	popupMode := os.Getenv("TMUX") != ""
+	insideTmux := os.Getenv("TMUX") != ""
 
 	m := Model{
 		currentSessionName: currentSession,
@@ -142,7 +148,7 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		prevStates: make(map[string]session.SessionState),
 		selected:   make(map[string]bool),
 
-		popupMode:   popupMode,
+		insideTmux:   insideTmux,
 		initialLoad: true,
 		detailOpen:  !panel,
 		panelMode:   panel,
@@ -597,20 +603,33 @@ func (m Model) handleDispatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // --- Action handlers ---
 
+// exitsAfterAction reports whether acting on a session should end this
+// process. True only for the `prefix v` popup, which exists to be dismissed:
+// you open it, pick something, and it gets out of the way. A panel is the
+// opposite - a persistent surface whose pane is set remain-on-exit off, so
+// quitting would delete the panel every time it was used for the one thing it
+// is for.
+func (m Model) exitsAfterAction() bool {
+	return m.insideTmux && !m.panelMode
+}
+
 func (m Model) handleSelect() (tea.Model, tea.Cmd) {
 	s := m.selectedSession()
 	if s == nil {
 		return m, nil
 	}
-	if m.popupMode {
+	if m.insideTmux {
+		switchTo := func() tea.Msg {
+			_ = fetch.SwitchClient(context.Background(), m.cmd, s.Name)
+			return nil
+		}
+		if !m.exitsAfterAction() {
+			// Switching is the whole point of a panel, so it has to survive
+			// doing so.
+			return m, switchTo
+		}
 		m.cancel()
-		return m, tea.Sequence(
-			func() tea.Msg {
-				_ = fetch.SwitchClient(context.Background(), m.cmd, s.Name)
-				return nil
-			},
-			tea.Quit,
-		)
+		return m, tea.Sequence(switchTo, tea.Quit)
 	}
 	m.detailOpen = !m.detailOpen
 	if m.detailOpen {
@@ -628,7 +647,7 @@ func (m Model) handleOpenPR() (tea.Model, tea.Cmd) {
 		m.addNotification("open: "+err.Error(), "error")
 		return m, nil
 	}
-	if m.popupMode {
+	if m.exitsAfterAction() {
 		m.cancel()
 		return m, tea.Quit
 	}
@@ -750,7 +769,7 @@ func (m *Model) warmCaches() {
 
 // placeCursor points the cursor at the current session, once, in popup mode.
 func (m *Model) placeCursor() {
-	if m.cursorPlaced || !m.popupMode || m.currentSessionName == "" {
+	if m.cursorPlaced || !m.insideTmux || m.currentSessionName == "" {
 		return
 	}
 	for i, s := range m.visibleSessions() {
@@ -1426,7 +1445,7 @@ func (m *Model) checkStateTransitions() []tea.Cmd {
 	}
 
 	// Auto-focus
-	if !m.popupMode && m.cfg.GetSettingBool("auto_focus") && time.Since(m.lastManualNav) > autoFocusCooldown {
+	if !m.insideTmux && m.cfg.GetSettingBool("auto_focus") && time.Since(m.lastManualNav) > autoFocusCooldown {
 		m.maybeAutoFocus()
 	}
 
