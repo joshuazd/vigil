@@ -211,3 +211,22 @@ func TestPanelOpenPRDoesNotQuit(t *testing.T) {
 		t.Error("o cancelled the panel's context, so the panel is shutting down")
 	}
 }
+
+// TestOpenPRUsesTheInjectedOpener pins the seam. Without it, running the
+// suite opens real browser windows.
+func TestOpenPRUsesTheInjectedOpener(t *testing.T) {
+	m := withCancellableCtx(t, panelModel(t))
+	m.sessions[0].PR = &session.PRStatus{Number: 1, URL: "https://example.invalid/pr/1"}
+	var opened []string
+	m.openURL = func(url string) error {
+		opened = append(opened, url)
+		return nil
+	}
+
+	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	_ = got
+
+	if len(opened) != 1 || opened[0] != "https://example.invalid/pr/1" {
+		t.Fatalf("got %v, want exactly the PR URL through the injected opener", opened)
+	}
+}
