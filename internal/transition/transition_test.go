@@ -417,7 +417,7 @@ func TestRunSkipsCleanupWhenDisabled(t *testing.T) {
 
 func TestRunSkipsCleanupForANonDoneTransition(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs(attachedSessionsCmd, "beta|1", nil)
+	cmd.OnArgs(attachedSessionsCmd, "alpha|0", nil)
 	cfg := &config.Config{
 		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
 	}
