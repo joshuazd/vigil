@@ -32,6 +32,15 @@ func tableFixture() []*session.Session {
 // that use this fixture, row 0 exercises renderRow's isCursor branch and
 // row 1 exercises its non-cursor branch, so a truncation bug confined to
 // either branch has wide content to fail against.
+//
+// Both cells are pushed to the widest a real one can be, because the row's
+// slack is what decides whether a dropped truncation is observable at all. A
+// PR cell narrower than colPR leaves the row that many columns short of the
+// pane, and a git overflow smaller than that slack disappears into it. The PR
+// cell maxes out at 18 visible columns (a 5-digit number, a check icon, a
+// review icon, a 3-digit unresolved count and a conflict bolt) against
+// colPR = 22, so 4 columns of slack are unavoidable at the full-width tier;
+// the git cells are therefore sized to overflow colGit by more than that.
 func wideCellFixture() []*session.Session {
 	staleAge := 172800 // 2 days: renders a stale marker and exceeds colGit untruncated
 	staleAge2 := 90000 // just over the 86400 staleness threshold, 1 day display
@@ -40,30 +49,30 @@ func wideCellFixture() []*session.Session {
 			Name: "SC-999999 an extremely long session name that overflows every name tier",
 			Git: session.GitStatus{
 				Branch:        "feature/wide",
-				Modified:      30,
-				Added:         120,
-				Deleted:       70,
-				Unpushed:      50,
+				Modified:      300,
+				Added:         1200,
+				Deleted:       700,
+				Unpushed:      500,
 				RebaseAgeSecs: &staleAge,
 			},
 			PR: &session.PRStatus{
-				Number: 4521, State: "OPEN", Checks: "fail",
-				ReviewDecision: "CHANGES_REQUESTED", UnresolvedComments: 3, HasConflicts: true,
+				Number: 99999, State: "OPEN", Checks: "fail",
+				ReviewDecision: "CHANGES_REQUESTED", UnresolvedComments: 999, HasConflicts: true,
 			},
 		},
 		{
 			Name: "SC-1010 second overflowing session for the non-cursor branch",
 			Git: session.GitStatus{
 				Branch:        "feature/also-wide",
-				Modified:      45,
-				Added:         200,
-				Deleted:       15,
-				Unpushed:      9,
+				Modified:      450,
+				Added:         2000,
+				Deleted:       150,
+				Unpushed:      900,
 				RebaseAgeSecs: &staleAge2,
 			},
 			PR: &session.PRStatus{
-				Number: 7777, State: "OPEN", Checks: "pending",
-				UnresolvedComments: 12, HasConflicts: true,
+				Number: 88888, State: "OPEN", Checks: "pending",
+				UnresolvedComments: 123, HasConflicts: true,
 			},
 		},
 	}
@@ -118,13 +127,23 @@ func TestTableNeverExceedsItsWidth(t *testing.T) {
 //
 // The cursor is put on row 1 so row 0, the one being measured, carries no
 // cursor styling to unpick. Row 0 is the fixture session that has git data.
+//
+// The offset is measured in columns, not bytes: strings.Index returns a byte
+// index, and the 3-byte state dot makes that 63 rather than 61. Measuring what
+// the terminal sees is the point of the assertion, so the byte index is only
+// used to slice the prefix that VisibleWidth then measures.
 func TestTableKeepsNameColumnPinnedAtFullWidth(t *testing.T) {
-	const wantOffset = 63 // 3 + 1 + 2 + 1 + 2 + 1 + 52 + 1
+	// indicator 3, index 1, state dot 1, name 52, one separator after each.
+	const wantOffset = 3 + 1 + 1 + 1 + 1 + 1 + 52 + 1 // 61
 	for _, width := range []int{104, 200} {
 		out := RenderTable(tableFixture(), 1, map[string]bool{}, 86400, width, 2, "")
 		row := StripANSI(strings.Split(out, "\n")[0])
-		if gitAt := strings.Index(row, "~3"); gitAt != wantOffset {
-			t.Errorf("width %d: git column starts at %d, want %d", width, gitAt, wantOffset)
+		gitAt := strings.Index(row, "~3")
+		if gitAt < 0 {
+			t.Fatalf("width %d: no git cell in %q", width, row)
+		}
+		if got := VisibleWidth(row[:gitAt]); got != wantOffset {
+			t.Errorf("width %d: git column starts at column %d, want %d", width, got, wantOffset)
 		}
 	}
 }
