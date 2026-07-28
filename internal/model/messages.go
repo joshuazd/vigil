@@ -9,11 +9,17 @@ import (
 )
 
 // RenderTickMsg triggers a repaint with no fetch work. The daemon path uses
-// it to get the same render cadence self-polling gets for free from its own
-// tight collectCmd loop, so time-based rendering (like notification expiry)
-// behaves the same whether or not a daemon is connected.
+// it to get the same render cadence self-polling gets for free from
+// CollectTickMsg, so time-based rendering (like notification expiry) behaves
+// the same whether or not a daemon is connected.
 type RenderTickMsg struct {
 	Time  time.Time
+	Epoch int
+}
+
+// CollectTickMsg paces the self-polling loop. One is scheduled per completed
+// poll, so there is never a free-running ticker and never two polls at once.
+type CollectTickMsg struct {
 	Epoch int
 }
 
@@ -43,6 +49,10 @@ type NotifyMsg struct {
 	Text     string
 	Severity string // "info", "warning", "error"
 }
+
+// DelayedPRRefreshMsg triggers a follow-up forced poll after a short delay
+// to catch GitHub API updates that lag behind the action.
+type DelayedPRRefreshMsg struct{}
 
 // DetailRefreshMsg triggers a detail panel content refresh.
 type DetailRefreshMsg struct{}

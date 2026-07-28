@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -28,7 +29,7 @@ func TestCollectCmdEmitsALocalSnapshot(t *testing.T) {
 	m.cmd = cmd
 	m.collector = collect.New(&config.Config{}, cmd)
 
-	msg := m.collectCmd()()
+	msg := m.collectCmd(false)()
 
 	snap, ok := msg.(SnapshotMsg)
 	if !ok {
@@ -59,7 +60,7 @@ func TestCollectCmdEmitsASnapshotWhenTmuxFails(t *testing.T) {
 	m.cmd = cmd
 	m.collector = collect.New(&config.Config{}, cmd)
 
-	msg := m.collectCmd()()
+	msg := m.collectCmd(false)()
 
 	snap, ok := msg.(SnapshotMsg)
 	if !ok {
@@ -114,7 +115,7 @@ func TestBothPathsProduceIdenticalSessions(t *testing.T) {
 	lm := newTestModel()
 	lm.cmd = localCmd
 	lm.collector = collect.New(&config.Config{}, localCmd)
-	msg, ok := lm.collectCmd()().(SnapshotMsg)
+	msg, ok := lm.collectCmd(false)().(SnapshotMsg)
 	if !ok {
 		t.Fatal("collectCmd did not produce a SnapshotMsg")
 	}
@@ -131,18 +132,19 @@ func TestBothPathsProduceIdenticalSessions(t *testing.T) {
 }
 
 // collectedAgain walks a command tree, invoking each command, and reports
-// whether any produced a local SnapshotMsg. That is the fallback loop
-// rescheduling itself, which nothing else drives: there is no ticker.
-func collectedAgain(cmd tea.Cmd) bool {
+// whether any produced a CollectTickMsg for the given epoch. That message is
+// what paces the fallback loop into rescheduling itself: nothing else drives
+// it, and there is no free-running ticker.
+func collectedAgain(cmd tea.Cmd, epoch int) bool {
 	if cmd == nil {
 		return false
 	}
 	switch msg := cmd().(type) {
-	case SnapshotMsg:
-		return msg.Local
+	case CollectTickMsg:
+		return msg.Epoch == epoch
 	case tea.BatchMsg:
 		for _, c := range msg {
-			if collectedAgain(c) {
+			if collectedAgain(c, epoch) {
 				return true
 			}
 		}
@@ -150,15 +152,34 @@ func collectedAgain(cmd tea.Cmd) bool {
 	return false
 }
 
+// setPollInterval shortens the self-poll pace so a test can invoke the
+// scheduled CollectTickMsg's command without waiting out a real interval.
+// tmux_interval's built-in default ("1", i.e. 1s) always beats
+// defaultPollInterval's zero-value fallback, so this also forces the
+// setting itself to 0 to route pollInterval through the shortened var.
+func setPollInterval(t *testing.T, d time.Duration) {
+	t.Helper()
+	t.Setenv("VIGIL_TMUX_INTERVAL", "0")
+	orig := defaultPollInterval
+	defaultPollInterval = d
+	t.Cleanup(func() { defaultPollInterval = orig })
+}
+
+// TestLocalSnapshotSchedulesTheNextPoll is the pacing regression pin: a local
+// snapshot must reschedule via a paced CollectTickMsg, not by appending
+// another collectCmd directly. An immediate reschedule would run the self-poll
+// loop as fast as tmux answers - tens of subprocess calls a second, forever -
+// instead of once per pollInterval.
 func TestLocalSnapshotSchedulesTheNextPoll(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
 	cmd := collectFixtureCommander()
 	m := newTestModel()
 	m.cmd = cmd
 	m.collector = collect.New(&config.Config{}, cmd)
 
-	_, next := m.handleSnapshot(SnapshotMsg{Sessions: fixtureSessions(), Local: true})
+	_, next := m.handleSnapshot(SnapshotMsg{Sessions: fixtureSessions(), Local: true, Epoch: m.epoch})
 
-	if !collectedAgain(next) {
+	if !collectedAgain(next, m.epoch) {
 		t.Fatal("a local snapshot scheduled no further poll, so the fallback loop is dead")
 	}
 }
@@ -168,18 +189,114 @@ func TestLocalSnapshotSchedulesTheNextPoll(t *testing.T) {
 // and if that branch forgets to reschedule the client goes quiet for the life
 // of the process with no indication.
 func TestAFailedLocalPollStillSchedulesTheNextOne(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
 	cmd := collectFixtureCommander()
 	m := newTestModel()
 	m.cmd = cmd
 	m.collector = collect.New(&config.Config{}, cmd)
 	m.sessions = fixtureSessions()
 
-	updated, next := m.handleSnapshot(SnapshotMsg{Local: true})
+	updated, next := m.handleSnapshot(SnapshotMsg{Local: true, Epoch: m.epoch})
 
-	if !collectedAgain(next) {
+	if !collectedAgain(next, m.epoch) {
 		t.Fatal("a failed local poll scheduled no further poll")
 	}
 	if got := updated.(Model).sessions; len(got) != 1 {
 		t.Errorf("a failed poll blanked the session list: %+v", got)
+	}
+}
+
+// TestLocalSnapshotClearsPollInFlight is the other half of the failed-poll
+// test above: handleSnapshot's Local branch must clear pollInFlight
+// regardless of outcome, or a client that hits one failed poll would refuse
+// every startPoll call (a forced refresh, a future fallback) for the rest of
+// the process.
+func TestLocalSnapshotClearsPollInFlight(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+	m.pollInFlight = true
+
+	updated, _ := m.handleSnapshot(SnapshotMsg{Local: true, Epoch: m.epoch})
+	if updated.(Model).pollInFlight {
+		t.Error("handleSnapshot's Local branch should clear pollInFlight")
+	}
+}
+
+// TestStartPollRefusesASecondPollInFlight pins the single-flight guard that
+// makes a forced refresh safe to offer alongside the ambient self-poll loop:
+// with a poll already in flight, startPoll must return nil rather than issue
+// a second collectCmd, which would call Collector.Snapshot concurrently with
+// the one already running.
+func TestStartPollRefusesASecondPollInFlight(t *testing.T) {
+	m := newTestModel()
+	m.pollInFlight = true
+
+	if cmd := m.startPoll(false); cmd != nil {
+		t.Error("startPoll issued a second poll while one was already in flight")
+	}
+}
+
+// TestStartPollMutatesTheReturnedModel guards the pointer-receiver subtlety:
+// startPoll's pollInFlight = true must land on the same Model that Update
+// returns, or the single-flight guard above is a no-op in production even
+// though it passes in isolation. Driving it through two Update calls, the way
+// the real runtime would deliver two CollectTickMsgs back to back, is what
+// would catch a regression where the mutation was made on a copy instead.
+func TestStartPollMutatesTheReturnedModel(t *testing.T) {
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	next, cmd1 := m.Update(CollectTickMsg{Epoch: m.epoch})
+	if cmd1 == nil {
+		t.Fatal("the first CollectTickMsg issued no poll")
+	}
+	if !next.(Model).pollInFlight {
+		t.Fatal("startPoll's mutation did not survive on the model Update returned")
+	}
+
+	_, cmd2 := next.Update(CollectTickMsg{Epoch: m.epoch})
+	if cmd2 != nil {
+		t.Error("a second CollectTickMsg issued a poll while one was already in flight")
+	}
+}
+
+// TestRefreshKeyForcesAPollWhenSelfPolling restores the 'r' keybinding's
+// feature: with no daemon, it must issue a forced (memo-invalidating) poll
+// through the same single-flight path as the ambient loop.
+func TestRefreshKeyForcesAPollWhenSelfPolling(t *testing.T) {
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	next, got := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if got == nil {
+		t.Fatal("Refresh issued no command while self-polling")
+	}
+	if !next.(Model).pollInFlight {
+		t.Error("Refresh should have marked a poll in flight")
+	}
+	msg, ok := got().(SnapshotMsg)
+	if !ok || !msg.Local {
+		t.Fatalf("got %T, want a local SnapshotMsg from the forced poll", msg)
+	}
+}
+
+// TestRefreshKeyDoesNothingWhenDaemonConnected pins the owner's ruling: a
+// daemon-fed client has no memos of its own to invalidate and the daemon
+// already polls at tmux_interval, so forcing a redundant local Snapshot
+// would just spend this client's own subprocess budget for nothing.
+func TestRefreshKeyDoesNothingWhenDaemonConnected(t *testing.T) {
+	m := newTestModel()
+	m.daemonConn = &fakeConn{}
+
+	_, got := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if got != nil {
+		t.Error("Refresh forced a poll while a daemon was connected")
 	}
 }

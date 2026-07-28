@@ -75,6 +75,18 @@ func (c *Collector) now() time.Time {
 	return time.Now()
 }
 
+// Invalidate drops the git and PR memos so the next Snapshot refetches both,
+// rather than serving values that are still within git_interval or
+// pr_interval. Callers that just changed state - a merge, a draft toggle -
+// use this rather than waiting out the interval.
+//
+// Like Snapshot's memos themselves, this must only ever be called from the
+// same goroutine as Snapshot: it is not guarded by a lock.
+func (c *Collector) Invalidate() {
+	c.gitMemo = nil
+	c.prMemo = nil
+}
+
 func (c *Collector) Snapshot(ctx context.Context) ([]*session.Session, error) {
 	raw, err := fetch.ListSessions(ctx, c.Cmd)
 	if err != nil {

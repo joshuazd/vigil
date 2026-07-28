@@ -40,6 +40,12 @@ func dialDaemon(path string) (net.Conn, error) {
 // waiting out the real interval on every run is not worth the wall clock.
 var daemonProbeInterval = 2 * time.Second
 
+// defaultPollInterval paces the self-poll loop when tmux_interval is unset or
+// non-positive. GetSettingDuration only has second-granularity, so tests that
+// need to observe a CollectTickMsg firing shorten this var instead, the same
+// way they shorten daemonProbeInterval.
+var defaultPollInterval = 1 * time.Second
+
 func probeTickCmd(epoch int) tea.Cmd {
 	return tea.Tick(daemonProbeInterval, func(time.Time) tea.Msg {
 		return ProbeTickMsg{Epoch: epoch}
@@ -67,13 +73,23 @@ func dialDaemonCmd(path string, epoch int) tea.Cmd {
 // message, so an outcome that produced nothing would stop the fallback loop for
 // the life of the process. Nil Sessions means the poll failed and handleSnapshot
 // must leave the existing sessions alone.
-func (m Model) collectCmd() tea.Cmd {
+//
+// force invalidates the collector's git and PR memos before collecting, so a
+// caller that just changed state (an action, the Refresh key) does not have
+// to wait out git_interval or pr_interval to see it. Invalidate runs inside
+// this same closure, on the goroutine that is about to call Snapshot, which
+// is the only thing that makes it safe: startPoll guarantees this is the only
+// collectCmd in flight, so nothing else can be reading the memos concurrently.
+func (m Model) collectCmd(force bool) tea.Cmd {
 	collector := m.collector
 	ctx := m.ctx
 	cmd := m.cmd
 	fallbackCurrent := m.currentSessionName
 	epoch := m.epoch
 	return func() tea.Msg {
+		if force {
+			collector.Invalidate()
+		}
 		sessions, err := collector.Snapshot(ctx)
 		if err != nil {
 			return SnapshotMsg{Epoch: epoch, Local: true}
@@ -81,6 +97,15 @@ func (m Model) collectCmd() tea.Cmd {
 		annotateClientFlags(ctx, cmd, sessions, fallbackCurrent)
 		return SnapshotMsg{Sessions: sessions, Epoch: epoch, Local: true}
 	}
+}
+
+// collectTickCmd paces the self-poll loop: one is scheduled per completed
+// poll (from handleSnapshot's Local branch), never on a free-running ticker,
+// so there is never more than one poll-or-pending-tick per epoch.
+func collectTickCmd(interval time.Duration, epoch int) tea.Cmd {
+	return tea.Tick(interval, func(time.Time) tea.Msg {
+		return CollectTickMsg{Epoch: epoch}
+	})
 }
 
 // annotateClientFlags fills in the fields that belong to this tmux client

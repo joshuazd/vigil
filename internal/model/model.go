@@ -116,6 +116,14 @@ type Model struct {
 	// only one collectCmd is ever in flight, which is what keeps its memos
 	// single-goroutine: Collector.Snapshot is not safe against reentry.
 	collector *collect.Collector
+
+	// pollInFlight is true from the moment startPoll issues a collectCmd
+	// until that poll's SnapshotMsg is processed by handleSnapshot's Local
+	// branch. startPoll is the only issuer of collectCmd, and it refuses to
+	// issue a second one while this is true, which is what makes a forced
+	// refresh (a user action, the Refresh key) safe to offer alongside the
+	// ambient self-poll loop without ever reentering Collector.Snapshot.
+	pollInFlight bool
 }
 
 // New creates a Model for the full dashboard.
@@ -198,6 +206,17 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		m.spawnDaemonOnce()
 	}
 
+	if m.daemonDecoder == nil {
+		// Init is about to issue the first collectCmd directly (see below),
+		// not through startPoll: Init has a value receiver and returns no
+		// Model, so a mutation startPoll made inside it would land on a copy
+		// the Bubble Tea runtime never sees, leaving pollInFlight false on
+		// the model it actually holds. Set it here instead, before Init ever
+		// runs, so a key press or action result arriving before the first
+		// SnapshotMsg cannot slip a second collectCmd past startPoll's guard.
+		m.pollInFlight = true
+	}
+
 	return m
 }
 
@@ -211,6 +230,30 @@ func (m *Model) spawnDaemonOnce() {
 	if err := daemonSpawner(); err != nil {
 		m.addNotification("could not start daemon: "+err.Error(), "warning")
 	}
+}
+
+// startPoll is the only place that issues a collectCmd. It refuses to issue a
+// second one while pollInFlight is already true, which is what makes it safe
+// for a forced refresh (an action result, the Refresh key) to ask for a poll
+// alongside the ambient self-poll loop: at most one of them ever wins, and
+// the loser gets nil rather than a second concurrent Collector.Snapshot call.
+func (m *Model) startPoll(force bool) tea.Cmd {
+	if m.pollInFlight {
+		return nil
+	}
+	m.pollInFlight = true
+	return m.collectCmd(force)
+}
+
+// pollInterval paces the self-poll loop between one CollectTickMsg and the
+// next, mirroring the daemon's own floor logic (internal/daemon/daemon.go)
+// so a self-polling client refreshes tmux state no less often than a
+// daemon-fed one would.
+func (m Model) pollInterval() time.Duration {
+	if d := m.cfg.GetSettingDuration("tmux_interval"); d > 0 {
+		return d
+	}
+	return defaultPollInterval
 }
 
 func (m Model) Init() tea.Cmd {
@@ -228,7 +271,10 @@ func (m Model) Init() tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 
-	cmds = append(cmds, m.collectCmd(), probeTickCmd(m.epoch))
+	// Not startPoll: newModel already set pollInFlight for this branch, since
+	// Init cannot report its own mutation back to the runtime (see there).
+	// Calling startPoll here would see that flag and refuse to poll at all.
+	cmds = append(cmds, m.collectCmd(false), probeTickCmd(m.epoch))
 	return tea.Batch(cmds...)
 }
 
@@ -248,6 +294,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SnapshotMsg:
 		return m.handleSnapshot(msg)
+
+	case CollectTickMsg:
+		// Paces the self-poll loop: one is scheduled per completed local
+		// poll, never a free-running ticker. Dropped if a daemon has since
+		// taken over - listenDaemonCmd owns polling now, and issuing a
+		// collectCmd here would run it against the daemon's shared budget
+		// for nothing, since a connected client never applies its result.
+		if msg.Epoch != m.epoch || m.daemonConn != nil {
+			return m, nil
+		}
+		return m, m.startPoll(false)
 
 	case DaemonLostMsg:
 		return m.handleDaemonLost(msg)
@@ -293,15 +350,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			severity = "error"
 		}
 		m.addNotification(msg.Message, severity)
-		// No forced re-fetch: the ambient poll (daemon or self) is the only
-		// caller of collector.Snapshot, and a second one here would run
-		// concurrently with it against the same unsynchronized memos.
-		return m, nil
+		// A daemon-fed client has nothing to force: the daemon already polls
+		// at tmux_interval and pushes every snapshot, and this client cannot
+		// reach the daemon's memos to invalidate them anyway.
+		if m.daemonConn != nil {
+			return m, nil
+		}
+		return m, tea.Batch(m.startPoll(true), delayedPRRefreshCmd())
 
 	case BatchResultMsg:
 		m.selected = make(map[string]bool)
 		m.addNotification(fmt.Sprintf("%s: %d ok, %d failed", msg.Action, msg.OK, msg.Failed), "info")
-		return m, nil
+		if m.daemonConn != nil {
+			return m, nil
+		}
+		return m, tea.Batch(m.startPoll(true), delayedPRRefreshCmd())
+
+	case DelayedPRRefreshMsg:
+		// Catches GitHub API updates that lagged behind the action's own
+		// forced poll above. Same daemon guard: nothing to force there.
+		if m.daemonConn != nil {
+			return m, nil
+		}
+		return m, m.startPoll(true)
 
 	case NotifyMsg:
 		m.addNotification(msg.Text, msg.Severity)
@@ -467,10 +538,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case key.Matches(msg, keys.Refresh):
-		// A forced re-fetch here would call collector.Snapshot a second time
-		// while the ambient poll (daemon or self) already owns it; the
-		// ambient cadence is the only supported way to get fresh data now.
-		return m, nil
+		// A daemon-fed client has nothing to force: see the ActionResultMsg
+		// case for why. startPoll's single-flight guard is what makes this
+		// safe to offer at all while self-polling: it either wins and
+		// invalidates the memos before the next Snapshot, or loses silently
+		// to a poll already in flight.
+		if m.daemonConn != nil {
+			return m, nil
+		}
+		return m, m.startPoll(true)
 
 	case key.Matches(msg, keys.ToggleDetail):
 		if m.panelMode {
@@ -761,11 +837,12 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		if msg.Sessions != nil {
 			m.applySnapshot(msg.Sessions)
 		}
+		m.pollInFlight = false
 		cmds := m.checkStateTransitions()
 		if m.detailOpen {
 			cmds = append(cmds, m.refreshDetailCmd())
 		}
-		cmds = append(cmds, m.collectCmd())
+		cmds = append(cmds, collectTickCmd(m.pollInterval(), m.epoch))
 		return m, tea.Batch(cmds...)
 	}
 
@@ -820,9 +897,15 @@ func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
 		m.daemonDecoder = nil
 	}
 	m.epoch++
+	// pollInFlight is scoped to a polling generation: reset it here rather
+	// than trust whatever it was left at, or a stale straggler collectCmd
+	// from a generation this very epoch bump just retired (see
+	// handleProbeResult) could leave it stuck true forever, wedging every
+	// future fallback's startPoll call.
+	m.pollInFlight = false
 	m.daemonReady = false
 	m.addNotification("daemon lost, polling directly", "warning")
-	return m, tea.Batch(m.collectCmd(), probeTickCmd(m.epoch))
+	return m, tea.Batch(m.startPoll(false), probeTickCmd(m.epoch))
 }
 
 // handleProbeResult installs a reconnected daemon, or keeps probing. Bumping
@@ -850,6 +933,11 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 	// the deadline once something arrives.
 	_ = msg.Conn.SetReadDeadline(time.Now().Add(firstSnapshotTimeout))
 	m.epoch++
+	// Same reset as handleDaemonLost, and for the same reason: a self-poll
+	// that was in flight when this reconnect happened is now retired by the
+	// epoch bump, so its SnapshotMsg will never reach the branch that would
+	// otherwise clear this flag. Left set, it would wedge the next fallback.
+	m.pollInFlight = false
 	m.daemonConn = msg.Conn
 	m.daemonDecoder = msg.Decoder
 	m.daemonReady = false
@@ -900,6 +988,15 @@ func (m Model) staleAfter() time.Duration {
 func renderTickCmd(interval time.Duration, epoch int) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return RenderTickMsg{Time: t, Epoch: epoch}
+	})
+}
+
+// delayedPRRefreshCmd triggers a follow-up forced poll a few seconds after an
+// action, to catch GitHub API updates (merge, review state) that lag behind
+// the action's own immediate refresh.
+func delayedPRRefreshCmd() tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return DelayedPRRefreshMsg{}
 	})
 }
 

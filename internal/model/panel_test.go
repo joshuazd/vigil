@@ -2,6 +2,9 @@ package model
 
 import (
 	"context"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +114,53 @@ func TestNewDoesNotSpawnTheDaemon(t *testing.T) {
 	New(&config.Config{}, fetch.NewMockCommander())
 	if spawned != 0 {
 		t.Errorf("the TUI spawned %d daemons; only panels do that", spawned)
+	}
+}
+
+// TestNewPrimesPollInFlightBeforeInitRuns closes a startup race Init alone
+// cannot: Init has a value receiver and returns no Model, so a mutation
+// startPoll made inside it would never reach the model the Bubble Tea
+// runtime actually holds - it would land on a copy Init discards. newModel
+// primes pollInFlight itself instead, before Init ever runs, so a key press
+// or action result landing before the first SnapshotMsg cannot slip a second
+// collectCmd past startPoll's guard.
+func TestNewPrimesPollInFlightBeforeInitRuns(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t)) // no socket to dial
+
+	m := New(&config.Config{}, fetch.NewMockCommander())
+	if !m.pollInFlight {
+		t.Fatal("a freshly constructed self-polling model should already show a poll in flight")
+	}
+	if cmd := m.startPoll(true); cmd != nil {
+		t.Error("startPoll issued a poll before Init's own first poll had even run")
+	}
+}
+
+// TestNewConnectedToADaemonDoesNotPrimePollInFlight is the other half: a
+// daemon-fed model never calls collectCmd at all, so marking a poll in
+// flight for it would wedge every future startPoll call (a forced refresh)
+// for as long as the daemon stays connected.
+func TestNewConnectedToADaemonDoesNotPrimePollInFlight(t *testing.T) {
+	dir := shortTempDir(t)
+	sockDir := filepath.Join(dir, "vigil")
+	if err := os.Mkdir(sockDir, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("HOME", dir)
+
+	l, err := net.Listen("unix", filepath.Join(sockDir, "vigild.sock"))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	m := New(&config.Config{}, fetch.NewMockCommander())
+	if m.daemonDecoder == nil {
+		t.Fatal("New did not dial the daemon; want it to have connected to the listener above")
+	}
+	if m.pollInFlight {
+		t.Error("a daemon-fed model should not show a self-poll in flight")
 	}
 }
 
