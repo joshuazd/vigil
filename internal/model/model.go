@@ -44,6 +44,11 @@ type Model struct {
 	detector *transition.Detector
 	effects  transition.EffectRunner
 
+	// inFlightEffects serializes cleanup per session: a merged session that
+	// gets a bell re-enters Done, and two concurrent CleanupSession calls
+	// would race one worktree.
+	inFlightEffects map[string]struct{}
+
 	// UI state
 	cursor          int
 	filterState     *session.SessionState
@@ -169,6 +174,7 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		prCache:            make(map[string]*session.PRStatus),
 		detector:           transition.NewDetector(),
 		effects:            transition.Runner{Cfg: cfg, Cmd: cmd},
+		inFlightEffects:    make(map[string]struct{}),
 		selected:           make(map[string]bool),
 
 		insideTmux: insideTmux,
@@ -414,6 +420,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case NotifyMsg:
 		m.addNotification(msg.Text, msg.Severity)
+		return m, nil
+
+	case EffectDoneMsg:
+		delete(m.inFlightEffects, msg.Session)
 		return m, nil
 	}
 
@@ -1273,14 +1283,36 @@ func (m *Model) checkStateTransitions(local bool) []tea.Cmd {
 		if notify {
 			m.addNotification(fmt.Sprintf("%s → %s", ev.Session, ev.New), notifSeverity(ev.New))
 		}
-		if local {
-			ev := ev
-			effects, ctx := m.effects, m.ctx
+		if !local {
+			continue
+		}
+
+		ev := ev
+		effects, ctx := m.effects, m.ctx
+
+		if ev.New != session.Done {
+			// Every other transition dispatches ungated: the notify hook
+			// must fire once per real transition, and only cleanup is
+			// destructive enough to need serializing.
 			cmds = append(cmds, func() tea.Msg {
 				effects.Run(ctx, ev)
 				return nil
 			})
+			continue
 		}
+
+		if _, running := m.inFlightEffects[ev.Session]; running {
+			// A merged session that gets a bell re-enters Done before its
+			// first cleanup finished. Skipping silently is deliberate: the
+			// user already got the "-> done" toast, and a client has no log
+			// to explain a skip to the way the daemon does.
+			continue
+		}
+		m.inFlightEffects[ev.Session] = struct{}{}
+		cmds = append(cmds, func() tea.Msg {
+			effects.Run(ctx, ev)
+			return EffectDoneMsg{Session: ev.Session}
+		})
 	}
 
 	if !m.insideTmux && m.cfg.GetSettingBool("auto_focus") && time.Since(m.lastManualNav) > autoFocusCooldown {

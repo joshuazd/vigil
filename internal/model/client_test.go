@@ -24,14 +24,15 @@ func newTestModel() Model {
 	cmd := fetch.NewMockCommander()
 	cfg := &config.Config{}
 	return Model{
-		prCache:   make(map[string]*session.PRStatus),
-		detector:  transition.NewDetector(),
-		effects:   transition.Runner{Cfg: &config.Config{}, Cmd: fetch.NewMockCommander()},
-		selected:  make(map[string]bool),
-		cfg:       cfg,
-		cmd:       cmd,
-		ctx:       context.Background(),
-		collector: collect.New(cfg, cmd),
+		prCache:         make(map[string]*session.PRStatus),
+		detector:        transition.NewDetector(),
+		effects:         transition.Runner{Cfg: &config.Config{}, Cmd: fetch.NewMockCommander()},
+		inFlightEffects: make(map[string]struct{}),
+		selected:        make(map[string]bool),
+		cfg:             cfg,
+		cmd:             cmd,
+		ctx:             context.Background(),
+		collector:       collect.New(cfg, cmd),
 	}
 }
 

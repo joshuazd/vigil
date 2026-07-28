@@ -75,6 +75,12 @@ type DaemonLostMsg struct {
 	Epoch int
 }
 
+// EffectDoneMsg reports that a transition's side effects finished, so the
+// session can accept another Done-bound effect.
+type EffectDoneMsg struct {
+	Session string
+}
+
 // ProbeTickMsg schedules the next attempt to reach the daemon. It only fires
 // while self-polling: reaching a daemon that came up is what keeps one poller
 // serving many clients instead of N clients each spending the gh budget.
