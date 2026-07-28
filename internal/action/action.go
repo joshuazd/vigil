@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -206,12 +205,14 @@ func ToggleDraft(ctx context.Context, cmd fetch.Commander, gitRoot, branch strin
 	return "converted to draft", nil
 }
 
-// OpenPRInBrowser opens a URL in the default browser.
-// Uses Run() instead of Start() so the process completes before the caller exits.
-func OpenPRInBrowser(url string) error {
+// OpenPRInBrowser opens a URL in the default browser. Routed through
+// Commander like every other subprocess call here: a test that reaches this
+// with a real commander opens a real browser window.
+func OpenPRInBrowser(ctx context.Context, cmd fetch.Commander, url string) error {
 	opener := "xdg-open"
 	if runtime.GOOS == "darwin" {
 		opener = "open"
 	}
-	return exec.Command(opener, url).Run()
+	_, err := cmd.Run(ctx, "", opener, url)
+	return err
 }

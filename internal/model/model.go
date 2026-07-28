@@ -63,7 +63,7 @@ type Model struct {
 	// popup and a session panel - and conflating them is what made Enter close
 	// the panel. When the question is "should acting here end the process?",
 	// ask exitsAfterAction instead of testing this directly.
-	insideTmux     bool
+	insideTmux    bool
 	initialLoad   bool
 	initialPRDone bool
 	cursorPlaced  bool
@@ -82,11 +82,6 @@ type Model struct {
 
 	// Commander for subprocess calls
 	cmd fetch.Commander
-
-	// openURL is the seam for the one action that shells out without going
-	// through fetch.Commander. Tests replace it; without that, running them
-	// opens real browser windows.
-	openURL func(string) error
 
 	// Daemon connection (nil when self-polling)
 	daemonConn    net.Conn
@@ -148,21 +143,20 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 
 	m := Model{
 		currentSessionName: currentSession,
-		gitCache:   make(map[string]session.GitStatus),
-		prCache:    make(map[string]*session.PRStatus),
-		prevStates: make(map[string]session.SessionState),
-		selected:   make(map[string]bool),
+		gitCache:           make(map[string]session.GitStatus),
+		prCache:            make(map[string]*session.PRStatus),
+		prevStates:         make(map[string]session.SessionState),
+		selected:           make(map[string]bool),
 
-		insideTmux:   insideTmux,
+		insideTmux:  insideTmux,
 		initialLoad: true,
 		detailOpen:  !panel,
 		panelMode:   panel,
 
-		cfg:     cfg,
-		cmd:     cmd,
-		openURL: action.OpenPRInBrowser,
-		ctx:     ctx,
-		cancel:  cancel,
+		cfg:    cfg,
+		cmd:    cmd,
+		ctx:    ctx,
+		cancel: cancel,
 
 		dispatchInput: ti,
 		help:          help.New(),
@@ -649,7 +643,7 @@ func (m Model) handleOpenPR() (tea.Model, tea.Cmd) {
 	if s == nil || s.PR == nil || s.PR.URL == "" {
 		return m, nil
 	}
-	if err := m.openURL(s.PR.URL); err != nil {
+	if err := action.OpenPRInBrowser(m.ctx, m.cmd, s.PR.URL); err != nil {
 		m.addNotification("open: "+err.Error(), "error")
 		return m, nil
 	}

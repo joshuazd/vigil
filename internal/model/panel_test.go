@@ -212,21 +212,21 @@ func TestPanelOpenPRDoesNotQuit(t *testing.T) {
 	}
 }
 
-// TestOpenPRUsesTheInjectedOpener pins the seam. Without it, running the
-// suite opens real browser windows.
-func TestOpenPRUsesTheInjectedOpener(t *testing.T) {
+// TestOpenPRGoesThroughTheCommander pins the seam. Before this, opening a PR
+// shelled out directly and running the suite opened real browser windows.
+func TestOpenPRGoesThroughTheCommander(t *testing.T) {
 	m := withCancellableCtx(t, panelModel(t))
 	m.sessions[0].PR = &session.PRStatus{Number: 1, URL: "https://example.invalid/pr/1"}
-	var opened []string
-	m.openURL = func(url string) error {
-		opened = append(opened, url)
-		return nil
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+
+	var found bool
+	for _, c := range tmuxCalls(t, m) {
+		if (c.Name == "open" || c.Name == "xdg-open") && len(c.Args) == 1 && c.Args[0] == "https://example.invalid/pr/1" {
+			found = true
+		}
 	}
-
-	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
-	_ = got
-
-	if len(opened) != 1 || opened[0] != "https://example.invalid/pr/1" {
-		t.Fatalf("got %v, want exactly the PR URL through the injected opener", opened)
+	if !found {
+		t.Fatalf("no opener call for the PR URL in %+v", tmuxCalls(t, m))
 	}
 }

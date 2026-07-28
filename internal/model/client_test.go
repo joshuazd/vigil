@@ -26,7 +26,6 @@ func newTestModel() Model {
 		selected:   make(map[string]bool),
 		cfg:        &config.Config{},
 		cmd:        fetch.NewMockCommander(),
-		openURL:    func(string) error { return nil },
 		ctx:        context.Background(),
 	}
 }
