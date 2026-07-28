@@ -13,7 +13,23 @@ import (
 
 var nwoCache sync.Map // map[string][2]string
 
+// reviewThreadsQuery is the polling query. It asks only what the unresolved
+// count needs. The comment bodies it used to fetch are read by one detail panel
+// for one session, but this runs for every open PR every pr_interval, and
+// GitHub scores the GraphQL limit on nodes requested.
 const reviewThreadsQuery = `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes { isResolved isOutdated }
+      }
+    }
+  }
+}
+`
+
+const reviewCommentsQuery = `
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
@@ -68,9 +84,8 @@ func FetchPRStatus(ctx context.Context, cmd Commander, branch, gitRoot string) *
 	reviewersRequested := len(jsonArray(data, "reviewRequests"))
 
 	var unresolved int
-	var reviewComments []session.ReviewComment
 	if state == "OPEN" {
-		unresolved, reviewComments = fetchReviewThreads(ctx, cmd, gitRoot, number)
+		unresolved = fetchReviewThreads(ctx, cmd, gitRoot, number)
 	}
 
 	return &session.PRStatus{
@@ -86,7 +101,6 @@ func FetchPRStatus(ctx context.Context, cmd Commander, branch, gitRoot string) *
 		ReviewersRequested: reviewersRequested,
 		Title:              title,
 		Body:               body,
-		ReviewComments:     reviewComments,
 	}
 }
 
@@ -127,52 +141,41 @@ func parseChecks(rollup []any) string {
 	return "pass"
 }
 
-func fetchReviewThreads(ctx context.Context, cmd Commander, gitRoot string, prNumber int) (int, []session.ReviewComment) {
-	nwo := getNWO(ctx, cmd, gitRoot)
-	if nwo == [2]string{} {
-		return 0, nil
-	}
-	owner, repo := nwo[0], nwo[1]
-
-	out, err := runWithRetry(ctx, cmd, gitRoot, "gh", "api", "graphql",
-		"-f", "query="+reviewThreadsQuery,
-		"-F", "owner="+owner,
-		"-F", "repo="+repo,
-		"-F", fmt.Sprintf("number=%d", prNumber))
-	if err != nil {
-		return 0, nil
-	}
-
-	var data map[string]any
-	if err := json.Unmarshal([]byte(out), &data); err != nil {
-		return 0, nil
-	}
-
-	threads := jsonPath(data, "data", "repository", "pullRequest", "reviewThreads", "nodes")
-	threadArr, ok := threads.([]any)
-	if !ok {
-		return 0, nil
-	}
-
+// fetchReviewThreads returns the number of threads that are neither resolved
+// nor outdated. That count drives session.State() == Unresolved, so it is
+// polled for every open PR.
+func fetchReviewThreads(ctx context.Context, cmd Commander, gitRoot string, prNumber int) int {
+	nodes := reviewThreadNodes(ctx, cmd, gitRoot, prNumber, reviewThreadsQuery)
 	unresolved := 0
-	var comments []session.ReviewComment
-	for _, t := range threadArr {
+	for _, t := range nodes {
 		tm, ok := t.(map[string]any)
 		if !ok {
 			continue
 		}
-		isResolved := jsonBool(tm, "isResolved")
-		isOutdated := jsonBool(tm, "isOutdated")
-		if !isResolved && !isOutdated {
+		if !jsonBool(tm, "isResolved") && !jsonBool(tm, "isOutdated") {
 			unresolved++
 		}
-		path := jsonStr(tm, "path")
-		commentsData := jsonPath(tm, "comments", "nodes")
-		commentArr, ok := commentsData.([]any)
+	}
+	return unresolved
+}
+
+// FetchReviewComments fetches the review comment bodies for one PR. Called for
+// the selected session when the detail panel is showing comments, never from a
+// poll.
+func FetchReviewComments(ctx context.Context, cmd Commander, gitRoot string, prNumber int) []session.ReviewComment {
+	var comments []session.ReviewComment
+	for _, t := range reviewThreadNodes(ctx, cmd, gitRoot, prNumber, reviewCommentsQuery) {
+		tm, ok := t.(map[string]any)
 		if !ok {
 			continue
 		}
-		for _, c := range commentArr {
+		resolved := jsonBool(tm, "isResolved")
+		path := jsonStr(tm, "path")
+		nodes, ok := jsonPath(tm, "comments", "nodes").([]any)
+		if !ok {
+			continue
+		}
+		for _, c := range nodes {
 			cm, ok := c.(map[string]any)
 			if !ok {
 				continue
@@ -185,11 +188,32 @@ func fetchReviewThreads(ctx context.Context, cmd Commander, gitRoot string, prNu
 				Author:   author,
 				Body:     jsonStr(cm, "body"),
 				Path:     path,
-				Resolved: isResolved,
+				Resolved: resolved,
 			})
 		}
 	}
-	return unresolved, comments
+	return comments
+}
+
+func reviewThreadNodes(ctx context.Context, cmd Commander, gitRoot string, prNumber int, query string) []any {
+	nwo := getNWO(ctx, cmd, gitRoot)
+	if nwo == [2]string{} {
+		return nil
+	}
+	out, err := runWithRetry(ctx, cmd, gitRoot, "gh", "api", "graphql",
+		"-f", "query="+query,
+		"-F", "owner="+nwo[0],
+		"-F", "repo="+nwo[1],
+		"-F", fmt.Sprintf("number=%d", prNumber))
+	if err != nil {
+		return nil
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(out), &data); err != nil {
+		return nil
+	}
+	nodes, _ := jsonPath(data, "data", "repository", "pullRequest", "reviewThreads", "nodes").([]any)
+	return nodes
 }
 
 func getNWO(ctx context.Context, cmd Commander, gitRoot string) [2]string {
