@@ -243,22 +243,154 @@ func TestTotalMatchesWhatTheRowActuallyRenders(t *testing.T) {
 	}
 }
 
-// TestFrozenThresholdsAdmitAUsefulName stops a future edit to a fixed cost from
-// silently producing a name below nameMin at a tier boundary. The thresholds are
-// tuned, not derived, so nothing else checks them against the costs.
-func TestFrozenThresholdsAdmitAUsefulName(t *testing.T) {
-	for _, tier := range []struct {
-		name           string
-		threshold, fix int
+// TestTierBoundariesAreFrozen pins all five tier selection widths on both
+// sides of each boundary. The thresholds are tuned, not derived - deriving
+// them would move tier choices at width 40 and elsewhere. Each boundary is
+// checked by properties that distinguish the tiers: whether Git, Index, PR
+// (full vs compact), and Indicator columns appear. The name column is checked
+// to equal threshold - fixedCost, catching attempts to lower nameMin.
+func TestTierBoundariesAreFrozen(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		belowThreshold    int
+		atThreshold       int
+		belowCheck        func(*testing.T, TableLayout) // properties at threshold-1
+		atCheck           func(*testing.T, TableLayout) // properties at threshold
+		fixedCostAtTier   int
 	}{
-		{"full", tierFull, fullFixed},
-		{"noGit", tierNoGit, noGitFixed},
-		{"compact", tierCompact, compactFixed},
-		{"noPR", tierNoPR, noPRFixed},
+		{
+			name:           "full (Git appears)",
+			belowThreshold: 59, atThreshold: 60,
+			belowCheck: func(t *testing.T, l TableLayout) {
+				if l.Git != 0 {
+					t.Error("width 59: git column unexpectedly present before full tier")
+				}
+			},
+			atCheck: func(t *testing.T, l TableLayout) {
+				if l.Git == 0 {
+					t.Error("width 60: git column missing at full tier threshold")
+				}
+				if l.Index == false {
+					t.Error("width 60: index missing at full tier")
+				}
+			},
+			fixedCostAtTier: fullFixed,
+		},
+		{
+			name:           "noGit (Index becomes true, PR goes full)",
+			belowThreshold: 40, atThreshold: 41,
+			belowCheck: func(t *testing.T, l TableLayout) {
+				if l.Index {
+					t.Error("width 40: index column unexpectedly present before noGit tier")
+				}
+				if l.PR != colPRCompact {
+					t.Errorf("width 40: PR should be compact %d, got %d", colPRCompact, l.PR)
+				}
+			},
+			atCheck: func(t *testing.T, l TableLayout) {
+				if !l.Index {
+					t.Error("width 41: index missing at noGit tier threshold")
+				}
+				if l.PR != colPR {
+					t.Errorf("width 41: PR should be full %d, got %d", colPR, l.PR)
+				}
+			},
+			fixedCostAtTier: noGitFixed,
+		},
+		{
+			name:           "compact (PR becomes non-zero and compact)",
+			belowThreshold: 27, atThreshold: 28,
+			belowCheck: func(t *testing.T, l TableLayout) {
+				if l.PR != 0 {
+					t.Error("width 27: PR column unexpectedly present before compact tier")
+				}
+			},
+			atCheck: func(t *testing.T, l TableLayout) {
+				if l.PR == 0 {
+					t.Error("width 28: PR column missing at compact tier threshold")
+				}
+				if l.PR != colPRCompact {
+					t.Errorf("width 28: PR should be compact %d, got %d", colPRCompact, l.PR)
+				}
+				if l.Index {
+					t.Error("width 28: index should have been dropped at compact tier")
+				}
+			},
+			fixedCostAtTier: compactFixed,
+		},
+		{
+			name:           "noPR (Indicator and PR drop, State stays)",
+			belowThreshold: 14, atThreshold: 15,
+			belowCheck: func(t *testing.T, l TableLayout) {
+				if l.Indicator {
+					t.Error("width 14: indicator unexpectedly present before noPR tier")
+				}
+				if l.PR != 0 {
+					t.Error("width 14: PR column unexpectedly present")
+				}
+			},
+			atCheck: func(t *testing.T, l TableLayout) {
+				if !l.Indicator {
+					t.Error("width 15: indicator missing at noPR tier threshold")
+				}
+				if l.State == false {
+					t.Error("width 15: state missing at noPR tier")
+				}
+				if l.PR != 0 {
+					t.Error("width 15: PR should be zero at noPR tier")
+				}
+			},
+			fixedCostAtTier: noPRFixed,
+		},
+		{
+			name:           "bare (State appears)",
+			belowThreshold: 3, atThreshold: 4,
+			belowCheck: func(t *testing.T, l TableLayout) {
+				if l.State {
+					t.Error("width 3: state dot unexpectedly present before bare tier")
+				}
+			},
+			atCheck: func(t *testing.T, l TableLayout) {
+				if !l.State {
+					t.Error("width 4: state dot missing at bare tier threshold")
+				}
+			},
+			fixedCostAtTier: bareFixed,
+		},
 	} {
-		if got := tier.threshold - tier.fix; got < nameMin {
-			t.Errorf("%s: threshold %d leaves %d columns of name, want at least %d",
-				tier.name, tier.threshold, got, nameMin)
+		below := LayoutForWidth(tc.belowThreshold)
+		at := LayoutForWidth(tc.atThreshold)
+
+		tc.belowCheck(t, below)
+		tc.atCheck(t, at)
+
+		// Verify name column width: at threshold, name = threshold - fixedCost
+		// For most tiers clamped to [nameMin, colName], for bare tier [1, colName]
+		var expectedName int
+		raw := tc.atThreshold - tc.fixedCostAtTier
+		isBare := strings.Contains(tc.name, "bare")
+		if isBare {
+			// Bare tier clamps to [1, colName]
+			if raw < 1 {
+				expectedName = 1
+			} else if raw > colName {
+				expectedName = colName
+			} else {
+				expectedName = raw
+			}
+		} else {
+			// Other tiers clamp to [nameMin, colName]
+			if raw < nameMin {
+				expectedName = nameMin
+			} else if raw > colName {
+				expectedName = colName
+			} else {
+				expectedName = raw
+			}
+		}
+		if at.Name != expectedName {
+			t.Errorf("%s (width %d): name column is %d, want %d (%d - %d)",
+				tc.name, tc.atThreshold, at.Name, expectedName, tc.atThreshold, tc.fixedCostAtTier)
 		}
 	}
 }
@@ -266,7 +398,8 @@ func TestFrozenThresholdsAdmitAUsefulName(t *testing.T) {
 // TestPanelWidthStillPicksTheCompactTier pins the layout the phase 2 resize
 // verification was run at. Deriving the thresholds from the corrected costs
 // moves 40 onto the noGit tier, where it gets a 9-column name beside a full PR
-// column instead of 20 columns of name and a compact one.
+// column instead of 20 columns of name and a compact one. This is the one
+// boundary with a real-machine verification behind it.
 func TestPanelWidthStillPicksTheCompactTier(t *testing.T) {
 	l := LayoutForWidth(40)
 	if l.Index {
