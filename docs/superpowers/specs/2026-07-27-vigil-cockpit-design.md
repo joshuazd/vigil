@@ -273,6 +273,18 @@ Prefer a `pane_id` or a pane title over a positional target.
   test for escape-aware truncation is the only coverage of that behavior. This is a
   real bound on what the view suite verifies and should not be discovered a third
   time.
+- State-transition side effects run once per attached client, not once per event.
+  `checkStateTransitions` lives in the model, and every client keeps its own
+  `prevStates`, so a session going Blocked fires the configured `notify` hook once
+  per panel, and with `auto_cleanup = true` it runs `action.CleanupSession` - `git
+  worktree remove` plus `tmux kill-session` - once per panel, concurrently, against
+  the same worktree. Per-client *toasts* are correct and should stay per-client:
+  each panel has its own screen. Per-client hooks and cleanups are not, and phase 2
+  is exactly what makes N clients normal rather than exotic. Latent today only
+  because `auto_cleanup` defaults to false and no `notify` hook is configured; do
+  not enable `auto_cleanup` while panels are open. The durable fix is moving the
+  side effects to the daemon, which owns one view of state and can fire each
+  transition once, leaving the clients to render. Phase 3 work.
 - A live panel resized across a tier boundary is unobserved. Three panes at fixed
   widths were verified rendering real sessions, but not one pane resized through the
   boundaries. `tea.WindowSizeMsg` handling is unchanged pre-existing code, so the risk
