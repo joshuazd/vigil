@@ -13,6 +13,7 @@ import (
 
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/session"
 )
 
 // firstSnapshotTimeout bounds how long New waits for the daemon's first
@@ -61,6 +62,29 @@ func dialDaemonCmd(path string, epoch int) tea.Cmd {
 	}
 }
 
+// annotateClientFlags fills in the fields that belong to this tmux client
+// rather than to the snapshot: which session is current and which was last.
+// The daemon serves many clients and cannot know either.
+func annotateClientFlags(ctx context.Context, cmd fetch.Commander, sessions []*session.Session, fallbackCurrent string) {
+	current := fetch.CurrentSession(ctx, cmd)
+	if current == "" {
+		current = fallbackCurrent
+	}
+	last := fetch.LastSession(ctx, cmd)
+
+	names := make(map[string]bool, len(sessions))
+	for _, s := range sessions {
+		names[s.Name] = true
+	}
+	if !names[last] {
+		last = ""
+	}
+	for _, s := range sessions {
+		s.IsCurrent = s.Name == current
+		s.IsLast = s.Name == last
+	}
+}
+
 // listenDaemonCmd reads one snapshot per invocation; Update re-issues it on
 // every SnapshotMsg. Which session is current or last belongs to this tmux
 // client rather than to the daemon, so those are resolved here, off the UI
@@ -77,25 +101,7 @@ func listenDaemonCmd(
 		if err != nil {
 			return DaemonLostMsg{Epoch: epoch}
 		}
-
-		current := fetch.CurrentSession(ctx, cmd)
-		if current == "" {
-			current = fallbackCurrent
-		}
-		last := fetch.LastSession(ctx, cmd)
-
-		names := make(map[string]bool, len(snap.Sessions))
-		for _, s := range snap.Sessions {
-			names[s.Name] = true
-		}
-		if !names[last] {
-			last = ""
-		}
-		for _, s := range snap.Sessions {
-			s.IsCurrent = s.Name == current
-			s.IsLast = s.Name == last
-		}
-
+		annotateClientFlags(ctx, cmd, snap.Sessions, fallbackCurrent)
 		return SnapshotMsg{Sessions: snap.Sessions, Epoch: epoch}
 	}
 }
