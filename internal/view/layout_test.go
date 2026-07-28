@@ -3,6 +3,9 @@ package view
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/jzinkduda/vigil/internal/session"
 )
 
 // TestLayoutMatchesTodayAtFullWidth is the regression pin for the TUI: at the
@@ -127,6 +130,71 @@ func TestTruncateVisibleResetsStyleWhenItCuts(t *testing.T) {
 func TestTruncateVisibleZeroWidth(t *testing.T) {
 	if got := TruncateVisible("\x1b[32mabc", 0); visibleLen(got) != 0 {
 		t.Errorf("got %q, want no visible output", got)
+	}
+}
+
+// TestTruncateVisibleNeverSplitsARune covers the failure a per-byte cut makes
+// invisible to every width assertion: when the budget runs out partway through
+// a multi-byte character, writing its lead byte and dropping the continuation
+// bytes emits invalid UTF-8 that the terminal draws as a replacement glyph,
+// while visibleLen still counts the orphan as exactly one column. Every
+// boundary offset through each string is checked rather than one, because the
+// bug only fires at the offsets where the budget lands mid-rune.
+func TestTruncateVisibleNeverSplitsARune(t *testing.T) {
+	inputs := []string{
+		"~45 +200 -15 ↑ 9 ⚠↻ 1d",
+		"日本語テスト",
+		"\x1b[32m#4521 ✓\x1b[0m ✗ ⚠↻",
+		"↑↓⚠↻…",
+	}
+	for _, s := range inputs {
+		for width := 0; width <= VisibleWidth(s)+2; width++ {
+			got := TruncateVisible(s, width)
+			if !utf8.ValidString(got) {
+				t.Errorf("TruncateVisible(%q, %d) = %q: invalid UTF-8", s, width, got)
+			}
+			if want, have := min(width, VisibleWidth(s)), VisibleWidth(got); have != want {
+				t.Errorf("TruncateVisible(%q, %d) = %q: %d visible columns, want %d", s, width, got, have, want)
+			}
+		}
+	}
+}
+
+// TestTruncateVisibleCutsBeforeAWideCharacterItCannotFit pins the two exact
+// reproductions from the real render path: a git cell at colGit and a
+// CJK name, both cut precisely at a multi-byte character.
+func TestTruncateVisibleCutsBeforeAWideCharacterItCannotFit(t *testing.T) {
+	cases := []struct {
+		in    string
+		width int
+		want  string
+	}{
+		{"~45 +200 -15 ↑ 9 ⚠↻ 1d", 18, "~45 +200 -15 ↑ 9 ⚠\x1b[0m"},
+		{"日本語テスト", 3, "日本語\x1b[0m"},
+	}
+	for _, tc := range cases {
+		if got := TruncateVisible(tc.in, tc.width); got != tc.want {
+			t.Errorf("TruncateVisible(%q, %d) = %q, want %q", tc.in, tc.width, got, tc.want)
+		}
+	}
+}
+
+// TestRenderedRowsAreValidUTF8 is the same invariant one level up, against the
+// widths the dashboard and the panel actually run at. 104 is the default
+// dashboard width, where the wide fixture's git cell overflows colGit and is
+// cut mid-character.
+func TestRenderedRowsAreValidUTF8(t *testing.T) {
+	fixtures := map[string][]*session.Session{
+		"tableFixture":    tableFixture(),
+		"wideCellFixture": wideCellFixture(),
+	}
+	for name, sessions := range fixtures {
+		for width := 1; width <= 220; width++ {
+			out := RenderTable(sessions, 0, map[string]bool{}, 86400, width, 2, "")
+			if !utf8.ValidString(out) {
+				t.Fatalf("%s width %d: rendered invalid UTF-8\n%q", name, width, out)
+			}
+		}
 	}
 }
 

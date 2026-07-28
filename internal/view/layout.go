@@ -146,11 +146,15 @@ func TruncateVisible(s string, width int) string {
 			}
 			continue
 		}
-		if visible >= width {
-			cut = true
-			break
-		}
+		// The budget is only allowed to run out at a rune start. Checking it
+		// per byte would let a multi-byte character's lead byte through and
+		// then break before its continuation bytes, emitting invalid UTF-8
+		// that visibleLen still counts as exactly one column.
 		if c < 0x80 || c >= 0xC0 {
+			if visible >= width {
+				cut = true
+				break
+			}
 			visible++
 		}
 		b.WriteByte(c)
