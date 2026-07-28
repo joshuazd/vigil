@@ -403,7 +403,7 @@ func TestRunToleratesANilLogf(t *testing.T) {
 
 func TestRunSkipsCleanupWhenDisabled(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs(attachedSessionsCmd, "beta|1", nil)
+	cmd.OnArgs(attachedSessionsCmd, "alpha|0", nil)
 	cfg := &config.Config{Settings: map[string]any{"notifications_enabled": "false"}}
 
 	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), doneEvent("alpha"))
