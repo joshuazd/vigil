@@ -67,4 +67,4 @@ make install   # copy to ~/.local/bin/vigil
 - The table drops columns as width shrinks (`view.LayoutForWidth`). At width >= 104 the layout is exactly what it always was: the name column is capped at 52 and never stretches
 - Every self-rescheduling tick carries an `epoch`. Bubble Tea ticks cannot be cancelled, so switching between daemon snapshots and self-polling bumps the epoch and the previous generation's ticks retire themselves
 - A client that loses the daemon self-polls and probes the socket every 2s until it is back. A connected but silent daemon shows `daemon stale Ns` in the status bar after three poll intervals
-- Panel geometry is tmux's concern, not vigil's: the `prefix p` toggle script measures the client and splits. vigil only renders to fit its pane
+- Panel geometry is tmux's concern, not vigil's: vigil renders to fit whatever pane it is given and never chooses or changes its own size. The toggle that measures the client and splits belongs on the dotfiles side (`scripts/vigil-panel`, bound to `prefix p`), which is a separate repository and a separate change
