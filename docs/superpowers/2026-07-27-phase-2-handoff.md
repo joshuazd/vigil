@@ -230,6 +230,13 @@ Three habits worth keeping:
 - **Mutation-verify a fix, not just its test.** The strongest reviews in this phase
   deleted the production line and reported which test failed and on which line. Several
   findings survived a green suite and died to a mutation.
+- **Mutate and restore with git, never with a file copy.** Backing a file up with `cp`
+  and restoring it afterwards looks safe and is not: `cp` is aliased to `-i` here, so a
+  backup silently declines to overwrite a leftover file of the same name, and the
+  "restore" then writes that stale leftover over the working file. That happened during
+  the Enter fix, with a `/tmp/model.go.bak` a subagent had left behind earlier in the
+  phase. It was byte-identical to HEAD by luck. `git checkout -- <file>` or `git stash`
+  cannot go wrong this way.
 - **A subagent that says "I kept the brief's test verbatim but it is vacuous" is doing the
   job correctly.** Two implementers did this and both were right. Brief-mandated defects
   are the controller's to fix, not the implementer's to silently work around.
