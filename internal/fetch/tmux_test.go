@@ -174,11 +174,15 @@ func TestAttachedSessionsHandlesAPipeInTheSessionName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if attached["al|pha"] {
+	value, ok := attached["al|pha"]
+	if !ok {
+		t.Fatalf("got %v, want the whole name \"al|pha\" as one key", attached)
+	}
+	if value {
 		t.Error("al|pha reported 0 clients, should not be attached")
 	}
-	if len(attached) != 1 {
-		t.Errorf("got %v, want exactly one session parsed", attached)
+	if _, splitOnFirstPipe := attached["al"]; splitOnFirstPipe {
+		t.Error("split on the first \"|\" instead of the last: \"al\" should not be a key")
 	}
 }
 
