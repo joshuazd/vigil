@@ -1,9 +1,13 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/jzinkduda/vigil/internal/fetch"
 )
 
 func TestMissingFileReturnsEmptyConfig(t *testing.T) {
@@ -167,4 +171,77 @@ func TestGetSettingEnvOverridesDefault(t *testing.T) {
 	if cfg.GetSetting("log_level") != "DEBUG" {
 		t.Errorf("got %q, want DEBUG", cfg.GetSetting("log_level"))
 	}
+}
+
+// --- RunHook tests ---
+
+func TestRunHookGoesThroughCommander(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{"merge": "echo {branch}"}}
+	cmd := fetch.NewMockCommander()
+
+	_, _ = cfg.RunHook(context.Background(), cmd, "merge", map[string]string{"branch": "feat"}, "", 0)
+
+	if len(cmd.Calls) != 1 {
+		t.Fatalf("expected 1 recorded call, got %d", len(cmd.Calls))
+	}
+	call := cmd.Calls[0]
+	if call.Name != "sh" {
+		t.Errorf("got Name %q, want %q", call.Name, "sh")
+	}
+	if len(call.Args) < 2 || call.Args[0] != "-c" {
+		t.Fatalf("expected Args[0] == -c, got %v", call.Args)
+	}
+	if !strings.Contains(call.Args[1], "echo 'feat'") {
+		t.Errorf("expected script to contain expanded template, got %q", call.Args[1])
+	}
+}
+
+func TestRunHookRedirectsStderrBeforeBody(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{"merge": "echo {branch}"}}
+	cmd := fetch.NewMockCommander()
+
+	_, _ = cfg.RunHook(context.Background(), cmd, "merge", map[string]string{"branch": "feat"}, "", 0)
+
+	script := cmd.Calls[0].Args[1]
+	prefixIdx := strings.Index(script, "exec 2>&1;")
+	bodyIdx := strings.Index(script, "echo 'feat'")
+	if prefixIdx == -1 {
+		t.Fatalf("expected script to contain 'exec 2>&1;', got %q", script)
+	}
+	if bodyIdx == -1 || bodyIdx < prefixIdx {
+		t.Errorf("expected 'exec 2>&1;' to precede the hook body, got %q", script)
+	}
+}
+
+func TestRunHookPassesCwdAsDir(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{"merge": "echo hi"}}
+	cmd := fetch.NewMockCommander()
+
+	_, _ = cfg.RunHook(context.Background(), cmd, "merge", map[string]string{}, "/some/dir", 0)
+
+	if len(cmd.Calls) != 1 {
+		t.Fatalf("expected 1 recorded call, got %d", len(cmd.Calls))
+	}
+	if cmd.Calls[0].Dir != "/some/dir" {
+		t.Errorf("got Dir %q, want %q", cmd.Calls[0].Dir, "/some/dir")
+	}
+}
+
+func TestRunHookNoTemplateSkipsCommander(t *testing.T) {
+	cfg := &Config{}
+	cmd := fetch.NewMockCommander()
+
+	_, err := cfg.RunHook(context.Background(), cmd, "cleanup", map[string]string{}, "", 0)
+
+	var notConfigured *HookNotConfigured
+	if err == nil {
+		t.Fatal("expected HookNotConfigured error")
+	}
+	if !strings.Contains(err.Error(), "not configured") {
+		t.Errorf("expected HookNotConfigured error, got: %v", err)
+	}
+	if len(cmd.Calls) != 0 {
+		t.Errorf("expected 0 recorded calls, got %d", len(cmd.Calls))
+	}
+	_ = notConfigured
 }

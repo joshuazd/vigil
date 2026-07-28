@@ -28,6 +28,7 @@ func TestMergePR_HookFailsStateMerged(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{Hooks: map[string]any{"merge": "false"}}
 	cmd := fetch.NewMockCommander()
+	cmd.On("sh", "", fmt.Errorf("exit status 1"))
 	cmd.OnArgs("gh pr view feat --json state --jq .state", "MERGED", nil)
 
 	out, err := MergePR(context.Background(), cfg, cmd, dir, "feat")
@@ -43,6 +44,7 @@ func TestMergePR_HookFailsPRNotMerged(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{Hooks: map[string]any{"merge": "false"}}
 	cmd := fetch.NewMockCommander()
+	cmd.On("sh", "", fmt.Errorf("exit status 1"))
 	cmd.OnArgs("gh pr view feat --json state --jq .state", "OPEN", nil)
 
 	out, err := MergePR(context.Background(), cfg, cmd, dir, "feat")
@@ -61,9 +63,14 @@ func TestMergePR_HookFailsPRNotMerged(t *testing.T) {
 
 func TestApprovePR_UsesApproveHook(t *testing.T) {
 	cfg := &config.Config{Hooks: map[string]any{"approve": "echo approved"}}
-	_, err := ApprovePR(context.Background(), cfg, "/repo", "feat")
-	// Will fail because sh -c runs in subprocess, but verifies no panic
-	_ = err
+	cmd := fetch.NewMockCommander()
+	out, err := ApprovePR(context.Background(), cfg, cmd, "/repo", "feat")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "approved" {
+		t.Errorf("got %q, want %q", out, "approved")
+	}
 }
 
 // --- CleanupSession ---
@@ -296,7 +303,7 @@ func TestToggleDraft_ReadyToDraft(t *testing.T) {
 
 func TestDispatch_EmptyInput(t *testing.T) {
 	cfg := &config.Config{}
-	out, err := Dispatch(context.Background(), cfg, "")
+	out, err := Dispatch(context.Background(), cfg, fetch.NewMockCommander(), "")
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("expected empty error, got: %v", err)
 	}
@@ -307,7 +314,7 @@ func TestDispatch_EmptyInput(t *testing.T) {
 
 func TestDispatch_TooLong(t *testing.T) {
 	cfg := &config.Config{}
-	out, err := Dispatch(context.Background(), cfg, strings.Repeat("a", 501))
+	out, err := Dispatch(context.Background(), cfg, fetch.NewMockCommander(), strings.Repeat("a", 501))
 	if err == nil || !strings.Contains(err.Error(), "too long") {
 		t.Errorf("expected too long error, got: %v", err)
 	}
@@ -318,7 +325,7 @@ func TestDispatch_TooLong(t *testing.T) {
 
 func TestDispatch_ControlCharacters(t *testing.T) {
 	cfg := &config.Config{}
-	out, err := Dispatch(context.Background(), cfg, "hello\x01world")
+	out, err := Dispatch(context.Background(), cfg, fetch.NewMockCommander(), "hello\x01world")
 	if err == nil || !strings.Contains(err.Error(), "control characters") {
 		t.Errorf("expected control characters error, got: %v", err)
 	}
@@ -329,7 +336,7 @@ func TestDispatch_ControlCharacters(t *testing.T) {
 
 func TestDispatch_NoHookConfigured(t *testing.T) {
 	cfg := &config.Config{}
-	out, err := Dispatch(context.Background(), cfg, "valid input")
+	out, err := Dispatch(context.Background(), cfg, fetch.NewMockCommander(), "valid input")
 	if err == nil {
 		t.Error("expected error for unconfigured dispatch hook")
 	}

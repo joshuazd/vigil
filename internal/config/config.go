@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/jzinkduda/vigil/internal/fetch"
 )
 
 // HookNotConfigured is returned when a hook has no configuration and no default.
@@ -148,7 +148,7 @@ func ExpandHook(template string, vars map[string]string) (string, error) {
 }
 
 // RunHook expands and executes a hook command. Returns stdout.
-func (c *Config) RunHook(name string, vars map[string]string, cwd string, timeout time.Duration) (string, error) {
+func (c *Config) RunHook(ctx context.Context, cmd fetch.Commander, name string, vars map[string]string, cwd string, timeout time.Duration) (string, error) {
 	template := c.GetHook(name)
 	if template == "" {
 		return "", &HookNotConfigured{Name: name}
@@ -157,21 +157,21 @@ func (c *Config) RunHook(name string, vars map[string]string, cwd string, timeou
 	if err != nil {
 		return "", err
 	}
-	ctx := context.Background()
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
-	out, err := cmd.CombinedOutput()
+	// stderr is load-bearing here: MergePR searches this output for "merged"
+	// to recover from `gh pr merge --delete-branch` exiting 1 after a
+	// successful merge, and gh writes that text to stderr. `exec 2>&1;`
+	// redirects the whole script regardless of its structure (unlike
+	// appending " 2>&1" to cmdStr, which would only redirect its last clause).
+	out, err := cmd.Run(ctx, cwd, "sh", "-c", "exec 2>&1; "+cmdStr)
 	if err != nil {
-		return strings.TrimSpace(string(out)), fmt.Errorf("hook %s failed: %w (output: %s)", name, err, strings.TrimSpace(string(out)))
+		return strings.TrimSpace(out), fmt.Errorf("hook %s failed: %w (output: %s)", name, err, strings.TrimSpace(out))
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(out), nil
 }
 
 // shellQuote wraps a string in single quotes for safe shell usage.

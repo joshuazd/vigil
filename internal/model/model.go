@@ -1237,7 +1237,7 @@ func (m Model) approveCmd(s *session.Session) tea.Cmd {
 	branch := s.Git.Branch
 	name := s.Name
 	return func() tea.Msg {
-		out, err := action.ApprovePR(context.Background(), m.cfg, gitRoot, branch)
+		out, err := action.ApprovePR(context.Background(), m.cfg, m.cmd, gitRoot, branch)
 		if err != nil {
 			return ActionResultMsg{Action: "approve", Session: name, OK: false, Message: out}
 		}
@@ -1287,7 +1287,7 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 
 func (m Model) dispatchCmd(input string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := action.Dispatch(context.Background(), m.cfg, input)
+		out, err := action.Dispatch(context.Background(), m.cfg, m.cmd, input)
 		if err != nil {
 			return ActionResultMsg{Action: "dispatch", Session: "", OK: false, Message: out}
 		}
@@ -1318,7 +1318,7 @@ func (m Model) batchApproveCmd() tea.Cmd {
 	return func() tea.Msg {
 		ok, fail := 0, 0
 		for _, s := range sessions {
-			_, err := action.ApprovePR(context.Background(), m.cfg, s.Git.GitRoot, s.Git.Branch)
+			_, err := action.ApprovePR(context.Background(), m.cfg, m.cmd, s.Git.GitRoot, s.Git.Branch)
 			if err != nil {
 				fail++
 			} else {
@@ -1421,8 +1421,10 @@ func (m *Model) checkStateTransitions() []tea.Cmd {
 				"new_state": newState.String(),
 			}
 			cfg := m.cfg
+			cmd := m.cmd
+			ctx := m.ctx
 			cmds = append(cmds, func() tea.Msg {
-				_, _ = cfg.RunHook("notify", hookVars, "", 5_000_000_000)
+				_, _ = cfg.RunHook(ctx, cmd, "notify", hookVars, "", 5_000_000_000)
 				return nil
 			})
 		}
