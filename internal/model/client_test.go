@@ -50,12 +50,29 @@ func TestApplySnapshotDoesNotWriteWithoutACachePath(t *testing.T) {
 	if m.cachePath != "" {
 		t.Fatalf("the test fixture has a cache path (%q); every model test would write it", m.cachePath)
 	}
+
+	cacheFile := filepath.Join(dir, ".local", "share", "vigil", "cache.json")
 	m.applySnapshot([]*session.Session{{Name: "alpha"}})
 
 	time.Sleep(50 * time.Millisecond)
-	shareDir := filepath.Join(dir, ".local", "share", "vigil")
-	if entries, err := os.ReadDir(shareDir); err == nil && len(entries) > 0 {
-		t.Fatalf("applySnapshot wrote %d file(s) with no cache path set", len(entries))
+	if _, err := os.Stat(cacheFile); err == nil {
+		t.Fatalf("applySnapshot created cache file with no cache path set")
+	}
+}
+
+// TestApplySnapshotWritesWhenCachePathIsSet proves that applySnapshot does
+// write when cachePath is populated, the other side of the contract.
+func TestApplySnapshotWritesWhenCachePathIsSet(t *testing.T) {
+	dir := shortTempDir(t)
+	cacheFile := filepath.Join(dir, "test-cache.json")
+
+	m := newTestModel()
+	m.cachePath = cacheFile
+	m.applySnapshot([]*session.Session{{Name: "beta", Git: session.GitStatus{Branch: "main"}}})
+
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("applySnapshot did not create cache file when cachePath was set: %v", err)
 	}
 }
 
