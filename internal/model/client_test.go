@@ -39,6 +39,26 @@ func fixtureSessions() []*session.Session {
 	}
 }
 
+// TestApplySnapshotDoesNotWriteWithoutACachePath is the guard: the model test
+// fixture leaves cachePath empty, and a regression here writes the
+// developer's real session cache during an ordinary test run.
+func TestApplySnapshotDoesNotWriteWithoutACachePath(t *testing.T) {
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+
+	m := newTestModel()
+	if m.cachePath != "" {
+		t.Fatalf("the test fixture has a cache path (%q); every model test would write it", m.cachePath)
+	}
+	m.applySnapshot([]*session.Session{{Name: "alpha"}})
+
+	time.Sleep(50 * time.Millisecond)
+	shareDir := filepath.Join(dir, ".local", "share", "vigil")
+	if entries, err := os.ReadDir(shareDir); err == nil && len(entries) > 0 {
+		t.Fatalf("applySnapshot wrote %d file(s) with no cache path set", len(entries))
+	}
+}
+
 // fakeConn is a net.Conn that only implements SetReadDeadline, recording
 // every call. It embeds a nil net.Conn, so any other method panics if
 // exercised; handleSnapshot must never call anything but SetReadDeadline.

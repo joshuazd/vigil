@@ -78,6 +78,12 @@ type Model struct {
 	// Config
 	cfg *config.Config
 
+	// cachePath is where the session cache is read and written. Explicit
+	// rather than resolved at the call site so a test cannot write the
+	// developer's real cache, the way internal/daemon's Server.CachePath
+	// works. Empty disables both the load and the save.
+	cachePath string
+
 	// Commander for subprocess calls
 	cmd fetch.Commander
 
@@ -164,6 +170,7 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		panelMode:   panel,
 
 		cfg:       cfg,
+		cachePath: cache.CachePath(),
 		cmd:       cmd,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -178,20 +185,22 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 	// completed a successful poll yet. Doing it here rather than as a command
 	// keeps a stale cache out of handleTmuxUpdated, where it would rebuild
 	// sessions from cached data and reset HasBell.
-	if cached := cache.Load(cache.CachePath(), cfg.GetSettingDuration("cache_ttl")); cached != nil {
-		m.sessions = cached
-		for _, s := range cached {
-			if s.Name == currentSession {
-				s.IsCurrent = true
-				break
+	if m.cachePath != "" {
+		if cached := cache.Load(m.cachePath, cfg.GetSettingDuration("cache_ttl")); cached != nil {
+			m.sessions = cached
+			for _, s := range cached {
+				if s.Name == currentSession {
+					s.IsCurrent = true
+					break
+				}
 			}
+			m.warmCaches()
+			// The cache is written in tmux order, and nothing else sorts before the
+			// first render, so without this the first frame ignores the configured
+			// sort. placeCursor indexes into visibleSessions, so it sorts first.
+			session.SortSessions(m.sessions, m.sortMode)
+			m.placeCursor()
 		}
-		m.warmCaches()
-		// The cache is written in tmux order, and nothing else sorts before the
-		// first render, so without this the first frame ignores the configured
-		// sort. placeCursor indexes into visibleSessions, so it sorts first.
-		session.SortSessions(m.sessions, m.sortMode)
-		m.placeCursor()
 	}
 
 	if conn, err := dialDaemon(protocol.SocketPath()); err == nil {
@@ -922,9 +931,13 @@ func (m *Model) applySnapshot(sessions []*session.Session) {
 	session.SortSessions(m.sessions, m.sortMode)
 	m.placeCursor()
 
+	if m.cachePath == "" {
+		return
+	}
 	snap := make([]*session.Session, len(m.sessions))
 	copy(snap, m.sessions)
-	go func() { _ = cache.Save(cache.CachePath(), snap) }()
+	path := m.cachePath
+	go func() { _ = cache.Save(path, snap) }()
 }
 
 func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
