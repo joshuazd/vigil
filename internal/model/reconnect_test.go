@@ -26,20 +26,33 @@ func setProbeInterval(t *testing.T, d time.Duration) {
 // tea.Batch collapses its arguments into one opaque command whose only
 // observable output is a tea.BatchMsg listing the commands it wrapped, so the
 // only way to identify a probe among them is to run them all and look at what
-// comes back. They run concurrently because the batch also carries the 1s,
-// 3s and 30s poll ticks, and waiting on those in turn would take 30 seconds.
+// comes back. They run concurrently because the batch can also carry a poll.
+//
+// cmd is invoked exactly once here, and each command it might unwrap to is
+// invoked exactly once more. tea.Batch's own compaction (see
+// bubbletea's compactCmds) means a batch of exactly one non-nil command is
+// never actually wrapped - Batch just returns that command directly - so a
+// naive "peek at cmd(), then also run whatever cmds ended up holding" risks
+// invoking that single command twice. For a one-shot tea.Tick (which every
+// caller of this helper passes, directly or inside a batch), a second
+// invocation reads from an already-drained timer channel and blocks forever,
+// which would silently misreport "no probe scheduled" after the deadline
+// below rather than correctly finding the one command that was scheduled.
 func probeScheduled(t *testing.T, cmd tea.Cmd) bool {
 	t.Helper()
 	if cmd == nil {
 		return false
 	}
-	cmds := []tea.Cmd{cmd}
-	if batch, ok := cmd().(tea.BatchMsg); ok {
-		cmds = batch
+
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		_, isProbe := msg.(ProbeTickMsg)
+		return isProbe
 	}
 
-	msgs := make(chan tea.Msg, len(cmds))
-	for _, c := range cmds {
+	msgs := make(chan tea.Msg, len(batch))
+	for _, c := range batch {
 		if c == nil {
 			continue
 		}
@@ -47,7 +60,7 @@ func probeScheduled(t *testing.T, cmd tea.Cmd) bool {
 	}
 
 	deadline := time.After(2 * time.Second)
-	for range cmds {
+	for range batch {
 		select {
 		case msg := <-msgs:
 			if _, ok := msg.(ProbeTickMsg); ok {

@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/collect"
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
+	"github.com/jzinkduda/vigil/internal/protocol"
 )
 
 func collectFixtureCommander() *fetch.MockCommander {
@@ -118,6 +121,21 @@ func TestBothPathsProduceIdenticalSessions(t *testing.T) {
 	msg, ok := lm.collectCmd(false)().(SnapshotMsg)
 	if !ok {
 		t.Fatal("collectCmd did not produce a SnapshotMsg")
+	}
+
+	// This comparison is only a meaningful pin if the fixture actually
+	// produced real data on both sides: an empty served and an empty
+	// msg.Sessions compare equal (both length 0, the for loop below never
+	// iterates) and would pass just as happily as two correct, identical
+	// non-empty slices. Assert the fixture did its job before trusting the
+	// comparison that follows.
+	if len(served) < 2 {
+		t.Fatalf("fixture produced %d server-side sessions, want at least 2", len(served))
+	}
+	for _, s := range served {
+		if s.Git.Branch == "" {
+			t.Fatalf("fixture session %q has no branch; the comparison below would be vacuous", s.Name)
+		}
 	}
 
 	if len(msg.Sessions) != len(served) {
@@ -298,5 +316,238 @@ func TestRefreshKeyDoesNothingWhenDaemonConnected(t *testing.T) {
 	_, got := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	if got != nil {
 		t.Error("Refresh forced a poll while a daemon was connected")
+	}
+}
+
+func countCalls(cmd *fetch.MockCommander, name string) int {
+	n := 0
+	for _, c := range cmd.Calls {
+		if c.Name == name {
+			n++
+		}
+	}
+	return n
+}
+
+// TestStartPollForceReachesInvalidateEndToEnd pins the wiring, not just the
+// primitive: internal/collect's own TestInvalidateForcesARefetchOfGitAndPR
+// proves Collector.Invalidate works, but nothing before this test exercised
+// startPoll(true) -> collectCmd(force) -> Invalidate as one path. Dropping
+// the Invalidate call from collectCmd's force branch left every other test
+// in this package green.
+func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}",
+		"1700000000|alpha|/tmp/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
+			return "/repo/alpha", nil
+		},
+		"git branch --show-current": func(context.Context, string, []string) (string, error) {
+			return "feature", nil
+		},
+	}
+	cmd.On("gh", `{"number": 1, "state": "OPEN"}`, nil)
+
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	unforced := m.startPoll(false)
+	if unforced == nil {
+		t.Fatal("the first poll was refused")
+	}
+	if _, ok := unforced().(SnapshotMsg); !ok {
+		t.Fatal("the first poll did not produce a SnapshotMsg")
+	}
+	if got := countCalls(cmd, "gh"); got != 1 {
+		t.Fatalf("got %d gh calls after the first poll, want 1", got)
+	}
+
+	m.pollInFlight = false // stand in for that first poll's SnapshotMsg having landed
+	forced := m.startPoll(true)
+	if forced == nil {
+		t.Fatal("the forced poll was refused")
+	}
+	if _, ok := forced().(SnapshotMsg); !ok {
+		t.Fatal("the forced poll did not produce a SnapshotMsg")
+	}
+	if got := countCalls(cmd, "gh"); got != 2 {
+		t.Errorf("got %d gh calls after a forced poll, want 2 (force should have invalidated the PR memo)", got)
+	}
+}
+
+// TestActionResultDoesNothingWhenDaemonConnected pins the guard nothing else
+// in this package failed without: a daemon-fed client has nothing of its own
+// to force, and dropping this guard would have this client running its own
+// redundant Snapshot alongside the daemon's shared one for no reason.
+func TestActionResultDoesNothingWhenDaemonConnected(t *testing.T) {
+	m := newTestModel()
+	m.daemonConn = &fakeConn{}
+
+	_, got := m.Update(ActionResultMsg{Action: "merge", OK: true, Message: "done"})
+	if got != nil {
+		t.Error("ActionResultMsg forced a poll while a daemon was connected")
+	}
+}
+
+// TestBatchResultDoesNothingWhenDaemonConnected is BatchResultMsg's half of
+// the same guard, for the same reason.
+func TestBatchResultDoesNothingWhenDaemonConnected(t *testing.T) {
+	m := newTestModel()
+	m.daemonConn = &fakeConn{}
+
+	_, got := m.Update(BatchResultMsg{Action: "merge", OK: 1})
+	if got != nil {
+		t.Error("BatchResultMsg forced a poll while a daemon was connected")
+	}
+}
+
+// runAll invokes cmd, and every command it unwraps to if it is a batch, each
+// in its own goroutine - the same concurrency Bubble Tea's real runtime gives
+// a returned tea.Cmd - and sends every resulting message to the returned
+// channel before closing it. This is what lets two wrongly-issued polls
+// actually run concurrently against the same Collector in a test, which is
+// what -race needs to see to catch the reconnect race below.
+func runAll(cmd tea.Cmd) <-chan tea.Msg {
+	out := make(chan tea.Msg, 4)
+	if cmd == nil {
+		close(out)
+		return out
+	}
+	go func() {
+		defer close(out)
+		msg := cmd()
+		batch, ok := msg.(tea.BatchMsg)
+		if !ok {
+			out <- msg
+			return
+		}
+		var wg sync.WaitGroup
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			wg.Add(1)
+			go func(c tea.Cmd) {
+				defer wg.Done()
+				out <- c()
+			}(c)
+		}
+		wg.Wait()
+	}()
+	return out
+}
+
+// TestReconnectRaceDoesNotDoublePollOrWedge drives the exact sequence an
+// adversarial review reproduced under -race: a poll (P1) issued for epoch E
+// is still running when a reconnect bumps to E+1, and that daemon dies
+// immediately, bumping to E+2. Resetting pollInFlight at either epoch bump
+// (a mistake this task made once already) let handleDaemonLost see the flag
+// false and start a second, concurrent Collector.Snapshot call (P2) against
+// the same *Collector as P1 - a live data race on gitMemo/prMemo, caught by
+// this exact sequence under -race during that mistake's own review.
+//
+// pollInFlight tracks a running goroutine, not a generation: an epoch bump
+// must never touch it, and only the goroutine that set it may clear it, on
+// landing, regardless of which epoch it belonged to.
+func TestReconnectRaceDoesNotDoublePollOrWedge(t *testing.T) {
+	setProbeInterval(t, time.Millisecond)
+
+	release := make(chan struct{})
+	cmd := fetch.NewMockCommander()
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}": func(context.Context, string, []string) (string, error) {
+			<-release
+			return "1700000000|alpha|/tmp/alpha", nil
+		},
+	}
+	cmd.On("tmux", "", nil)
+	cmd.On("git", "", nil)
+	cmd.On("gh", "", nil)
+
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+	m.epoch = 5
+
+	// P1: a CollectTickMsg for the current epoch issues the first poll, which
+	// immediately blocks inside Snapshot at the gated tmux call.
+	next, pollCmd := m.Update(CollectTickMsg{Epoch: 5})
+	m = next.(Model)
+	if pollCmd == nil || !m.pollInFlight {
+		t.Fatal("CollectTickMsg should have issued P1 and marked a poll in flight")
+	}
+	p1Done := make(chan tea.Msg, 1)
+	go func() { p1Done <- pollCmd() }()
+
+	// The daemon reconnects while P1 is still running, bumping to E+1.
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close() })
+	next, _ = m.Update(DaemonProbeResultMsg{Epoch: 5, Conn: client, Decoder: protocol.NewDecoder(client)})
+	m = next.(Model)
+	if m.epoch != 6 || !m.pollInFlight {
+		t.Fatalf("got epoch=%d pollInFlight=%v after reconnect, want epoch=6 pollInFlight=true (P1 is still running)",
+			m.epoch, m.pollInFlight)
+	}
+
+	// That daemon dies immediately, bumping to E+2.
+	next, lostCmd := m.Update(DaemonLostMsg{Epoch: 6})
+	m = next.(Model)
+	if m.epoch != 7 {
+		t.Fatalf("got epoch %d, want 7 after the second loss", m.epoch)
+	}
+
+	// Run whatever handleDaemonLost scheduled concurrently, the same way
+	// Bubble Tea's real runtime would - including a wrongly-issued P2, if the
+	// bug were present, blocking on the very same gate as P1. Only then
+	// release the gate, so if P2 exists it races P1 through fillGit/fillPRs
+	// on the same *Collector for -race to catch.
+	lostResults := runAll(lostCmd)
+	close(release)
+
+	p1Msg := <-p1Done
+	snap, ok := p1Msg.(SnapshotMsg)
+	if !ok || !snap.Local || snap.Epoch != 5 {
+		t.Fatalf("got %+v, want a local SnapshotMsg for epoch 5 (P1)", p1Msg)
+	}
+
+	deadline := time.After(2 * time.Second)
+	draining := true
+	for draining {
+		select {
+		case msg, ok := <-lostResults:
+			if !ok {
+				draining = false
+				continue
+			}
+			if _, isSnapshot := msg.(SnapshotMsg); isSnapshot {
+				t.Fatal("handleDaemonLost started a second poll (P2) while P1 was still running")
+			}
+		case <-deadline:
+			t.Fatal("timed out draining handleDaemonLost's commands")
+		}
+	}
+
+	// The straggler landing must clear pollInFlight and restart the loop for
+	// the current epoch - or the fallback is wedged for the life of the
+	// process, since nothing else will ever poll again. pollInFlight ends up
+	// true again here, not false: handleSnapshot clears it first (the
+	// straggler's own goroutine finished), then startPoll immediately sets
+	// it right back to true for the replacement poll it just issued.
+	next, restartCmd := m.Update(p1Msg)
+	m = next.(Model)
+	if !m.pollInFlight {
+		t.Error("restarting the loop should mark the replacement poll in flight")
+	}
+	if restartCmd == nil {
+		t.Fatal("the straggler landing scheduled nothing: the fallback is wedged")
+	}
+	restartMsg := restartCmd()
+	restartSnap, ok := restartMsg.(SnapshotMsg)
+	if !ok || restartSnap.Epoch != 7 {
+		t.Fatalf("got %+v, want a fresh poll for the current epoch (7)", restartMsg)
 	}
 }

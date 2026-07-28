@@ -237,8 +237,14 @@ func (m *Model) spawnDaemonOnce() {
 // for a forced refresh (an action result, the Refresh key) to ask for a poll
 // alongside the ambient self-poll loop: at most one of them ever wins, and
 // the loser gets nil rather than a second concurrent Collector.Snapshot call.
+//
+// It also refuses while a daemon is connected: that client has nothing of
+// its own to poll for, since the daemon already polls at tmux_interval and
+// pushes every snapshot, and this client cannot reach the daemon's memos to
+// invalidate them anyway. Checking it here, once, replaces the daemon guard
+// that used to be duplicated at every call site.
 func (m *Model) startPoll(force bool) tea.Cmd {
-	if m.pollInFlight {
+	if m.daemonConn != nil || m.pollInFlight {
 		return nil
 	}
 	m.pollInFlight = true
@@ -297,14 +303,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CollectTickMsg:
 		// Paces the self-poll loop: one is scheduled per completed local
-		// poll, never a free-running ticker. Dropped if a daemon has since
-		// taken over - listenDaemonCmd owns polling now, and issuing a
-		// collectCmd here would run it against the daemon's shared budget
-		// for nothing, since a connected client never applies its result.
-		if msg.Epoch != m.epoch || m.daemonConn != nil {
+		// poll, never a free-running ticker. Not redundant with startPoll's
+		// own daemon check: an epoch mismatch means this tick belongs to a
+		// retired generation and must not touch the current one at all,
+		// which startPoll has no way to know on its own.
+		if msg.Epoch != m.epoch {
 			return m, nil
 		}
-		return m, m.startPoll(false)
+		c := m.startPoll(false)
+		return m, c
 
 	case DaemonLostMsg:
 		return m.handleDaemonLost(msg)
@@ -350,13 +357,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			severity = "error"
 		}
 		m.addNotification(msg.Message, severity)
-		// A daemon-fed client has nothing to force: the daemon already polls
-		// at tmux_interval and pushes every snapshot, and this client cannot
-		// reach the daemon's memos to invalidate them anyway.
+		// startPoll's own daemon check would make this guard redundant on
+		// its own, but it also gates delayedPRRefreshCmd: a daemon-fed
+		// client has nothing to force now and nothing to follow up on in
+		// 3s either, so the guard stays to skip both, not just the poll.
 		if m.daemonConn != nil {
 			return m, nil
 		}
-		return m, tea.Batch(m.startPoll(true), delayedPRRefreshCmd())
+		c := tea.Batch(m.startPoll(true), delayedPRRefreshCmd())
+		return m, c
 
 	case BatchResultMsg:
 		m.selected = make(map[string]bool)
@@ -364,15 +373,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.daemonConn != nil {
 			return m, nil
 		}
-		return m, tea.Batch(m.startPoll(true), delayedPRRefreshCmd())
+		c := tea.Batch(m.startPoll(true), delayedPRRefreshCmd())
+		return m, c
 
 	case DelayedPRRefreshMsg:
 		// Catches GitHub API updates that lagged behind the action's own
-		// forced poll above. Same daemon guard: nothing to force there.
-		if m.daemonConn != nil {
-			return m, nil
-		}
-		return m, m.startPoll(true)
+		// forced poll above. No explicit daemon guard needed: startPoll's
+		// own check is the only thing this case would otherwise skip.
+		c := m.startPoll(true)
+		return m, c
 
 	case NotifyMsg:
 		m.addNotification(msg.Text, msg.Severity)
@@ -538,15 +547,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case key.Matches(msg, keys.Refresh):
-		// A daemon-fed client has nothing to force: see the ActionResultMsg
-		// case for why. startPoll's single-flight guard is what makes this
-		// safe to offer at all while self-polling: it either wins and
-		// invalidates the memos before the next Snapshot, or loses silently
-		// to a poll already in flight.
-		if m.daemonConn != nil {
-			return m, nil
-		}
-		return m, m.startPoll(true)
+		// startPoll's daemon check covers "nothing to force while a daemon
+		// is connected"; its single-flight guard covers "already polling" -
+		// either wins and invalidates the memos before the next Snapshot, or
+		// loses silently to a poll already in flight.
+		c := m.startPoll(true)
+		return m, c
 
 	case key.Matches(msg, keys.ToggleDetail):
 		if m.panelMode {
@@ -827,17 +833,36 @@ func (m *Model) placeCursor() {
 }
 
 func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
-	if msg.Epoch != m.epoch {
-		return m, nil
-	}
-
 	if msg.Local {
-		// A failed poll carries no sessions. Reschedule and leave state alone
-		// rather than blanking the table.
+		// The poll goroutine that produced this message has finished,
+		// whichever generation issued it - pollInFlight tracks a running
+		// goroutine, not a generation, so this must be cleared before the
+		// epoch check below, unconditionally. handleDaemonLost and
+		// handleProbeResult's epoch bumps deliberately do not touch this
+		// flag themselves: an epoch bump does not mean the poll it retires
+		// has actually stopped running, and clearing the flag there instead
+		// of here let a stale straggler's completion race a wrongly-started
+		// second poll against the same Collector.
+		m.pollInFlight = false
+
+		if msg.Epoch != m.epoch {
+			// A retired generation's data is not applied. But if this
+			// client is self-polling now, this straggler was the only thing
+			// that could ever set pollInFlight back to false, and
+			// handleDaemonLost's startPoll call was refused while it was in
+			// flight - so restart the loop for the current generation here,
+			// or the fallback is wedged for the rest of the process's life.
+			// startPoll's own daemon check makes this a no-op if a daemon
+			// has taken over instead.
+			c := m.startPoll(false)
+			return m, c
+		}
+
+		// A failed poll carries no sessions. Leave state alone rather than
+		// blanking the table.
 		if msg.Sessions != nil {
 			m.applySnapshot(msg.Sessions)
 		}
-		m.pollInFlight = false
 		cmds := m.checkStateTransitions()
 		if m.detailOpen {
 			cmds = append(cmds, m.refreshDetailCmd())
@@ -846,6 +871,9 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 
+	if msg.Epoch != m.epoch {
+		return m, nil
+	}
 	if m.daemonConn == nil && m.daemonDecoder == nil {
 		return m, nil
 	}
@@ -897,15 +925,18 @@ func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
 		m.daemonDecoder = nil
 	}
 	m.epoch++
-	// pollInFlight is scoped to a polling generation: reset it here rather
-	// than trust whatever it was left at, or a stale straggler collectCmd
-	// from a generation this very epoch bump just retired (see
-	// handleProbeResult) could leave it stuck true forever, wedging every
-	// future fallback's startPoll call.
-	m.pollInFlight = false
+	// pollInFlight is intentionally left untouched: it tracks whether a
+	// Snapshot goroutine is outstanding, not which generation started it, and
+	// an epoch bump does not mean one isn't. If a poll from the retired
+	// generation is still running, startPoll below correctly refuses to
+	// start a second one on top of it; handleSnapshot's Local branch is what
+	// restarts the loop once that straggler lands, whichever epoch it was
+	// for. See the comment there for why touching this flag here instead
+	// used to open a race between two concurrent Collector.Snapshot calls.
 	m.daemonReady = false
 	m.addNotification("daemon lost, polling directly", "warning")
-	return m, tea.Batch(m.startPoll(false), probeTickCmd(m.epoch))
+	c := tea.Batch(m.startPoll(false), probeTickCmd(m.epoch))
+	return m, c
 }
 
 // handleProbeResult installs a reconnected daemon, or keeps probing. Bumping
@@ -933,11 +964,12 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 	// the deadline once something arrives.
 	_ = msg.Conn.SetReadDeadline(time.Now().Add(firstSnapshotTimeout))
 	m.epoch++
-	// Same reset as handleDaemonLost, and for the same reason: a self-poll
-	// that was in flight when this reconnect happened is now retired by the
-	// epoch bump, so its SnapshotMsg will never reach the branch that would
-	// otherwise clear this flag. Left set, it would wedge the next fallback.
-	m.pollInFlight = false
+	// pollInFlight is not reset here either, and for the same reason as
+	// handleDaemonLost: it tracks a goroutine, not this generation. A
+	// self-poll that was in flight when this reconnect happened stays true
+	// until it actually lands in handleSnapshot, which is what is now
+	// responsible for restarting the loop if this client falls back again
+	// before that straggler arrives.
 	m.daemonConn = msg.Conn
 	m.daemonDecoder = msg.Decoder
 	m.daemonReady = false
