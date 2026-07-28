@@ -95,6 +95,25 @@ func MostRecentSession(ctx context.Context, cmd Commander, exclude string) strin
 	return ""
 }
 
+// AttachedSessions reports which sessions have a client attached. Returns an
+// error rather than an empty map when tmux cannot be reached, so a caller
+// deciding whether to destroy something can fail closed.
+func AttachedSessions(ctx context.Context, cmd Commander) (map[string]bool, error) {
+	out, err := cmd.Run(ctx, "", "tmux", "list-sessions",
+		"-F", "#{session_name}|#{session_attached}")
+	if err != nil {
+		return nil, err
+	}
+	attached := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) == 2 && parts[1] == "1" {
+			attached[parts[0]] = true
+		}
+	}
+	return attached, nil
+}
+
 // BellFlags returns a map of session names that have bell flags active.
 func BellFlags(ctx context.Context, cmd Commander) map[string]bool {
 	out, err := cmd.Run(ctx, "", "tmux", "list-windows", "-a",

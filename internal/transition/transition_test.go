@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +13,8 @@ import (
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/session"
 )
+
+const attachedSessionsCmd = "tmux list-sessions -F #{session_name}|#{session_attached}"
 
 // idle and attention build sessions whose State() is unambiguous: HasBell is
 // the first branch State() takes, and a nil PR is the second.
@@ -123,18 +127,29 @@ func TestDetectPrimesNonZeroStateWithoutSpoofing(t *testing.T) {
 	}
 }
 
+// doneEvent's PanePath and GitRoot are placeholders, not real paths: neither
+// exists on disk, so builtinCleanup's isWorktree check on PanePath is always
+// false for it and no test using it reaches git worktree remove. Both fields
+// are still non-empty so the malformed-event guard doesn't intercept it.
 func doneEvent(name string) Event {
-	return Event{Session: name, PanePath: "/tmp/" + name, Old: session.Review, New: session.Done}
+	return Event{
+		Session:  name,
+		PanePath: "/tmp/" + name,
+		GitRoot:  "/repo/" + name,
+		Old:      session.Review,
+		New:      session.Done,
+	}
 }
 
-// TestRunSkipsCleanupForTheCurrentSession is the guard that replaces the
-// model's !s.IsCurrent check. The daemon never annotates IsCurrent, so an
-// Event cannot carry it and Run has to ask tmux itself. The fixture enables
-// auto_cleanup and names a Done session, so cleanup is the only thing that
-// could run: if the guard is gone, tmux kill-session shows up in the calls.
-func TestRunSkipsCleanupForTheCurrentSession(t *testing.T) {
+// TestRunSkipsCleanupForAnAttachedSession is the guard against destroying a
+// session anyone is sitting in. It asks fetch.AttachedSessions, not
+// fetch.CurrentSession: CurrentSession resolves from TMUX_PANE, which in the
+// daemon is whatever pane happened to spawn it - not a live signal once N
+// attached clients are normal - and a session with any client attached must
+// not be destroyed, whichever client that is.
+func TestRunSkipsCleanupForAnAttachedSession(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
+	cmd.OnArgs(attachedSessionsCmd, "alpha|1", nil)
 	cfg := &config.Config{
 		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
 	}
@@ -143,34 +158,170 @@ func TestRunSkipsCleanupForTheCurrentSession(t *testing.T) {
 
 	for _, c := range cmd.Calls {
 		if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "kill-session" {
-			t.Fatal("cleaned up the session the user is sitting in")
+			t.Fatal("cleaned up a session with a client attached")
 		}
 	}
 }
 
-func TestRunCleansUpADoneSessionThatIsNotCurrent(t *testing.T) {
+// TestRunSkipsCleanupWhenAttachedSessionsFails is the fail-closed guard.
+// fetch.CurrentSession returns "" on any tmux error, and "" never equals a
+// session name, so the old check read a tmux failure as "nobody is attached"
+// and proceeded to force-remove a live worktree. AttachedSessions returns an
+// error instead, and Run must treat that as "cannot tell, so don't touch it."
+func TestRunSkipsCleanupWhenAttachedSessionsFails(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux display-message -p #{session_name}", "beta", nil)
+	cmd.OnArgs(attachedSessionsCmd, "", errors.New("tmux: no server running on /tmp/tmux-0/default"))
+	cfg := &config.Config{
+		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
+	}
+	var logged []string
+	r := Runner{
+		Cfg:  cfg,
+		Cmd:  cmd,
+		Logf: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+	}
+
+	r.Run(context.Background(), doneEvent("alpha"))
+
+	for _, c := range cmd.Calls {
+		if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "kill-session" {
+			t.Fatal("cleaned up despite being unable to tell who is attached")
+		}
+	}
+	if len(logged) != 1 {
+		t.Fatalf("logged %v, want exactly one line for the tmux failure", logged)
+	}
+}
+
+// TestRunCleansUpADoneSessionThatIsNotAttached is the test that actually
+// reaches git worktree remove, so PanePath points at a real directory with a
+// .git file (isWorktree stats it) rather than doneEvent's placeholder. It
+// asserts the exact target of both destructive calls rather than "some
+// kill-session happened somewhere": two independent substring checks over a
+// flattened call log can each be satisfied by a different, unrelated call.
+func TestRunCleansUpADoneSessionThatIsNotAttached(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /repo/worktrees/alpha\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs(attachedSessionsCmd, "beta|1", nil)
 	cfg := &config.Config{
 		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
 	}
 
-	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), doneEvent("alpha"))
+	ev := Event{Session: "alpha", PanePath: dir, GitRoot: "/repo", Old: session.Review, New: session.Done}
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), ev)
 
-	var killed bool
+	var killedAlpha, removedWorktree bool
 	for _, c := range cmd.Calls {
-		if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "kill-session" {
-			killed = true
+		if c.Name == "tmux" && len(c.Args) == 3 &&
+			c.Args[0] == "kill-session" && c.Args[1] == "-t" && c.Args[2] == "alpha" {
+			killedAlpha = true
+		}
+		if c.Name == "git" && len(c.Args) == 4 &&
+			c.Args[0] == "worktree" && c.Args[1] == "remove" && c.Args[2] == "--force" && c.Args[3] == dir {
+			removedWorktree = true
 		}
 	}
-	if !killed {
-		t.Fatalf("no kill-session in %+v", cmd.Calls)
+	if !killedAlpha {
+		t.Fatalf("no exact `tmux kill-session -t alpha` in %+v", cmd.Calls)
 	}
+	if !removedWorktree {
+		t.Fatalf("no exact `git worktree remove --force %s` in %+v", dir, cmd.Calls)
+	}
+}
+
+// TestRunLogsACleanupFailure is the failure counterpart to the test above:
+// builtinCleanup's own error (a git worktree remove that fails) must reach
+// the log exactly once, or a broken cleanup fails silently forever.
+func TestRunLogsACleanupFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /repo/worktrees/alpha\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs(attachedSessionsCmd, "", nil)
+	cmd.OnArgs("git worktree remove --force "+dir, "", errors.New("worktree is dirty"))
+	cfg := &config.Config{
+		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
+	}
+	var logged []string
+	r := Runner{
+		Cfg:  cfg,
+		Cmd:  cmd,
+		Logf: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+	}
+
+	ev := Event{Session: "alpha", PanePath: dir, GitRoot: "/repo", Old: session.Review, New: session.Done}
+	r.Run(context.Background(), ev)
+
+	if len(logged) != 1 {
+		t.Fatalf("logged %v, want exactly one line for the cleanup failure", logged)
+	}
+}
+
+// TestRunSkipsCleanupForAMalformedEvent guards against upstream garbage - an
+// Event's strings come straight from tmux and git output with nothing
+// upstream validating them, and tmux treats an empty target as meaningful:
+// `tmux kill-session -t ''` kills a real session rather than erroring.
+func TestRunSkipsCleanupForAMalformedEvent(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   Event
+	}{
+		{"empty session", Event{Session: "", PanePath: "/tmp/x", GitRoot: "/repo/x", New: session.Done}},
+		{"empty pane path", Event{Session: "alpha", PanePath: "", GitRoot: "/repo/x", New: session.Done}},
+		{"empty git root", Event{Session: "alpha", PanePath: "/tmp/x", GitRoot: "", New: session.Done}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := fetch.NewMockCommander()
+			cfg := &config.Config{
+				Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
+			}
+			var logged []string
+			r := Runner{
+				Cfg:  cfg,
+				Cmd:  cmd,
+				Logf: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+			}
+
+			r.Run(context.Background(), tc.ev)
+
+			for _, c := range cmd.Calls {
+				if c.Name == "tmux" && len(c.Args) > 0 && c.Args[0] == "kill-session" {
+					t.Fatal("cleaned up a malformed event")
+				}
+				if c.Name == "git" && len(c.Args) > 0 && c.Args[0] == "worktree" {
+					t.Fatal("removed a worktree for a malformed event")
+				}
+			}
+			if len(logged) != 1 {
+				t.Fatalf("logged %v, want exactly one line for a malformed event", logged)
+			}
+		})
+	}
+}
+
+// TestRunToleratesANilLogf is the guard on logf's nil check. Runner is
+// constructed without a Logf whenever nobody cares to observe it - the
+// default zero value - and a bare call must not panic.
+func TestRunToleratesANilLogf(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cfg := &config.Config{
+		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
+	}
+	ev := Event{Session: "", PanePath: "/tmp/x", GitRoot: "/repo/x", New: session.Done}
+
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), ev)
 }
 
 func TestRunSkipsCleanupWhenDisabled(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux display-message -p #{session_name}", "beta", nil)
+	cmd.OnArgs(attachedSessionsCmd, "beta|1", nil)
 	cfg := &config.Config{Settings: map[string]any{"notifications_enabled": "false"}}
 
 	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), doneEvent("alpha"))
@@ -184,7 +335,7 @@ func TestRunSkipsCleanupWhenDisabled(t *testing.T) {
 
 func TestRunSkipsCleanupForANonDoneTransition(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux display-message -p #{session_name}", "beta", nil)
+	cmd.OnArgs(attachedSessionsCmd, "beta|1", nil)
 	cfg := &config.Config{
 		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
 	}

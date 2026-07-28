@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -55,6 +56,48 @@ func TestLastSession(t *testing.T) {
 	last := LastSession(context.Background(), mock)
 	if last != "other-session" {
 		t.Errorf("got %q, want other-session", last)
+	}
+}
+
+func TestAttachedSessions(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "session1|0\nsession2|1\nsession3|0", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !attached["session2"] {
+		t.Error("expected session2 to be attached")
+	}
+	if attached["session1"] {
+		t.Error("session1 should not be attached")
+	}
+	if attached["session3"] {
+		t.Error("session3 should not be attached")
+	}
+}
+
+func TestAttachedSessionsWithNoSessions(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatalf("empty output with no error is a legitimate \"no sessions\", got err: %v", err)
+	}
+	if len(attached) != 0 {
+		t.Errorf("got %v, want an empty map", attached)
+	}
+}
+
+func TestAttachedSessionsPropagatesTheError(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "", errors.New("tmux: no server running"))
+
+	_, err := AttachedSessions(context.Background(), mock)
+	if err == nil {
+		t.Fatal("want the tmux error returned, not swallowed into an empty map")
 	}
 }
 
