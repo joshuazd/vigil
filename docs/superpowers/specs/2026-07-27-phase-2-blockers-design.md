@@ -8,7 +8,15 @@ same code.
 - Parent design: `docs/superpowers/specs/2026-07-27-vigil-cockpit-design.md`
 
 Phase 3 makes the panel the default for new sessions, which turns N attached clients from
-exotic into normal. Two of these three blockers are only latent because N is usually 1.
+exotic into normal.
+
+A second handoff correction: it says the duplicate-side-effect bug is latent because
+"`auto_cleanup` defaults to false and no `notify` hook is configured". The `auto_cleanup`
+half is right. The `notify` half is not - `notify` has a default template
+(`internal/config/config.go:48`) and `notifications_enabled` defaults to `"true"`, so N open
+panels already fire N `tmux display-message` calls per transition. Benign, because each
+overwrites the last, which is why it went unnoticed. But the bug is live, not latent, and
+`auto_cleanup` is the only part that is merely waiting for a config change.
 
 ## Scope
 
@@ -78,16 +86,36 @@ type Event struct {
     Old, New                           session.SessionState
 }
 
-type Detector struct { prev map[string]session.SessionState }
+type Detector struct { prev map[string]session.SessionState; primed bool }
 
 // Detect returns one Event per session whose state changed. The first call
 // primes and returns nil. Sessions absent from the input are pruned, so a
 // recreated session primes rather than fires.
 func (d *Detector) Detect(sessions []*session.Session) []Event
 
-// RunEffects runs the notify hook and auto_cleanup for one event.
-func RunEffects(ctx context.Context, cfg *config.Config, cmd fetch.Commander, ev Event, logf func(string, ...any))
+// EffectRunner is the seam. Model and Server each hold one.
+type EffectRunner interface { Run(ctx context.Context, ev Event) }
+
+type Runner struct {
+    Cfg  *config.Config
+    Cmd  fetch.Commander
+    Logf func(format string, args ...any)
+}
+func (r Runner) Run(ctx context.Context, ev Event)
 ```
+
+`Event` deliberately carries no `IsCurrent`. The model's auto-cleanup guard is
+`!s.IsCurrent`, but the daemon never annotates `IsCurrent` - that is per-tmux-client - so a
+daemon trusting the field would read `false` and clean up the session the user is sitting
+in. `Runner.Run` therefore resolves it itself with `fetch.CurrentSession` at effect time and
+skips cleanup on a match. One extra tmux call, only on a `Done` transition with
+`auto_cleanup` on, and it makes `Event` contain only daemon-knowable data.
+
+An `EffectRunner` interface rather than a package-level function, because `config.RunHook`
+shells out through `exec.CommandContext` rather than through `fetch.Commander`, so a
+counting stub is the only way to assert "fired once, not N times" without writing temp
+files. A field on `Model` and `Server`, not a package var, per the codebase's no-global-
+mutable-state convention.
 
 `Detect` is pure state comparison: no config, no side effects, no toasts. Priming on the
 first call replaces the `initialLoad` flag currently threaded through four call sites.
@@ -154,19 +182,34 @@ path, so the change makes the primary path's behaviour the only behaviour.
 which each render one column. `colIndicator` stays 3; `IndicatorWithBg` really does render
 three.
 
-Tier constants and the widths at which each tier is selected:
+**The tier selection widths are frozen at today's values, not recomputed.** Deriving them
+from the corrected fixed costs as `fixed + nameMin` would move the noGit floor to 39, and
+width 40 - the landscape panel's default, and the width the phase 2 resize verification was
+run at - would stop choosing the compact tier. It would get a 9-column name (one above
+`nameMin`) beside a full 22-column PR column, where today it gets 20 columns of name and a
+compact PR. That is a worse layout at the width we actually live at, so the thresholds
+become explicitly tuned constants with a comment saying so.
 
-| Constant | Now | After | Tier selected at width | Now | After |
-|---|---|---|---|---|---|
-| `fullFixed` | 52 | 50 | `fullFixed + nameMin` | 60 | 58 |
-| `noGitFixed` | 33 | 31 | `noGitFixed + nameMin` | 41 | 39 |
-| `compactFixed` | 20 | 19 | `compactFixed + nameMin` | 28 | 27 |
-| `noPRFixed` | 7 | 6 | `noPRFixed + nameMin` | 15 | 14 |
-| `bareFixed` | 3 | 2 | `bareFixed + 1` | 4 | 3 |
+| Fixed cost (sets name width) | Now | After | Tier selected at width |
+|---|---|---|---|
+| `fullFixed` | 52 | 50 | 60, frozen |
+| `noGitFixed` | 33 | 31 | 41, frozen |
+| `compactFixed` | 20 | 19 | 28, frozen |
+| `noPRFixed` | 7 | 6 | 15, frozen |
+| `bareFixed` | 3 | 2 | 4, frozen |
 
-Narrow panes gain 2 columns of name at the two widest tiers and 1 at the rest. At width
->= 104 nothing changes: the name column is already capped at 52 and reaches that cap at
-width 102 after the change.
+So every tier is chosen at exactly the width it is chosen at today, every machine-verified
+layout stays verified, and the name column gains 2 columns at the two widest tiers and 1 at
+the rest. At width >= 104 nothing changes at all: the name column is already capped at 52.
+
+The residual is that tier *choice* stays 1-2 columns pessimistic while row *width* becomes
+exact - at width 58 the noGit tier is chosen with a 27-column name rather than the full
+tier with an 8-column one. That is the better layout, so the pessimism is now a deliberate
+floor rather than an accident.
+
+An invariant test pins the two apart: every frozen threshold must admit at least `nameMin`
+(`threshold >= fixed + nameMin`), which is what stops a future edit to a fixed cost from
+silently producing a sub-`nameMin` name at a tier boundary.
 
 The durable part is a test asserting `VisibleWidth(renderRow(...)) == layout.Total()` at
 every tier. The constants drifted from the renderers precisely because nothing compared
@@ -222,6 +265,9 @@ it names were removed?" is answered by mutating the code, not by reading the tes
 | A failed `Snapshot` still reschedules the next poll | Drop the reschedule on the error path |
 | Daemon path and fallback path yield identical `m.sessions` from one stubbed `Commander` | Diverge either path |
 | `VisibleWidth(renderRow(...)) == layout.Total()` at every tier | Restore `colIndex` or `colState` to 2 |
+| Every frozen tier threshold satisfies `threshold >= fixed + nameMin` | Lower a threshold below its fixed cost plus 8 |
+| `LayoutForWidth(40)` still picks the compact tier | Recompute the thresholds from the fixed costs |
+| `Runner.Run` skips cleanup when `fetch.CurrentSession` names the event's session | Trust an `IsCurrent` field instead |
 | The polling query contains no `comments(`, and `UnresolvedComments` is still populated | Restore the inner connection |
 
 The identical-paths test is the one that matters most structurally: "both paths must render
