@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jzinkduda/vigil/internal/collect"
 	"github.com/jzinkduda/vigil/internal/config"
@@ -122,4 +124,66 @@ func TestEffectsDoNotScaleWithClients(t *testing.T) {
 		t.Fatalf("got %d effect runs with three clients attached, want 1", got)
 	}
 	s.closeClients()
+}
+
+// blockingEffectRunner signals started, then blocks until release is closed,
+// standing in for a notify hook that has not returned yet.
+type blockingEffectRunner struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingEffectRunner) Run(context.Context, transition.Event) {
+	close(b.started)
+	<-b.release
+}
+
+// TestRunWaitsForPendingEffects pins the shutdown handshake for effect
+// goroutines: Run must not return while a hook or cleanup it started is still
+// in flight, the same guarantee TestRunWaitsForWriters pins for writers.
+func TestRunWaitsForPendingEffects(t *testing.T) {
+	cmd := bellSwitch()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	effects := &blockingEffectRunner{started: started, release: release}
+
+	sockPath := filepath.Join(shortTempDir(t), "test.sock")
+	s := &Server{
+		Collector:  collect.New(&config.Config{}, cmd),
+		Interval:   5 * time.Millisecond,
+		SocketPath: sockPath,
+		CachePath:  filepath.Join(t.TempDir(), "cache.json"),
+		Detector:   transition.NewDetector(),
+		Effects:    effects,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = s.Run(ctx)
+		close(done)
+	}()
+	waitForSocket(t, s.SocketPath)
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("effect never started")
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+		t.Fatal("Run returned before its in-flight effect finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after the effect finished")
+	}
 }
