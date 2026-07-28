@@ -18,6 +18,18 @@ func attention(name string) *session.Session {
 	return s
 }
 
+// pending produces a session with State() = Pending (not the zero value of SessionState).
+// This is used to test that new sessions are properly primed without relying on zero-value comparisons.
+func pending(name string) *session.Session {
+	s := idle(name)
+	s.PR = &session.PRStatus{
+		Number: 1,
+		State:  "OPEN",
+		Checks: "pending",
+	}
+	return s
+}
+
 func TestDetectPrimesSilentlyOnTheFirstCall(t *testing.T) {
 	d := NewDetector()
 	if events := d.Detect([]*session.Session{attention("alpha")}); len(events) != 0 {
@@ -57,7 +69,7 @@ func TestDetectIsSilentWhenNothingChanged(t *testing.T) {
 func TestDetectPrimesANewSessionRatherThanFiring(t *testing.T) {
 	d := NewDetector()
 	d.Detect([]*session.Session{idle("alpha")})
-	if events := d.Detect([]*session.Session{idle("alpha"), attention("beta")}); len(events) != 0 {
+	if events := d.Detect([]*session.Session{idle("alpha"), pending("beta")}); len(events) != 0 {
 		t.Fatalf("got %+v, want nothing for a session seen for the first time", events)
 	}
 }
@@ -72,5 +84,19 @@ func TestDetectPrunesVanishedSessions(t *testing.T) {
 
 	if events := d.Detect([]*session.Session{attention("alpha")}); len(events) != 0 {
 		t.Fatalf("got %+v, want nothing: alpha vanished, so its return is a first sighting", events)
+	}
+}
+
+// TestDetectPrimesNonZeroStateWithoutSpoofing verifies that the priming works
+// for sessions with non-zero states. Without the primed check, a mutation that
+// removes the !seen check would incorrectly compare against the zero value and
+// fail to emit transitions from pending to other states.
+func TestDetectPrimesNonZeroStateWithoutSpoofing(t *testing.T) {
+	d := NewDetector()
+	if events := d.Detect([]*session.Session{pending("alpha")}); len(events) != 0 {
+		t.Fatalf("got %d events on the priming call with non-zero state, want 0", len(events))
+	}
+	if events := d.Detect([]*session.Session{idle("alpha")}); len(events) != 1 {
+		t.Fatalf("got %d events after state change from pending to idle, want 1", len(events))
 	}
 }
