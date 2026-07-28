@@ -124,6 +124,10 @@ func spawnDaemon() error {
 	defer func() { _ = logFile.Close() }()
 
 	cmd := exec.Command(exe, "daemon")
+	// Not the panel's cwd: that is a git worktree, and git-worktree-done
+	// removes those routinely, leaving a long-lived daemon holding a deleted
+	// directory.
+	cmd.Dir = "/"
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	// Setsid detaches it from this pane's process group, so closing the pane
