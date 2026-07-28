@@ -41,7 +41,17 @@ func TestDetectReportsOneEventPerChange(t *testing.T) {
 	d := NewDetector()
 	d.Detect([]*session.Session{idle("alpha"), idle("beta")})
 
-	events := d.Detect([]*session.Session{attention("alpha"), idle("beta")})
+	// Create alpha with git data for the transition
+	alphaWithGit := &session.Session{
+		Name:     "alpha",
+		PanePath: "/tmp/alpha",
+		HasBell:  true,
+		Git: session.GitStatus{
+			Branch:  "feature/a",
+			GitRoot: "/repo/alpha",
+		},
+	}
+	events := d.Detect([]*session.Session{alphaWithGit, idle("beta")})
 
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want 1: %+v", len(events), events)
@@ -55,6 +65,12 @@ func TestDetectReportsOneEventPerChange(t *testing.T) {
 	}
 	if ev.PanePath != "/tmp/alpha" {
 		t.Errorf("got pane path %q, want /tmp/alpha", ev.PanePath)
+	}
+	if ev.Branch != "feature/a" {
+		t.Errorf("got branch %q, want feature/a", ev.Branch)
+	}
+	if ev.GitRoot != "/repo/alpha" {
+		t.Errorf("got git root %q, want /repo/alpha", ev.GitRoot)
 	}
 }
 
@@ -88,9 +104,9 @@ func TestDetectPrunesVanishedSessions(t *testing.T) {
 }
 
 // TestDetectPrimesNonZeroStateWithoutSpoofing verifies that the priming works
-// for sessions with non-zero states. Without the primed check, a mutation that
-// removes the !seen check would incorrectly compare against the zero value and
-// fail to emit transitions from pending to other states.
+// for sessions with non-zero states. Without the !seen guard, a mutation that
+// removes it would incorrectly compare against the zero value and fail to emit
+// transitions from pending to other states.
 func TestDetectPrimesNonZeroStateWithoutSpoofing(t *testing.T) {
 	d := NewDetector()
 	if events := d.Detect([]*session.Session{pending("alpha")}); len(events) != 0 {
