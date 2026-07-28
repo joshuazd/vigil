@@ -3,6 +3,8 @@ package model
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -386,6 +388,91 @@ func TestDaemonLostStartsExactlyOneChain(t *testing.T) {
 	_, lost := m.Update(DaemonLostMsg{Epoch: m.epoch})
 	if got := countCollectTicks(lost); got != 1 {
 		t.Errorf("handleDaemonLost started %d chains, want exactly 1", got)
+	}
+}
+
+// TestInitIssuesTheOnePollThatClearsItsOwnPriming pins a three-part contract
+// that spans two functions and that every chain-shaped assertion in this
+// package is blind to:
+//
+//  1. newModel primes pollInFlight if and only if m.daemonDecoder == nil.
+//  2. Init bypasses startPoll if and only if the same condition holds.
+//  3. Init must therefore always issue exactly one poll on that branch.
+//
+// Break leg 3 - delete Init's collectCmd, or route it through startPoll, which
+// the priming makes refuse - and nothing ever clears the primed flag, because
+// handleSnapshot's Local branch is the only clearer and no SnapshotMsg ever
+// arrives. Every subsequent startPoll is refused for the life of the process:
+// the TUI paints the startup cache forever, with no error and no notification.
+//
+// So this asserts the observable consequence, not the flag. Asserting only
+// pollInFlight == true after newModel would pass with Init's poll deleted.
+func TestInitIssuesTheOnePollThatClearsItsOwnPriming(t *testing.T) {
+	setPollInterval(t, time.Millisecond)
+	setProbeInterval(t, time.Millisecond)
+
+	fallbackDir := shortTempDir(t)
+	// No vigil/ subdirectory, so there is no socket to dial and New takes the
+	// fallback branch. HOME keeps the cache load (and applySnapshot's write)
+	// off the developer's real one.
+	t.Setenv("HOME", fallbackDir)
+	t.Setenv("XDG_RUNTIME_DIR", fallbackDir)
+
+	cmd := collectFixtureCommander()
+	m := New(&config.Config{}, cmd)
+	if m.daemonDecoder != nil {
+		t.Fatal("New reached a daemon; this test needs the fallback branch")
+	}
+	if !m.pollInFlight {
+		t.Fatal("leg 1: newModel did not prime pollInFlight for the fallback branch")
+	}
+
+	// Each Init() call builds its own command tree, which is why this calls it
+	// three times rather than reusing one: tea.Tick creates its timer when the
+	// command is built and its closure drains that timer once, so invoking the
+	// same tree twice blocks forever.
+	if got := pollsIssued(m.Init()); got != 1 {
+		t.Fatalf("leg 3: Init issued %d polls, want exactly 1 - nothing else can clear the priming", got)
+	}
+	if got := countCollectTicks(m.Init()); got != 1 {
+		t.Fatalf("Init started %d chains, want exactly 1", got)
+	}
+
+	// The consequence that matters: that poll's SnapshotMsg is reachable, it
+	// clears the priming, and only then can anything poll again.
+	snap := awaitSnapshot(t, runAll(m.Init()))
+	next, _ := m.Update(snap)
+	m = next.(Model)
+	if m.pollInFlight {
+		t.Fatal("Init's poll landed but did not clear the primed pollInFlight")
+	}
+	_, afterTick := m.Update(CollectTickMsg{Epoch: m.epoch})
+	if got := pollsIssued(afterTick); got != 1 {
+		t.Errorf("the chain issued %d polls after startup, want 1: the priming was never released", got)
+	}
+
+	// Leg 1's other direction. A daemon-fed model must not be primed: Init
+	// issues no collectCmd for it, so the flag would stay true forever and the
+	// fallback would be wedged from birth the moment that daemon died.
+	daemonDir := shortTempDir(t)
+	sockDir := filepath.Join(daemonDir, "vigil")
+	if err := os.Mkdir(sockDir, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	l, err := net.Listen("unix", filepath.Join(sockDir, "vigild.sock"))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	t.Setenv("HOME", daemonDir)
+	t.Setenv("XDG_RUNTIME_DIR", daemonDir)
+
+	dm := New(&config.Config{}, collectFixtureCommander())
+	if dm.daemonDecoder == nil {
+		t.Fatal("New did not reach the listener above; the daemon half of the contract is untested")
+	}
+	if dm.pollInFlight {
+		t.Error("leg 1: a daemon-fed model was primed, so a later fallback starts wedged")
 	}
 }
 
