@@ -30,8 +30,8 @@ func TestLayoutShrinksNameBeforeDroppingColumns(t *testing.T) {
 	if l.Git == 0 || l.PR == 0 {
 		t.Fatal("width 80 dropped a column instead of shrinking the name")
 	}
-	if l.Name != 28 {
-		t.Errorf("got name %d, want 28 (80 - 52)", l.Name)
+	if l.Name != 30 {
+		t.Errorf("got name %d, want 30 (80 - 50)", l.Name)
 	}
 }
 
@@ -55,8 +55,8 @@ func TestLayoutDropsIndexAndShrinksPRWhenNarrow(t *testing.T) {
 	if l.PR != 12 {
 		t.Errorf("got PR %d, want the compact 12", l.PR)
 	}
-	if l.Name != 20 {
-		t.Errorf("got name %d, want 20 (40 - 20)", l.Name)
+	if l.Name != 21 {
+		t.Errorf("got name %d, want 21 (40 - 19)", l.Name)
 	}
 }
 
@@ -68,8 +68,8 @@ func TestLayoutDropsPRWhenVeryNarrow(t *testing.T) {
 	if !l.Indicator || !l.State {
 		t.Error("the indicator or state dot was dropped before PR")
 	}
-	if l.Name != 13 {
-		t.Errorf("got name %d, want 13 (20 - 7)", l.Name)
+	if l.Name != 14 {
+		t.Errorf("got name %d, want 14 (20 - 6)", l.Name)
 	}
 }
 
@@ -211,5 +211,71 @@ func TestTruncateNameAddsAnEllipsis(t *testing.T) {
 func TestTruncateNameLeavesShortNames(t *testing.T) {
 	if got := truncateName("SC-1 short", 40); got != "SC-1 short" {
 		t.Errorf("got %q, want it untouched", got)
+	}
+}
+
+// TestTotalMatchesWhatTheRowActuallyRenders is the constraint that was missing.
+// The constants drifted from the renderers because nothing compared them, and
+// Total() <= width passes happily while rows come out narrower than budgeted.
+func TestTotalMatchesWhatTheRowActuallyRenders(t *testing.T) {
+	staleAge := 172800 // 2 days, renders wider than the column
+	s := &session.Session{
+		Name: "SC-999999 an extremely long session name that overflows every name tier",
+		Git: session.GitStatus{
+			Branch:        "feature/wide",
+			Modified:      300,
+			Added:         1200,
+			Deleted:       700,
+			Unpushed:      500,
+			RebaseAgeSecs: &staleAge,
+		},
+		PR: &session.PRStatus{
+			Number: 99999, State: "OPEN", Checks: "fail",
+			ReviewDecision: "CHANGES_REQUESTED", UnresolvedComments: 999, HasConflicts: true,
+		},
+	}
+	for _, width := range []int{200, 104, 80, 60, 41, 40, 28, 20, 15, 8, 4, 1} {
+		layout := LayoutForWidth(width)
+		row := renderRow(s, 3, false, 86400, width, false, layout)
+		if got := VisibleWidth(row); got != layout.Total() {
+			t.Errorf("width %d: row renders %d columns, Total() claims %d", width, got, layout.Total())
+		}
+	}
+}
+
+// TestFrozenThresholdsAdmitAUsefulName stops a future edit to a fixed cost from
+// silently producing a name below nameMin at a tier boundary. The thresholds are
+// tuned, not derived, so nothing else checks them against the costs.
+func TestFrozenThresholdsAdmitAUsefulName(t *testing.T) {
+	for _, tier := range []struct {
+		name           string
+		threshold, fix int
+	}{
+		{"full", tierFull, fullFixed},
+		{"noGit", tierNoGit, noGitFixed},
+		{"compact", tierCompact, compactFixed},
+		{"noPR", tierNoPR, noPRFixed},
+	} {
+		if got := tier.threshold - tier.fix; got < nameMin {
+			t.Errorf("%s: threshold %d leaves %d columns of name, want at least %d",
+				tier.name, tier.threshold, got, nameMin)
+		}
+	}
+}
+
+// TestPanelWidthStillPicksTheCompactTier pins the layout the phase 2 resize
+// verification was run at. Deriving the thresholds from the corrected costs
+// moves 40 onto the noGit tier, where it gets a 9-column name beside a full PR
+// column instead of 20 columns of name and a compact one.
+func TestPanelWidthStillPicksTheCompactTier(t *testing.T) {
+	l := LayoutForWidth(40)
+	if l.Index {
+		t.Error("width 40 kept the index column, so it is not on the compact tier")
+	}
+	if l.PR != colPRCompact {
+		t.Errorf("got PR %d, want the compact %d", l.PR, colPRCompact)
+	}
+	if l.Name < 20 {
+		t.Errorf("got name %d, want at least the 20 columns it has today", l.Name)
 	}
 }

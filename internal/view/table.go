@@ -79,7 +79,7 @@ func renderRow(s *session.Session, index int, selected bool, staleThreshold int,
 		cells = append(cells, padRight(TruncateVisible(GitColWithBg(s, staleThreshold, bg), layout.Git), layout.Git))
 	}
 	if layout.PR > 0 {
-		cells = append(cells, TruncateVisible(PRColWithBg(s, bg), layout.PR))
+		cells = append(cells, padRight(TruncateVisible(PRColWithBg(s, bg), layout.PR), layout.PR))
 	}
 	return strings.Join(cells, " ")
 }
