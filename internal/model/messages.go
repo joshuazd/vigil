@@ -59,6 +59,15 @@ type DelayedPRRefreshMsg struct{}
 // DetailRefreshMsg triggers a detail panel content refresh.
 type DetailRefreshMsg struct{}
 
+// PRCommentsMsg carries review comment bodies fetched on demand for one branch.
+// Polling stopped fetching these: they are read by one detail panel for one
+// session, and requesting them for every open PR every cycle was the bulk of
+// the review-threads query's cost.
+type PRCommentsMsg struct {
+	Branch   string
+	Comments []session.ReviewComment
+}
+
 // SnapshotMsg carries a full session snapshot, with per-client flags already
 // resolved. Local says this client collected it itself rather than receiving it
 // from a daemon, which is what makes this client the owner of the poll loop and

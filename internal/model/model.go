@@ -37,6 +37,11 @@ type Model struct {
 	sessions []*session.Session
 	prCache  map[string]*session.PRStatus
 
+	// reviewComments caches review comment bodies fetched on demand, keyed by
+	// branch, the way pane capture already works: only the detail panel's
+	// comments mode reads them, and only for the selected session.
+	reviewComments map[string][]session.ReviewComment
+
 	// detector tracks per-session state across snapshots to produce
 	// transition events; effects runs their side effects. Both are shared
 	// with internal/transition so the daemon and a self-polling client agree
@@ -172,6 +177,7 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 	m := Model{
 		currentSessionName: currentSession,
 		prCache:            make(map[string]*session.PRStatus),
+		reviewComments:     make(map[string][]session.ReviewComment),
 		detector:           transition.NewDetector(),
 		effects:            transition.Runner{Cfg: cfg, Cmd: cmd},
 		inFlightEffects:    make(map[string]struct{}),
@@ -386,6 +392,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case PRCommentsMsg:
+		comments := msg.Comments
+		if comments == nil {
+			comments = []session.ReviewComment{}
+		}
+		m.reviewComments[msg.Branch] = comments
+		return m, nil
+
 	case ActionResultMsg:
 		severity := "info"
 		if !msg.OK {
@@ -455,7 +469,11 @@ func (m Model) View() string {
 		detailHeight := m.detailHeight()
 		s := m.selectedSession()
 		mode := m.activeDetailMode()
-		detail = view.RenderDetail(s, mode, m.paneContent, staleThreshold, m.width, detailHeight)
+		var comments []session.ReviewComment
+		if s != nil && s.Git.Branch != "" {
+			comments = m.reviewComments[s.Git.Branch]
+		}
+		detail = view.RenderDetail(s, mode, m.paneContent, comments, staleThreshold, m.width, detailHeight)
 	}
 
 	// Footer
@@ -1090,17 +1108,33 @@ func (m Model) refreshDetailCmd() tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	mode := m.activeDetailMode()
-	if mode != view.DetailPane {
-		return nil
+	switch m.activeDetailMode() {
+	case view.DetailPane:
+		name := s.Name
+		window := m.cfg.GetSetting("capture_window")
+		return func() tea.Msg {
+			return PaneCapturedMsg{
+				SessionName: name,
+				Content:     fetch.CapturePane(m.ctx, m.cmd, name, 20, window),
+			}
+		}
+	case view.DetailPRComments:
+		if s.PR == nil || s.Git.Branch == "" {
+			return nil
+		}
+		if _, loaded := m.reviewComments[s.Git.Branch]; loaded {
+			return nil
+		}
+		branch, gitRoot, number := s.Git.Branch, s.Git.GitRoot, s.PR.Number
+		ctx, cmd := m.ctx, m.cmd
+		return func() tea.Msg {
+			return PRCommentsMsg{
+				Branch:   branch,
+				Comments: fetch.FetchReviewComments(ctx, cmd, gitRoot, number),
+			}
+		}
 	}
-	name := s.Name
-	window := m.cfg.GetSetting("capture_window")
-	return func() tea.Msg {
-		lines := 20
-		content := fetch.CapturePane(m.ctx, m.cmd, name, lines, window)
-		return PaneCapturedMsg{SessionName: name, Content: content}
-	}
+	return nil
 }
 
 func (m Model) mergeCmd(s *session.Session) tea.Cmd {

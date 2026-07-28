@@ -25,6 +25,7 @@ func newTestModel() Model {
 	cfg := &config.Config{}
 	return Model{
 		prCache:         make(map[string]*session.PRStatus),
+		reviewComments:  make(map[string][]session.ReviewComment),
 		detector:        transition.NewDetector(),
 		effects:         transition.Runner{Cfg: &config.Config{}, Cmd: fetch.NewMockCommander()},
 		inFlightEffects: make(map[string]struct{}),
