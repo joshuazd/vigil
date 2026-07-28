@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
@@ -236,6 +237,41 @@ func TestRunCleansUpADoneSessionThatIsNotAttached(t *testing.T) {
 // TestRunLogsACleanupFailure is the failure counterpart to the test above:
 // builtinCleanup's own error (a git worktree remove that fails) must reach
 // the log exactly once, or a broken cleanup fails silently forever.
+// TestRunDerivesATimeoutForCleanup pins the two lines around CleanupSession
+// that no assertion above touches: a bare ctx has no deadline, and
+// cleanupTimeout must be a real number of seconds rather than accidentally
+// near-zero. MockCommander.HandlerFuncs is handed the live ctx, so a handler
+// can read its deadline directly - no need for a custom Commander.
+func TestRunDerivesATimeoutForCleanup(t *testing.T) {
+	dir := t.TempDir()
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs(attachedSessionsCmd, "beta|1", nil)
+
+	var deadline time.Time
+	var hasDeadline bool
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"tmux kill-session -t alpha": func(ctx context.Context, _ string, _ []string) (string, error) {
+			deadline, hasDeadline = ctx.Deadline()
+			return "", nil
+		},
+	}
+
+	cfg := &config.Config{
+		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
+	}
+	ev := Event{Session: "alpha", PanePath: dir, GitRoot: "/repo", Old: session.Review, New: session.Done}
+
+	before := time.Now()
+	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), ev)
+
+	if !hasDeadline {
+		t.Fatal("cleanup ran with a context that never expires - the outer ctx reached CleanupSession, not a derived one")
+	}
+	if d := deadline.Sub(before); d <= 10*time.Second || d > 65*time.Second {
+		t.Fatalf("got a cleanup deadline %v from now, want roughly cleanupTimeout (60s)", d)
+	}
+}
+
 func TestRunLogsACleanupFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /repo/worktrees/alpha\n"), 0o644); err != nil {
@@ -340,7 +376,10 @@ func TestRunSkipsCleanupForANonDoneTransition(t *testing.T) {
 		Settings: map[string]any{"auto_cleanup": "true", "notifications_enabled": "false"},
 	}
 
-	ev := Event{Session: "alpha", PanePath: "/tmp/alpha", Old: session.Idle, New: session.Blocked}
+	ev := Event{
+		Session: "alpha", PanePath: "/tmp/alpha", GitRoot: "/repo/alpha",
+		Old: session.Idle, New: session.Blocked,
+	}
 	Runner{Cfg: cfg, Cmd: cmd}.Run(context.Background(), ev)
 
 	for _, c := range cmd.Calls {

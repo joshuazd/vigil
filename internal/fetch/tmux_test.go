@@ -101,6 +101,107 @@ func TestAttachedSessionsPropagatesTheError(t *testing.T) {
 	}
 }
 
+// TestAttachedSessionsCountsMultipleClients is the guard on session_attached
+// being a count, not a boolean: `man tmux` defines it as "Number of clients
+// session is attached to". Two panels on one session - this project's stated
+// normal case - would report "2", and a `== "1"` comparison would read that
+// as unattached and let cleanup destroy a session two people are looking at.
+func TestAttachedSessionsCountsMultipleClients(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "canary|2", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !attached["canary"] {
+		t.Error("2 clients attached should count as attached")
+	}
+}
+
+func TestAttachedSessionsCountsThreeClients(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "canary|3", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !attached["canary"] {
+		t.Error("3 clients attached should count as attached")
+	}
+}
+
+// TestAttachedSessionsTreatsAMalformedValueAsAttached and its empty-value
+// sibling pin the fail-closed direction for any value tmux does not actually
+// produce: since "0" is the only reading that means "go ahead and destroy
+// this", everything else - including garbage - must not.
+func TestAttachedSessionsTreatsAMalformedValueAsAttached(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "canary|yes", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !attached["canary"] {
+		t.Error("a non-numeric value should fail closed as attached")
+	}
+}
+
+func TestAttachedSessionsTreatsAnEmptyValueAsAttached(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "canary|", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !attached["canary"] {
+		t.Error("an empty value should fail closed as attached")
+	}
+}
+
+// TestAttachedSessionsHandlesAPipeInTheSessionName is why the split is on
+// the LAST "|" rather than the first: tmux accepts "|" in a session name, and
+// SplitN(line, "|", 2) would read "al|pha|1" as name "al", value "pha|1" -
+// neither "0" nor matched at all, so either reading destroys or misparses it.
+func TestAttachedSessionsHandlesAPipeInTheSessionName(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "al|pha|0", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attached["al|pha"] {
+		t.Error("al|pha reported 0 clients, should not be attached")
+	}
+	if len(attached) != 1 {
+		t.Errorf("got %v, want exactly one session parsed", attached)
+	}
+}
+
+// TestAttachedSessionsTrimsATrailingCR uses a second line after the one under
+// test so the CR under test sits in the middle of the raw output, not at its
+// very end - the outer strings.TrimSpace(out) already strips a lone trailing
+// CR, which would make this pass even without the fix.
+func TestAttachedSessionsTrimsATrailingCR(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "canary|0\r\nzzz|1", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attached["canary"] {
+		t.Error("a trailing CR on \"0\" should still read as not attached")
+	}
+	if !attached["zzz"] {
+		t.Error("zzz should still be attached")
+	}
+}
+
 func TestBellFlags(t *testing.T) {
 	mock := NewMockCommander()
 	mock.On("tmux", "session1|0\nsession2|1\nsession3|0", nil)

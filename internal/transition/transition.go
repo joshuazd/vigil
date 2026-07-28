@@ -101,14 +101,8 @@ func (r Runner) Run(ctx context.Context, ev Event) {
 		r.logf("auto-cleanup skipped for a malformed event: %+v", ev)
 		return
 	}
-	// A session with any client attached must not be destroyed, whichever
-	// client that is: CurrentSession only protects the one pane the daemon
-	// happened to inherit TMUX_PANE from, which stops meaning anything once
-	// N attached clients are normal. And a tmux failure must not be read as
-	// "nobody is attached" - that reading is what force-removes a live
-	// worktree - so an error here skips cleanup instead of defaulting to
-	// false. The error case is logged because it is a real condition worth
-	// seeing; "attached" is the ordinary case and must stay silent.
+	// A tmux failure must be treated as "attached": it must never be read as
+	// "nobody is here."
 	attached, err := fetch.AttachedSessions(ctx, r.Cmd)
 	if err != nil {
 		r.logf("auto-cleanup of %s skipped: cannot tell which sessions are attached: %v", ev.Session, err)
