@@ -82,6 +82,10 @@ func TestNewPanelSetsPanelMode(t *testing.T) {
 	daemonSpawner = func() error { return nil }
 	t.Cleanup(func() { daemonSpawner = spawnDaemon })
 
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+
 	m := NewPanel(&config.Config{}, fetch.NewMockCommander())
 	if !m.panelMode {
 		t.Error("NewPanel did not set panelMode")
@@ -98,7 +102,9 @@ func TestNewPanelSpawnsTheDaemon(t *testing.T) {
 	daemonSpawner = func() error { spawned++; return nil }
 	t.Cleanup(func() { daemonSpawner = spawnDaemon })
 
-	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t)) // no socket to dial
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
 	NewPanel(&config.Config{}, fetch.NewMockCommander())
 	if spawned != 1 {
 		t.Errorf("spawned %d daemons, want 1", spawned)
@@ -110,8 +116,13 @@ func TestNewDoesNotSpawnTheDaemon(t *testing.T) {
 	daemonSpawner = func() error { spawned++; return nil }
 	t.Cleanup(func() { daemonSpawner = spawnDaemon })
 
-	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
-	New(&config.Config{}, fetch.NewMockCommander())
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	m := New(&config.Config{}, fetch.NewMockCommander())
+	if m.daemonDecoder != nil {
+		t.Fatal("New dialed a real daemon; the TUI should not reach the daemon on this path")
+	}
 	if spawned != 0 {
 		t.Errorf("the TUI spawned %d daemons; only panels do that", spawned)
 	}
@@ -125,9 +136,14 @@ func TestNewDoesNotSpawnTheDaemon(t *testing.T) {
 // or action result landing before the first SnapshotMsg cannot slip a second
 // collectCmd past startPoll's guard.
 func TestNewPrimesPollInFlightBeforeInitRuns(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t)) // no socket to dial
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
 
 	m := New(&config.Config{}, fetch.NewMockCommander())
+	if m.daemonDecoder != nil {
+		t.Fatal("New dialed a real daemon; this test exercises the self-polling path")
+	}
 	if !m.pollInFlight {
 		t.Fatal("a freshly constructed self-polling model should already show a poll in flight")
 	}
