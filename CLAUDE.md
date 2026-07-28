@@ -5,12 +5,16 @@ TUI dashboard for tmux sessions. Monitors git status and GitHub PR state across 
 ## In-flight design work
 
 An approved 6-phase design is turning the session list into the primary surface, with
-sessions expanded next to it. Phases 0 and 1 are merged; phase 2 is next. Read these
-before changing the daemon, `internal/collect`, or the launch path in `~/dotfiles`:
+sessions expanded next to it. Phases 0, 1 and 2 are merged; phase 3 is next, and the
+design says to live on phase 2 before planning it. Read these before changing the daemon,
+`internal/collect`, `internal/view`'s layout, or the launch path in `~/dotfiles`:
 
-- `docs/superpowers/2026-07-27-phase-1-handoff.md` - current state, what must be fixed
-  before phase 2 ships, and landmines. **Start here.**
-- `docs/superpowers/specs/2026-07-27-vigil-cockpit-design.md` - the full design.
+- `docs/superpowers/2026-07-27-phase-2-handoff.md` - current state, what must be resolved
+  before phase 3 ships, and landmines. **Start here.**
+- `docs/superpowers/specs/2026-07-27-vigil-cockpit-design.md` - the full design, whose
+  "Still open after phase 2" section is the authoritative debt list.
+- `docs/superpowers/2026-07-27-phase-1-handoff.md` - superseded, kept for the reasoning
+  behind the daemon's polling cadences.
 
 ## Architecture
 

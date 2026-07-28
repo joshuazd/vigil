@@ -263,8 +263,11 @@ Prefer a `pane_id` or a pane title over a positional target.
   able to drift).
 - Lazy review-thread fetching (the daemon still spends two GraphQL calls per PR per
   cycle).
-- The daemon-up versus daemon-down TUI comparison was never run as a timing
-  observation.
+- ~~The daemon-up versus daemon-down TUI comparison was never run as a timing
+  observation.~~ **RESOLVED at the phase 2 gate.** Run at 120x20 against a live daemon,
+  then with the daemon killed: the git and PR columns are byte-identical across the two
+  captures, no PR column blanked and no column layout changed. The phase 1 invisibility
+  claim is now observed rather than inferred from static analysis.
 - A permanently failing `gh` still shows the last known PR indefinitely with no
   staleness marker. The new marker covers a silent *daemon*, not a silent `gh`.
 - `internal/view`'s tests prove less than they appear to about styling. Under `go
@@ -285,10 +288,18 @@ Prefer a `pane_id` or a pane title over a positional target.
   not enable `auto_cleanup` while panels are open. The durable fix is moving the
   side effects to the daemon, which owns one view of state and can fire each
   transition once, leaving the clients to render. Phase 3 work.
-- A live panel resized across a tier boundary is unobserved. Three panes at fixed
-  widths were verified rendering real sessions, but not one pane resized through the
-  boundaries. `tea.WindowSizeMsg` handling is unchanged pre-existing code, so the risk
-  is low, but that is not the same as having checked it.
+- ~~A live panel resized across a tier boundary is unobserved.~~ **RESOLVED at the
+  phase 2 gate.** One pane driven 110 -> 40 -> 24 -> 110 with `tmux resize-window`,
+  capturing after each step: columns dropped and returned correctly in both directions
+  and no line ever exceeded the pane.
+- The `colIndex` and `colState` layout constants reserve 2 columns each, but `indexCol`
+  and `StateIndicatorWithBg` each render 1. Every tier therefore over-reserves 1-2
+  columns. The direction is safe, since rows come out narrower than budgeted rather than
+  wider, but every tier threshold is 1-2 columns pessimistic: the PR column drops at
+  width 27 where it would in fact fit at 26. It also hid a dropped truncation at the full
+  tier until the test fixture was widened. Deliberately not fixed at the end of phase 2,
+  because it shifts every threshold and every layout test at a point where no review
+  round remained to catch the fallout.
 
 ### Process note
 

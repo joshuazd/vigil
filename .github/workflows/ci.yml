@@ -13,7 +13,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - run: go test ./...
+      # make test, not `go test ./...`: the target runs -race, and the daemon
+      # package's whole design is a concurrency claim. TestRunWaitsForWriters
+      # passes without the detector.
+      - run: make test
 
   lint:
     runs-on: ubuntu-latest
