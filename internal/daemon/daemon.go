@@ -17,6 +17,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/transition"
 )
 
 var ErrAlreadyRunning = errors.New("daemon already running")
@@ -30,6 +31,14 @@ type Server struct {
 	CachePath  string
 	Log        *log.Logger
 
+	// Detector and Effects fire state-transition side effects once per event.
+	// Clients render their own toasts from their own detectors; only this
+	// process runs the hooks and the cleanups, because only this process has
+	// one view of state. Nil disables them, which is what a zero-valued Server
+	// in a test gets.
+	Detector *transition.Detector
+	Effects  transition.EffectRunner
+
 	// mu guards latest only. clients is owned by Run's goroutine: poll,
 	// addClient and broadcast all run there and nothing else touches it.
 	mu     sync.Mutex
@@ -37,6 +46,10 @@ type Server struct {
 
 	clients []*client
 	writers sync.WaitGroup
+
+	// pendingEffects tracks in-flight effect goroutines so shutdown waits for
+	// them before Run returns.
+	pendingEffects sync.WaitGroup
 
 	// pollFailing is only read and written from poll, which Run only ever
 	// calls from its own goroutine, so it needs no mutex.
@@ -48,12 +61,19 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 	if interval <= 0 {
 		interval = defaultInterval
 	}
+	logger := log.New(os.Stderr, "vigil: ", log.LstdFlags)
 	return &Server{
 		Collector:  collect.New(cfg, cmd),
 		Interval:   interval,
 		SocketPath: protocol.SocketPath(),
 		CachePath:  cache.CachePath(),
-		Log:        log.New(os.Stderr, "vigil: ", log.LstdFlags),
+		Log:        logger,
+		Detector:   transition.NewDetector(),
+		Effects: transition.Runner{
+			Cfg:  cfg,
+			Cmd:  cmd,
+			Logf: logger.Printf,
+		},
 	}
 }
 
@@ -98,6 +118,7 @@ func (s *Server) Run(ctx context.Context) error {
 			_ = listener.Close()
 			accepted.Wait()
 			s.closeClients()
+			s.pendingEffects.Wait()
 			return nil
 		case conn := <-incoming:
 			s.addClient(conn)
@@ -177,6 +198,18 @@ func (s *Server) poll(ctx context.Context) {
 
 	if s.CachePath != "" {
 		_ = cache.Save(s.CachePath, sessions)
+	}
+
+	if s.Detector == nil || s.Effects == nil {
+		return
+	}
+	for _, ev := range s.Detector.Detect(sessions) {
+		ev := ev
+		s.pendingEffects.Add(1)
+		go func() {
+			defer s.pendingEffects.Done()
+			s.Effects.Run(ctx, ev)
+		}()
 	}
 }
 
