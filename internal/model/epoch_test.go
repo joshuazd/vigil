@@ -20,18 +20,18 @@ func liveDecoder() *protocol.Decoder {
 	return protocol.NewDecoder(strings.NewReader(""))
 }
 
-// staleTickCases covers every self-rescheduling tick. A tick born in an
-// earlier epoch must die rather than reschedule itself, or a mode switch
-// leaves two independent tickers running for the life of the process.
+// staleTickCases covers every self-rescheduling generation: the local poll
+// loop (now a chain of SnapshotMsg{Local: true}, not a ticker) and the
+// daemon path's render heartbeat. A message born in an earlier epoch must
+// die rather than reschedule itself, or a mode switch leaves two independent
+// pollers running for the life of the process.
 func TestStaleTicksDoNotReschedule(t *testing.T) {
 	cases := []struct {
 		name  string
 		msg   tea.Msg
 		setup func(*Model)
 	}{
-		{"tmux", TmuxTickMsg{Time: time.Now(), Epoch: 0}, nil},
-		{"git", GitTickMsg{Time: time.Now(), Epoch: 0}, nil},
-		{"pr", PRTickMsg{Time: time.Now(), Epoch: 0}, nil},
+		{"local snapshot", SnapshotMsg{Sessions: fixtureSessions(), Epoch: 0, Local: true}, nil},
 		// RenderTickMsg is also gated on daemonDecoder == nil, so this case
 		// must set a live decoder: otherwise a nil decoder alone would force
 		// cmd == nil and the epoch check would never be exercised.
@@ -59,9 +59,7 @@ func TestCurrentTicksReschedule(t *testing.T) {
 		msg   tea.Msg
 		setup func(*Model)
 	}{
-		{"tmux", TmuxTickMsg{Time: time.Now(), Epoch: 7}, nil},
-		{"git", GitTickMsg{Time: time.Now(), Epoch: 7}, nil},
-		{"pr", PRTickMsg{Time: time.Now(), Epoch: 7}, nil},
+		{"local snapshot", SnapshotMsg{Sessions: fixtureSessions(), Epoch: 7, Local: true}, nil},
 		{"render", RenderTickMsg{Time: time.Now(), Epoch: 7}, func(m *Model) {
 			m.daemonDecoder = liveDecoder()
 		}},

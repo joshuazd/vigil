@@ -8,50 +8,13 @@ import (
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
-// TmuxTickMsg triggers a tmux metadata polling cycle. Epoch is the polling
-// generation it was scheduled in: Bubble Tea ticks cannot be cancelled, so a
-// tick from a superseded generation is dropped instead of rescheduling
-// itself. Without that, every switch between daemon and self-polling would
-// leave the previous mode's tickers running for the life of the process.
-type TmuxTickMsg struct {
-	Time  time.Time
-	Epoch int
-}
-
-// GitTickMsg triggers a git polling cycle.
-type GitTickMsg struct {
-	Time  time.Time
-	Epoch int
-}
-
-// PRTickMsg triggers a PR polling cycle.
-type PRTickMsg struct {
-	Time  time.Time
-	Epoch int
-}
-
 // RenderTickMsg triggers a repaint with no fetch work. The daemon path uses
-// it to get the same 1s render cadence self-polling gets for free from
-// TmuxTickMsg, so time-based rendering (like notification expiry) behaves
-// the same whether or not a daemon is connected.
+// it to get the same render cadence self-polling gets for free from its own
+// tight collectCmd loop, so time-based rendering (like notification expiry)
+// behaves the same whether or not a daemon is connected.
 type RenderTickMsg struct {
 	Time  time.Time
 	Epoch int
-}
-
-// TmuxUpdatedMsg carries tmux session metadata (fast, no git/PR).
-type TmuxUpdatedMsg struct {
-	Sessions []*session.Session
-}
-
-// GitUpdatedMsg carries git status data for sessions.
-type GitUpdatedMsg struct {
-	GitData map[string]session.GitStatus
-}
-
-// PRUpdatedMsg carries refreshed PR data.
-type PRUpdatedMsg struct {
-	PRData map[string]*session.PRStatus
 }
 
 // PaneCapturedMsg carries captured pane output.
@@ -80,10 +43,6 @@ type NotifyMsg struct {
 	Text     string
 	Severity string // "info", "warning", "error"
 }
-
-// DelayedPRRefreshMsg triggers a follow-up PR fetch after a short delay
-// to catch GitHub API updates that lag behind the action.
-type DelayedPRRefreshMsg struct{}
 
 // DetailRefreshMsg triggers a detail panel content refresh.
 type DetailRefreshMsg struct{}

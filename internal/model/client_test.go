@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jzinkduda/vigil/internal/cache"
+	"github.com/jzinkduda/vigil/internal/collect"
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
@@ -19,14 +20,16 @@ import (
 )
 
 func newTestModel() Model {
+	cmd := fetch.NewMockCommander()
+	cfg := &config.Config{}
 	return Model{
-		gitCache:   make(map[string]session.GitStatus),
 		prCache:    make(map[string]*session.PRStatus),
 		prevStates: make(map[string]session.SessionState),
 		selected:   make(map[string]bool),
-		cfg:        &config.Config{},
-		cmd:        fetch.NewMockCommander(),
+		cfg:        cfg,
+		cmd:        cmd,
 		ctx:        context.Background(),
+		collector:  collect.New(cfg, cmd),
 	}
 }
 
@@ -208,17 +211,24 @@ func TestHandleSnapshotClearsFirstSnapshotDeadline(t *testing.T) {
 	}
 }
 
-// TestHandleSnapshotNilConnDoesNotPanic covers the nil-guard: daemonConn can
-// be nil (e.g. in tests, or hypothetically if wiring ever changes), and
-// handleSnapshot must not dereference it unconditionally. The daemonReady
-// assertion here is redundant with TestHandleSnapshotClearsFirstSnapshotDeadline;
-// this test's only real value is that it does not panic with a nil conn.
-func TestHandleSnapshotNilConnDoesNotPanic(t *testing.T) {
+// TestHandleSnapshotDropsANonLocalSnapshotWithNoConnection covers the guard
+// that replaced the old nil-conn safety net: a SnapshotMsg with Local false
+// only ever comes from listenDaemonCmd, which only runs once a connection
+// exists, so both daemonConn and daemonDecoder being nil means this message
+// is stale (from a connection already torn down). handleSnapshot must drop
+// it rather than dereference a nil daemonConn or otherwise treat it as live.
+func TestHandleSnapshotDropsANonLocalSnapshotWithNoConnection(t *testing.T) {
 	m := newTestModel()
-	next, _ := m.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{{Name: "alpha"}}})
+	next, cmd := m.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{{Name: "alpha"}}})
 	m2 := next.(Model)
-	if !m2.daemonReady {
-		t.Error("daemonReady should be true after the first snapshot even with a nil conn")
+	if m2.daemonReady {
+		t.Error("a connectionless snapshot should not mark the daemon ready")
+	}
+	if len(m2.sessions) != 0 {
+		t.Error("a connectionless snapshot should not be applied")
+	}
+	if cmd != nil {
+		t.Error("a connectionless snapshot should schedule nothing")
 	}
 }
 
@@ -290,13 +300,14 @@ func TestRenderTickStopsWhenDaemonGone(t *testing.T) {
 }
 
 // TestHandleSnapshotWarmsCachesAndClearsInitialLoad is the test that guards
-// the actual point of this task: a daemon snapshot's git/PR state must
-// survive into the model's caches unmerged and unmutated, and the
-// self-polling-only initialLoad flag must still clear via the shared
-// checkStateTransitions() call.
+// the actual point of this task: a daemon snapshot's PR state must survive
+// into the model's caches unmerged and unmutated, and the self-polling-only
+// initialLoad flag must still clear via the shared checkStateTransitions()
+// call.
 func TestHandleSnapshotWarmsCachesAndClearsInitialLoad(t *testing.T) {
 	m := newTestModel()
 	m.initialLoad = true
+	m.daemonDecoder = liveDecoder()
 
 	pr := &session.PRStatus{Number: 7}
 	sess := &session.Session{
@@ -308,37 +319,14 @@ func TestHandleSnapshotWarmsCachesAndClearsInitialLoad(t *testing.T) {
 	next, _ := m.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{sess}})
 	m2 := next.(Model)
 
-	if got, ok := m2.gitCache["alpha"]; !ok || got.Branch != "feature/x" {
-		t.Errorf("gitCache[alpha] = %+v, ok=%v, want Branch=feature/x", got, ok)
-	}
 	if got := m2.prCache["feature/x"]; got != pr {
 		t.Errorf("prCache[feature/x] = %v, want %v (same pointer)", got, pr)
 	}
 	if m2.initialLoad {
 		t.Error("initialLoad should be cleared after the first snapshot, same as the self-polling handlers")
 	}
-	if !m2.initialPRDone {
-		t.Error("initialPRDone should be set when the snapshot actually carries PR data")
-	}
 	if len(m2.sessions) != 1 || m2.sessions[0] != sess {
 		t.Error("handleSnapshot should hold onto the daemon's session pointer directly, not merge or copy it")
-	}
-}
-
-// TestHandleSnapshotLeavesInitialPRDoneFalseWithoutPRData covers the fix for
-// blank PR columns after a fallback: if the daemon's own PR fetch failed or
-// is still pending, a snapshot can carry sessions with no PR data at all.
-// Marking initialPRDone in that case would suppress handleGitUpdated's
-// eager first PR fetch after falling back to self-polling, leaving PR
-// columns blank for a full pr_interval (30s by default) instead of one.
-func TestHandleSnapshotLeavesInitialPRDoneFalseWithoutPRData(t *testing.T) {
-	m := newTestModel()
-	next, _ := m.handleSnapshot(SnapshotMsg{Sessions: []*session.Session{
-		{Name: "alpha", Git: session.GitStatus{Branch: "feature/x"}},
-	}})
-	m2 := next.(Model)
-	if m2.initialPRDone {
-		t.Error("initialPRDone should stay false when no session in the snapshot carries PR data")
 	}
 }
 
@@ -348,6 +336,7 @@ func TestHandleSnapshotLeavesInitialPRDoneFalseWithoutPRData(t *testing.T) {
 // notification and the notify hook on a session that did not change.
 func TestHandleSnapshotFallsBackToLastKnownPR(t *testing.T) {
 	m := newTestModel()
+	m.daemonDecoder = liveDecoder()
 	pr := &session.PRStatus{Number: 7, State: "OPEN"}
 	m.prCache["feature/x"] = pr
 
@@ -358,9 +347,6 @@ func TestHandleSnapshotFallsBackToLastKnownPR(t *testing.T) {
 
 	if m2.sessions[0].PR != pr {
 		t.Errorf("got PR %v, want the last known %v from prCache", m2.sessions[0].PR, pr)
-	}
-	if m2.initialPRDone {
-		t.Error("initialPRDone should be judged on the snapshot as received, before the cache backfill")
 	}
 }
 
@@ -391,9 +377,6 @@ func TestNewLoadsCacheOutsidePopupMode(t *testing.T) {
 	}
 	if m.sessions[0].Git.Branch != "feature/x" {
 		t.Errorf("got branch %q, want feature/x", m.sessions[0].Git.Branch)
-	}
-	if got, ok := m.gitCache["alpha"]; !ok || got.Branch != "feature/x" {
-		t.Errorf("gitCache[alpha] = %+v, ok=%v, want the cached git state", got, ok)
 	}
 	if m.prCache["feature/x"] == nil {
 		t.Error("prCache should be warmed from the cache load")

@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -35,7 +34,6 @@ const spawnCooldown = 15 * time.Second
 type Model struct {
 	// Data
 	sessions   []*session.Session
-	gitCache   map[string]session.GitStatus
 	prCache    map[string]*session.PRStatus
 	prevStates map[string]session.SessionState
 
@@ -64,10 +62,9 @@ type Model struct {
 	// popup and a session panel - and conflating them is what made Enter close
 	// the panel. When the question is "should acting here end the process?",
 	// ask exitsAfterAction instead of testing this directly.
-	insideTmux    bool
-	initialLoad   bool
-	initialPRDone bool
-	cursorPlaced  bool
+	insideTmux   bool
+	initialLoad  bool
+	cursorPlaced bool
 
 	// Current session (detected at startup)
 	currentSessionName string
@@ -149,7 +146,6 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 
 	m := Model{
 		currentSessionName: currentSession,
-		gitCache:           make(map[string]session.GitStatus),
 		prCache:            make(map[string]*session.PRStatus),
 		prevStates:         make(map[string]session.SessionState),
 		selected:           make(map[string]bool),
@@ -232,16 +228,7 @@ func (m Model) Init() tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 
-	// Start independent poll cycles: tmux (1s), git (configurable), PR (configurable)
-	cmds = append(cmds,
-		m.fetchTmuxCmd(),
-		m.fetchGitCmd(),
-		tmuxTickCmd(1*time.Second, m.epoch),
-		gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch),
-		prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch),
-		probeTickCmd(m.epoch),
-	)
-
+	cmds = append(cmds, m.collectCmd(), probeTickCmd(m.epoch))
 	return tea.Batch(cmds...)
 }
 
@@ -258,24 +245,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.help.Width = msg.Width
 		return m, nil
-
-	case TmuxTickMsg:
-		if msg.Epoch != m.epoch {
-			return m, nil
-		}
-		return m, tea.Batch(m.fetchTmuxCmd(), tmuxTickCmd(1*time.Second, m.epoch))
-
-	case GitTickMsg:
-		if msg.Epoch != m.epoch {
-			return m, nil
-		}
-		return m, tea.Batch(m.fetchGitCmd(), gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch))
-
-	case PRTickMsg:
-		if msg.Epoch != m.epoch {
-			return m, nil
-		}
-		return m, tea.Batch(m.fetchPRsCmd(), prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch))
 
 	case SnapshotMsg:
 		return m.handleSnapshot(msg)
@@ -312,15 +281,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, renderTickCmd(1*time.Second, m.epoch)
 
-	case TmuxUpdatedMsg:
-		return m.handleTmuxUpdated(msg)
-
-	case GitUpdatedMsg:
-		return m.handleGitUpdated(msg)
-
-	case PRUpdatedMsg:
-		return m.handlePRUpdated(msg)
-
 	case PaneCapturedMsg:
 		if s := m.selectedSession(); s != nil && s.Name == msg.SessionName {
 			m.paneContent = msg.Content
@@ -333,15 +293,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			severity = "error"
 		}
 		m.addNotification(msg.Message, severity)
-		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd(), m.fetchPRsCmd(), delayedPRRefreshCmd())
+		// No forced re-fetch: the ambient poll (daemon or self) is the only
+		// caller of collector.Snapshot, and a second one here would run
+		// concurrently with it against the same unsynchronized memos.
+		return m, nil
 
 	case BatchResultMsg:
 		m.selected = make(map[string]bool)
 		m.addNotification(fmt.Sprintf("%s: %d ok, %d failed", msg.Action, msg.OK, msg.Failed), "info")
-		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd(), m.fetchPRsCmd(), delayedPRRefreshCmd())
-
-	case DelayedPRRefreshMsg:
-		return m, m.fetchPRsCmd()
+		return m, nil
 
 	case NotifyMsg:
 		m.addNotification(msg.Text, msg.Severity)
@@ -507,7 +467,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case key.Matches(msg, keys.Refresh):
-		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd(), m.fetchPRsCmd())
+		// A forced re-fetch here would call collector.Snapshot a second time
+		// while the ambient poll (daemon or self) already owns it; the
+		// ambient cadence is the only supported way to get fresh data now.
+		return m, nil
 
 	case key.Matches(msg, keys.ToggleDetail):
 		if m.panelMode {
@@ -755,14 +718,13 @@ func (m Model) handleRebasePush() (tea.Model, tea.Cmd) {
 
 // --- Data handlers ---
 
-// warmCaches records each session's git state by name and PR state by branch,
-// and backfills any session missing PR data from the last known value for its
-// branch. The backfill keeps a single failed gh call from blanking the PR
-// column and flipping the session to idle, which would fire a state
-// transition notification and the notify hook.
+// warmCaches records each session's PR state by branch, and backfills any
+// session missing PR data from the last known value for its branch. The
+// backfill keeps a single failed gh call from blanking the PR column and
+// flipping the session to idle, which would fire a state transition
+// notification and the notify hook.
 func (m *Model) warmCaches() {
 	for _, s := range m.sessions {
-		m.gitCache[s.Name] = s.Git
 		if s.Git.Branch == "" {
 			continue
 		}
@@ -788,53 +750,57 @@ func (m *Model) placeCursor() {
 	}
 }
 
-// handleSnapshot applies a complete daemon snapshot. Unlike
-// handleTmuxUpdated, it does not merge into existing sessions: the snapshot
-// already carries git and PR state, and merging would discard it.
 func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	if msg.Epoch != m.epoch {
-		// In flight when the connection was retired. Applying it would
-		// overwrite self-polled state with data from a dead daemon.
+		return m, nil
+	}
+
+	if msg.Local {
+		// A failed poll carries no sessions. Reschedule and leave state alone
+		// rather than blanking the table.
+		if msg.Sessions != nil {
+			m.applySnapshot(msg.Sessions)
+		}
+		cmds := m.checkStateTransitions()
+		if m.detailOpen {
+			cmds = append(cmds, m.refreshDetailCmd())
+		}
+		cmds = append(cmds, m.collectCmd())
+		return m, tea.Batch(cmds...)
+	}
+
+	if m.daemonConn == nil && m.daemonDecoder == nil {
 		return m, nil
 	}
 	if !m.daemonReady {
-		// The first snapshot arrived within the deadline set in New; clear
-		// it so a healthy daemon is never dropped for going idle between
-		// poll cycles.
 		if m.daemonConn != nil {
 			_ = m.daemonConn.SetReadDeadline(time.Time{})
 		}
 		m.daemonReady = true
 	}
 	m.lastSnapshot = time.Now()
-
-	m.sessions = msg.Sessions
-
-	// A snapshot delivers git and PR together, so if any session actually has
-	// PR data, there is no self-polling-style wait for a branch to show up
-	// before fetching PRs. Judge that on the snapshot as received, before
-	// warmCaches can backfill PRs from the cache: if the daemon's PR fetch
-	// failed or is still pending, a later fallback should still do its own
-	// eager PR fetch rather than sit on cached data for a full pr_interval.
-	for _, s := range m.sessions {
-		if s.PR != nil {
-			m.initialPRDone = true
-			break
-		}
-	}
-	m.warmCaches()
-
-	session.SortSessions(m.sessions, m.sortMode)
-	m.placeCursor()
+	m.applySnapshot(msg.Sessions)
 
 	cmds := m.checkStateTransitions()
 	if m.detailOpen {
 		cmds = append(cmds, m.refreshDetailCmd())
 	}
-	cmds = append(cmds,
-		listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName, m.epoch))
-
+	cmds = append(cmds, listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName, m.epoch))
 	return m, tea.Batch(cmds...)
+}
+
+// applySnapshot installs a set of sessions and everything derived from them.
+// Both paths funnel through here so neither can grow its own idea of what a
+// snapshot implies.
+func (m *Model) applySnapshot(sessions []*session.Session) {
+	m.sessions = sessions
+	m.warmCaches()
+	session.SortSessions(m.sessions, m.sortMode)
+	m.placeCursor()
+
+	snap := make([]*session.Session, len(m.sessions))
+	copy(snap, m.sessions)
+	go func() { _ = cache.Save(cache.CachePath(), snap) }()
 }
 
 func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
@@ -856,14 +822,7 @@ func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
 	m.epoch++
 	m.daemonReady = false
 	m.addNotification("daemon lost, polling directly", "warning")
-	return m, tea.Batch(
-		m.fetchTmuxCmd(),
-		m.fetchGitCmd(),
-		tmuxTickCmd(1*time.Second, m.epoch),
-		gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch),
-		prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch),
-		probeTickCmd(m.epoch),
-	)
+	return m, tea.Batch(m.collectCmd(), probeTickCmd(m.epoch))
 }
 
 // handleProbeResult installs a reconnected daemon, or keeps probing. Bumping
@@ -933,279 +892,15 @@ func (m Model) staleAfter() time.Duration {
 	return d
 }
 
-func (m Model) handleTmuxUpdated(msg TmuxUpdatedMsg) (tea.Model, tea.Cmd) {
-	// Merge tmux metadata into existing sessions, preserving git/PR data
-	newByName := make(map[string]*session.Session)
-	for _, s := range msg.Sessions {
-		newByName[s.Name] = s
-	}
-
-	// Update existing sessions with fresh tmux data, keep git/PR
-	var merged []*session.Session
-	seen := make(map[string]bool)
-	for _, s := range msg.Sessions {
-		if old, ok := m.findSession(s.Name); ok {
-			old.IsCurrent = s.IsCurrent
-			old.IsLast = s.IsLast
-			old.HasBell = s.HasBell
-			old.PanePath = s.PanePath
-			merged = append(merged, old)
-		} else {
-			// New session — apply cached data
-			if git, ok := m.gitCache[s.Name]; ok {
-				s.Git = git
-			}
-			if s.Git.Branch != "" {
-				if pr, ok := m.prCache[s.Git.Branch]; ok {
-					s.PR = pr
-				}
-			}
-			merged = append(merged, s)
-		}
-		seen[s.Name] = true
-	}
-	m.sessions = merged
-
-	// Sort
-	session.SortSessions(m.sessions, m.sortMode)
-
-	m.placeCursor()
-
-	// State transitions
-	cmds := m.checkStateTransitions()
-
-	if m.detailOpen {
-		cmds = append(cmds, m.refreshDetailCmd())
-	}
-
-	return m, tea.Batch(cmds...)
-}
-
-func (m Model) handleGitUpdated(msg GitUpdatedMsg) (tea.Model, tea.Cmd) {
-	for name, git := range msg.GitData {
-		m.gitCache[name] = git
-	}
-	for _, s := range m.sessions {
-		if git, ok := msg.GitData[s.Name]; ok {
-			s.Git = git
-		}
-	}
-	m.warmCaches()
-
-	// Save cache (snapshot slice to avoid data race with main thread)
-	snap := make([]*session.Session, len(m.sessions))
-	copy(snap, m.sessions)
-	go func() { _ = cache.Save(cache.CachePath(), snap) }()
-
-	// Trigger initial PR poll once we have branches
-	var cmds []tea.Cmd
-	if !m.initialPRDone {
-		for _, s := range m.sessions {
-			if s.Git.Branch != "" {
-				m.initialPRDone = true
-				cmds = append(cmds, m.fetchPRsCmd())
-				break
-			}
-		}
-	}
-
-	cmds = append(cmds, m.checkStateTransitions()...)
-
-	if m.detailOpen {
-		cmds = append(cmds, m.refreshDetailCmd())
-	}
-
-	return m, tea.Batch(cmds...)
-}
-
-func (m Model) findSession(name string) (*session.Session, bool) {
-	for _, s := range m.sessions {
-		if s.Name == name {
-			return s, true
-		}
-	}
-	return nil, false
-}
-
-func (m Model) handlePRUpdated(msg PRUpdatedMsg) (tea.Model, tea.Cmd) {
-	for branch, pr := range msg.PRData {
-		if pr != nil {
-			m.prCache[branch] = pr
-		}
-	}
-	// Apply to sessions
-	for _, s := range m.sessions {
-		if s.Git.Branch != "" {
-			if pr, ok := m.prCache[s.Git.Branch]; ok {
-				s.PR = pr
-			}
-		}
-	}
-
-	cmds := m.checkStateTransitions()
-
-	if m.detailOpen {
-		cmds = append(cmds, m.refreshDetailCmd())
-	}
-
-	return m, tea.Batch(cmds...)
-}
-
 // --- Commands ---
 
-func tmuxTickCmd(interval time.Duration, epoch int) tea.Cmd {
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return TmuxTickMsg{Time: t, Epoch: epoch}
-	})
-}
-
-func gitTickCmd(interval time.Duration, epoch int) tea.Cmd {
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return GitTickMsg{Time: t, Epoch: epoch}
-	})
-}
-
 // renderTickCmd triggers a repaint with no fetch work, so the daemon path
-// gets the same render cadence tmuxTickCmd gives self-polling.
+// gets the same render cadence self-polling gets for free from its own
+// tight collectCmd loop.
 func renderTickCmd(interval time.Duration, epoch int) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return RenderTickMsg{Time: t, Epoch: epoch}
 	})
-}
-
-func delayedPRRefreshCmd() tea.Cmd {
-	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-		return DelayedPRRefreshMsg{}
-	})
-}
-
-func prTickCmd(interval time.Duration, epoch int) tea.Cmd {
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return PRTickMsg{Time: t, Epoch: epoch}
-	})
-}
-
-// fetchTmuxCmd fetches tmux session metadata only (fast, ~15ms).
-func (m Model) fetchTmuxCmd() tea.Cmd {
-	currentName := m.currentSessionName
-	return func() tea.Msg {
-		ctx := m.ctx
-		raw, err := fetch.ListSessions(ctx, m.cmd)
-		if err != nil {
-			return nil
-		}
-		current := fetch.CurrentSession(ctx, m.cmd)
-		if current == "" {
-			current = currentName
-		}
-		last := fetch.LastSession(ctx, m.cmd)
-		bells := fetch.BellFlags(ctx, m.cmd)
-
-		// Build name set to validate last session still exists
-		nameSet := make(map[string]bool, len(raw))
-		for _, r := range raw {
-			nameSet[r.Name] = true
-		}
-		if !nameSet[last] {
-			last = ""
-		}
-
-		sessions := make([]*session.Session, len(raw))
-		for i, r := range raw {
-			sessions[i] = &session.Session{
-				Name:      r.Name,
-				PanePath:  r.PanePath,
-				Created:   r.Created,
-				IsCurrent: r.Name == current,
-				IsLast:    r.Name == last,
-				HasBell:   bells[r.Name],
-			}
-		}
-		return TmuxUpdatedMsg{Sessions: sessions}
-	}
-}
-
-// fetchGitCmd fetches git status for all sessions in parallel.
-func (m Model) fetchGitCmd() tea.Cmd {
-	// Snapshot current sessions for path lookup
-	type sessionInfo struct {
-		Name     string
-		PanePath string
-	}
-	var infos []sessionInfo
-	for _, s := range m.sessions {
-		infos = append(infos, sessionInfo{Name: s.Name, PanePath: s.PanePath})
-	}
-	return func() tea.Msg {
-		ctx := m.ctx
-		if len(infos) == 0 {
-			return nil
-		}
-		gitWorkers := m.cfg.GetSettingInt("git_workers")
-		if gitWorkers < 1 {
-			gitWorkers = 1
-		}
-		result := make(map[string]session.GitStatus)
-		var mu sync.Mutex
-		sem := make(chan struct{}, gitWorkers)
-		var wg sync.WaitGroup
-		for _, info := range infos {
-			wg.Add(1)
-			go func(name, path string) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				if ctx.Err() != nil {
-					return
-				}
-				git := fetch.FetchGitStatus(ctx, m.cmd, path)
-				mu.Lock()
-				result[name] = git
-				mu.Unlock()
-			}(info.Name, info.PanePath)
-		}
-		wg.Wait()
-		return GitUpdatedMsg{GitData: result}
-	}
-}
-
-func (m Model) fetchPRsCmd() tea.Cmd {
-	return func() tea.Msg {
-		ctx := m.ctx
-		type branchRoot struct {
-			branch, gitRoot string
-		}
-		var branches []branchRoot
-		seen := make(map[string]bool)
-		for _, s := range m.sessions {
-			if s.Git.Branch != "" && s.Git.GitRoot != "" && !seen[s.Git.Branch] {
-				seen[s.Git.Branch] = true
-				branches = append(branches, branchRoot{s.Git.Branch, s.Git.GitRoot})
-			}
-		}
-
-		result := make(map[string]*session.PRStatus)
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, 4) // limit concurrent gh calls
-		for _, br := range branches {
-			wg.Add(1)
-			go func(branch, gitRoot string) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				if ctx.Err() != nil {
-					return
-				}
-				pr := fetch.FetchPRStatus(ctx, m.cmd, branch, gitRoot)
-				mu.Lock()
-				result[branch] = pr
-				mu.Unlock()
-			}(br.branch, br.gitRoot)
-		}
-		wg.Wait()
-		return PRUpdatedMsg{PRData: result}
-	}
 }
 
 func (m Model) refreshDetailCmd() tea.Cmd {

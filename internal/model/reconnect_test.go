@@ -287,6 +287,7 @@ func TestStaleAfterTracksTmuxInterval(t *testing.T) {
 func TestSnapshotStampsLastSnapshot(t *testing.T) {
 	m := newTestModel()
 	m.epoch = 1
+	m.daemonDecoder = liveDecoder()
 	got, _ := m.Update(SnapshotMsg{Sessions: fixtureSessions(), Epoch: 1})
 	if got.(Model).lastSnapshot.IsZero() {
 		t.Error("a snapshot did not stamp lastSnapshot, so staleness can never be detected")
