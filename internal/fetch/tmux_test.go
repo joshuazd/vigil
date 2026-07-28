@@ -226,6 +226,25 @@ func TestAttachedSessionsPreservesALeadingSpaceInTheFirstName(t *testing.T) {
 	}
 }
 
+// TestAttachedSessionsTrimsATrailingSpaceOnTheValue is distinct from the CR
+// test: TrimRight(line, "\r") only ever strips a carriage return, so it does
+// not exercise the separate strings.TrimSpace on the value. The value here is
+// "0 " (zero, not one): without the trim, "0 " != "0" reads as attached
+// regardless of whitespace, so only a zero count actually distinguishes
+// "trimmed" from "not trimmed" in the != "0" comparison.
+func TestAttachedSessionsTrimsATrailingSpaceOnTheValue(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "canary|0 ", nil)
+
+	attached, err := AttachedSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attached["canary"] {
+		t.Error("a trailing space on \"0\" should still read as not attached")
+	}
+}
+
 func TestBellFlags(t *testing.T) {
 	mock := NewMockCommander()
 	mock.On("tmux", "session1|0\nsession2|1\nsession3|0", nil)
