@@ -294,3 +294,37 @@ func TestRunHookStderrOrderingSurvivesACompoundHook(t *testing.T) {
 		t.Fatalf("got %q, want the second clause's stdout too", out)
 	}
 }
+
+func TestPanelAutoDefaultsToTrue(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.GetSetting("panel_auto"); got != "true" {
+		t.Errorf("got %q, want true", got)
+	}
+}
+
+func TestPanelAutoReadsTheConfigFile(t *testing.T) {
+	cfg := &Config{Settings: map[string]any{"panel_auto": "false"}}
+	if got := cfg.GetSetting("panel_auto"); got != "false" {
+		t.Errorf("got %q, want false", got)
+	}
+}
+
+func TestPanelAutoEnvVarWins(t *testing.T) {
+	t.Setenv("VIGIL_PANEL_AUTO", "false")
+	cfg := &Config{Settings: map[string]any{"panel_auto": "true"}}
+	if got := cfg.GetSetting("panel_auto"); got != "false" {
+		t.Errorf("got %q, want false", got)
+	}
+}
+
+// IsSetting is what lets a caller tell "the setting is off" from "that is not
+// a setting". GetSetting cannot: it returns "" for both an unknown key and
+// capture_window, which is legitimately empty by default.
+func TestIsSettingDistinguishesAnEmptyDefaultFromAnUnknownKey(t *testing.T) {
+	if !IsSetting("capture_window") {
+		t.Error("IsSetting said capture_window is not a setting")
+	}
+	if IsSetting("no_such_setting") {
+		t.Error("IsSetting accepted an unknown key")
+	}
+}

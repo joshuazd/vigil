@@ -532,11 +532,14 @@ func TestAPanelOwnsEffectsOnceTheGraceExpires(t *testing.T) {
 	}
 }
 
-// This is the test that pins the "set once" decision. handleProbeResult calls
-// spawnDaemonOnce again on every failed probe, so a deadline re-armed on each
-// spawn would mean a daemon that never comes up suppresses the panel's
-// effects forever - the zero-hooks failure mode, which is worse than the
-// double-hook one this change is fixing.
+// This is the test that pins the arming rule. handleProbeResult calls
+// spawnDaemonOnce again on every failed probe, and a failed probe never
+// establishes a connection, so none of those repeats may re-arm the deadline.
+//
+// Not "forever": spawnCooldown is 15s and spawnGrace is 5s, so an
+// unconditional re-arm would suppress about 5s in every 15, recurring while
+// the daemon kept failing. Bounded, but still the zero-hooks direction. What
+// prevents it is the connection gate, not the arithmetic.
 func TestARepeatedFailedProbeDoesNotExtendTheGrace(t *testing.T) {
 	original := daemonSpawner
 	daemonSpawner = func() error { return nil }
@@ -589,11 +592,23 @@ In `internal/model/model.go`, add next to the `inFlightEffects` field:
 	// event: newModel spawns and starts self-polling immediately, but the
 	// reconnect probe only lands a probe interval later.
 	//
-	// Set once, on the first spawn only. handleProbeResult respawns on every
-	// failed probe, so re-arming this would let a daemon that never starts
-	// suppress effects forever.
+	// Armed on any successful spawn, provided the client has had a live daemon
+	// connection since the last arm (daemonSeenSinceArm). handleProbeResult
+	// respawns on every failed probe, and a failed probe never establishes a
+	// connection, so a daemon that never starts arms exactly once.
 	effectsDisownedUntil time.Time
 ```
+
+> **Correction, applied after implementation.** The brief below and the spec both
+> originally said the deadline is set on the *first* spawn only, and justified it with the
+> claim that re-arming would suppress effects "forever". Both are wrong and the shipped
+> code does neither. Arm-once misses daemon restart: a panel whose daemon crashes
+> mid-session respawns one from a failed probe, never arms, and both processes own the
+> event - two cross-process `CleanupSession` calls on one worktree for a `Done`, because
+> `inFlightEffects` is per-process. And "forever" is false arithmetic: `spawnCooldown` is
+> 15s against a 5s `spawnGrace`, so an unconditional re-arm would suppress about 5s in
+> every 15. The rule that shipped is the connection gate described in the comment above;
+> see the spec's "The daemon ownership window" section.
 
 Next to `spawnCooldown` (`model.go:31-33`):
 
@@ -620,17 +635,23 @@ func (m *Model) spawnDaemonOnce() {
 		m.addNotification("could not start daemon: "+err.Error(), "warning")
 		return
 	}
-	if m.effectsDisownedUntil.IsZero() {
+	if m.effectsDisownedUntil.IsZero() || m.daemonSeenSinceArm {
 		m.effectsDisownedUntil = time.Now().Add(spawnGrace)
+		m.daemonSeenSinceArm = false
 	}
 }
 ```
+
+`daemonSeenSinceArm` is set at the two places a working connection is established -
+`newModel`'s dial and `handleProbeResult`'s live-conn branch - and nowhere else. See the
+correction note under Step 3: this is the shipped rule, not the arm-once one the rest of
+this brief was written against.
 
 Add the helper below it:
 
 ```go
 func (m *Model) effectsDisowned() bool {
-	return !m.effectsDisownedUntil.IsZero() && time.Now().Before(m.effectsDisownedUntil)
+	return time.Now().Before(m.effectsDisownedUntil)
 }
 ```
 
@@ -692,10 +713,15 @@ the blockers handoff measured at notify=4 for two transitions.
 
 Phase 3 makes this routine: every cold-start dispatch will hit it.
 
-The deadline is set on the first spawn only. handleProbeResult respawns on
-each failed probe, so re-arming would let a daemon that never starts suppress
-the hook forever, which is the worse failure of the two."
+The deadline is armed on any successful spawn where the client has had a live
+daemon connection since the last arm. handleProbeResult respawns on each
+failed probe and a failed probe never connects, so a daemon that never starts
+arms exactly once and cannot chain suppressions."
 ```
+
+The commit that actually landed (`d09cb60`) carries the arm-once wording, because the rule
+was corrected in the two follow-up commits `6f06d73` and `01fe026` rather than by amending
+it. Read the three together.
 
 ---
 
@@ -1330,6 +1356,15 @@ In `lib/tmux.sh`, in `create_tmux_session`, insert between the `new-window` line
     add_vigil_panel "=${session_name}:claude" || warn "vigil panel failed"
   fi
 ```
+
+> **Correction, applied at final review.** Two things this gate gets wrong, plus one this
+> brief does not mention at all. `2> /dev/null` silences a present-but-broken vigil as
+> thoroughly as an absent one, so the shipped version guards with `command -v` and warns in
+> the first case only; and the gate must read `${VIGIL_BIN:-vigil}`, because that is the
+> binary `add_vigil_panel` launches. Separately, `new-session -d` sizes its windows to
+> `default-size` (80x24) with no client to measure, so the 40-column panel took half an
+> 80-column window and tmux scaled it to ~175 columns on attach. `new-session` now takes
+> `-x/-y` from `client_dimensions`. See the spec's Decisions section.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 

@@ -32,6 +32,13 @@ const autoFocusCooldown = 15 * time.Second
 // daemon.
 const spawnCooldown = 15 * time.Second
 
+// spawnGrace is how long a panel that just spawned a daemon waits before it
+// will run transition effects itself. A healthy reconnect lands at
+// daemonProbeInterval plus the dial, well inside this.
+//
+// A var, not a const, so tests shorten it rather than sleeping.
+var spawnGrace = 5 * time.Second
+
 type Model struct {
 	// Data
 	sessions []*session.Session
@@ -53,6 +60,30 @@ type Model struct {
 	// gets a bell re-enters Done, and two concurrent CleanupSession calls
 	// would race one worktree.
 	inFlightEffects map[string]struct{}
+
+	// effectsDisownedUntil suppresses this client's transition effects while a
+	// daemon it just spawned is coming up. Both would otherwise own the same
+	// event: newModel spawns and starts self-polling immediately, but the
+	// reconnect probe only lands a probe interval later. The same race
+	// reopens whenever a daemon this client was actually connected to later
+	// dies and gets respawned, which is why arming is not simply "once" - see
+	// daemonSeenSinceArm.
+	effectsDisownedUntil time.Time
+
+	// daemonSeenSinceArm is true once this client has actually connected to a
+	// daemon - dialed in newModel, or reconnected in handleProbeResult - since
+	// effectsDisownedUntil was last armed. spawnDaemonOnce re-arms the grace
+	// when this is true, or when the deadline has never been armed at all,
+	// and clears it on every arm.
+	//
+	// It is set only by a real connection, never by a spawn attempt merely
+	// succeeding: handleProbeResult calls spawnDaemonOnce again on every
+	// failed probe, but a failed probe never touches this field, so a daemon
+	// that keeps spawning but never actually comes up cannot chain re-arms.
+	// Without this gate, a re-arm on every spawn would suppress effects for
+	// about spawnGrace out of every spawnCooldown (5s of every 15s at the
+	// current values), recurring for as long as the daemon keeps failing.
+	daemonSeenSinceArm bool
 
 	// UI state
 	cursor          int
@@ -229,6 +260,7 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		_ = conn.SetReadDeadline(time.Now().Add(firstSnapshotTimeout))
 		m.daemonConn = conn
 		m.daemonDecoder = protocol.NewDecoder(conn)
+		m.daemonSeenSinceArm = true
 	} else if panel {
 		m.spawnDaemonOnce()
 	}
@@ -256,7 +288,16 @@ func (m *Model) spawnDaemonOnce() {
 	m.lastSpawn = time.Now()
 	if err := daemonSpawner(); err != nil {
 		m.addNotification("could not start daemon: "+err.Error(), "warning")
+		return
 	}
+	if m.effectsDisownedUntil.IsZero() || m.daemonSeenSinceArm {
+		m.effectsDisownedUntil = time.Now().Add(spawnGrace)
+		m.daemonSeenSinceArm = false
+	}
+}
+
+func (m *Model) effectsDisowned() bool {
+	return time.Now().Before(m.effectsDisownedUntil)
 }
 
 // startPoll is the only place that issues a collectCmd. It refuses to issue a
@@ -1048,6 +1089,7 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 	// before that straggler arrives.
 	m.daemonConn = msg.Conn
 	m.daemonDecoder = msg.Decoder
+	m.daemonSeenSinceArm = true
 	m.daemonReady = false
 	m.addNotification("daemon back, streaming snapshots", "info")
 
@@ -1322,7 +1364,7 @@ func (m *Model) checkStateTransitions(local bool) []tea.Cmd {
 		if notify {
 			m.addNotification(fmt.Sprintf("%s → %s", ev.Session, ev.New), notifSeverity(ev.New))
 		}
-		if !local {
+		if !local || m.effectsDisowned() {
 			continue
 		}
 
