@@ -5,23 +5,34 @@ TUI dashboard for tmux sessions. Monitors git status and GitHub PR state across 
 ## In-flight design work
 
 An approved 6-phase design is turning the session list into the primary surface, with
-sessions expanded next to it. Phases 0, 1 and 2 are merged. The three items phase 2 listed
-as blocking phase 3 are **merged to main** as commit 31721d4 on 2026-07-29. The blocker branch was
-`phase-2-blockers`; its history is in that merge commit. Phase 3 is built on branch
-`phase-3-panel`, which spans **two repositories** - `~/vigil` and `~/dotfiles`, both on a
-branch of that name - and neither half works without the other.
+sessions expanded next to it. **Phases 0, 1, 2 and 3 are merged.** Phase 2's three blockers
+landed as `31721d4`. Phase 3 landed on 2026-07-29 as `a785fb1` here and `fefeeb1` in
+`~/dotfiles`; it spanned **two repositories** and neither half works without the other, so
+a change to one usually needs the other. The branches were `phase-3-panel` in both.
+
+**Phase 4 is next: `vigil dispatch <url-or-id>`, submitting a job to the daemon.** The
+parent design says not to plan it until phase 3 has been lived on, and phase 3 has been
+merged for as long as you have been reading this - so live on it first. Phase 3 is the
+phase that makes N attached panels normal, which is the condition phase 4 inherits.
+
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
 `internal/view`'s layout, or the launch path in `~/dotfiles`:
 
+- `docs/superpowers/2026-07-29-phase-3-handoff.md` - current state, what phase 3 changed,
+  the verification results and what they do NOT prove, the deferred list and the landmines.
+  **Start here.**
 - `docs/superpowers/specs/2026-07-29-phase-3-panel-by-default-design.md` - the phase 3
-  design. Its "What this does not fix" section is the honest account of the effect-ownership
-  race and is worth reading before touching `spawnDaemonOnce` or `handleDaemonLost`.
-- `docs/superpowers/plans/2026-07-29-phase-3-panel-by-default.md` - the phase 3 plan. Two
-  of its briefs carry inline **Correction** blocks where the shipped code diverged from
-  what they prescribed; the corrections are right and the surrounding brief is not.
-- `docs/superpowers/2026-07-28-phase-2-blockers-handoff.md` - current state, the debt
-  still open, the landmines, and the verification results (the four load-bearing checks are
-  run and passed; four smaller ones are not). **Start here.**
+  design, reconciled with what shipped. Its "What this does not fix" section is the honest
+  account of the effect-ownership race and is worth reading before touching
+  `spawnDaemonOnce` or `handleDaemonLost`.
+- `docs/superpowers/plans/2026-07-29-phase-3-panel-by-default.md` - the phase 3 plan. Six
+  of its briefs contained defects written by the plan's author, four of them tests that
+  would have passed with their subject deleted. Where a brief and the shipped code
+  disagree, the code is right. Read the handoff's process notes before trusting any brief
+  in it.
+- `docs/superpowers/2026-07-28-phase-2-blockers-handoff.md` - the state phase 3 started
+  from. Still current on the daemon, the transition split and every landmine phase 3 did
+  not touch. Superseded only where the phase 3 handoff says so.
 - `docs/superpowers/2026-07-27-phase-2-handoff.md` - the state phase 2 merged at. Still
   the best account of the daemon and panel work, but superseded on the three blockers and
   on the claim that review-thread data is detail-panel-only.
