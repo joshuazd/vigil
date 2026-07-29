@@ -107,9 +107,23 @@ func (r Runner) Run(ctx context.Context, ev Event)
 `Event` deliberately carries no `IsCurrent`. The model's auto-cleanup guard is
 `!s.IsCurrent`, but the daemon never annotates `IsCurrent` - that is per-tmux-client - so a
 daemon trusting the field would read `false` and clean up the session the user is sitting
-in. `Runner.Run` therefore resolves it itself with `fetch.CurrentSession` at effect time and
-skips cleanup on a match. One extra tmux call, only on a `Done` transition with
-`auto_cleanup` on, and it makes `Event` contain only daemon-knowable data.
+in. `Runner.Run` therefore resolves it itself at effect time. One extra tmux call, only on
+a `Done` transition with `auto_cleanup` on, and it makes `Event` contain only
+daemon-knowable data.
+
+**AMENDED during execution (task 5, approved).** This section originally specified
+`fetch.CurrentSession` and "skips cleanup on a match". That is what shipped in the first
+implementation and it was wrong twice over. `CurrentSession` returns `""` on any tmux
+error and `""` never equals a session name, so a tmux failure *disabled* the guard while
+`action.builtinCleanup` went on to `git worktree remove --force`; and it protects at most
+one session, resolving from an inherited `TMUX_PANE` that on the live daemon named a pane
+that no longer existed. With N clients a `Done` event for another client's session would
+have killed it. The shipped guard is `fetch.AttachedSessions(ctx, cmd) (map[string]bool, error)`
+over `tmux list-sessions -F '#{session_name}|#{session_attached}'`, and it fails closed:
+an error skips cleanup and logs, a session absent from the map skips, and any
+`session_attached` value other than `"0"` counts as attached. `Runner.Run` also rejects an
+event with an empty `Session`, `PanePath` or `GitRoot`, with a log line. See
+`docs/superpowers/2026-07-28-phase-2-blockers-handoff.md`.
 
 An `EffectRunner` interface rather than a package-level function, because `config.RunHook`
 shells out through `exec.CommandContext` rather than through `fetch.Commander`, so a
@@ -211,6 +225,15 @@ An invariant test pins the two apart: every frozen threshold must admit at least
 (`threshold >= fixed + nameMin`), which is what stops a future edit to a fixed cost from
 silently producing a sub-`nameMin` name at a tier boundary.
 
+**AMENDED during execution (task 8).** That test shipped as
+`TestFrozenThresholdsAdmitAUsefulName` at 1f8cb7e and was replaced at 15357ec by
+`TestTierBoundariesAreFrozen`, which pins the tier chosen on both sides of all five
+boundaries - stronger against threshold drift, weaker on this particular invariant, since
+its name-width assertion is computed from the tier's own fixed cost and is therefore
+self-referential. A fixed-cost edit is still caught, by `TestTableNeverExceedsItsWidth`.
+Lowering `nameMin` is caught by nothing; `nameMin` never binds. The comment in
+`internal/view/layout.go` still names the deleted test.
+
 The durable part is a test asserting `VisibleWidth(renderRow(...)) == layout.Total()` at
 every tier. The constants drifted from the renderers precisely because nothing compared
 them, and the existing `Total() <= width` invariant passes happily while rows come out
@@ -246,6 +269,17 @@ it has none today and now runs unattended.
 Double cleanup cannot happen by construction. `Detect` fires on change, so while a slow
 cleanup is in flight the next poll still sees `Done` and emits nothing.
 
+**AMENDED during execution (task 7 and out-of-band fix 6, approved). That claim is
+false.** `session.State()` checks `HasBell` *before* the merged check, so a merged session
+that gets a bell oscillates `Done -> Attention -> Done` and yields two `New == Done`
+events. With `auto_cleanup` on and a cleanup slower than a tick, that is two
+`CleanupSession` calls racing one worktree - measured at four concurrent goroutines for one
+session on the daemon and three on a self-polling client. Both paths now serialize
+`Done`-bound effects per session: `effectsMu` plus an `inFlightEffects` map in
+`internal/daemon`, and an `inFlightEffects` map on `Model` cleared by an `EffectDoneMsg` so
+every access stays on the UI goroutine. Only `Done` is gated; gating every effect made the
+`notify` hook fire once where a self-polling client fired three times.
+
 A `Snapshot` that fails in the daemon is unchanged: `poll` logs once on the transition into
 failure and once on recovery.
 
@@ -267,7 +301,7 @@ it names were removed?" is answered by mutating the code, not by reading the tes
 | `VisibleWidth(renderRow(...)) == layout.Total()` at every tier | Restore `colIndex` or `colState` to 2 |
 | Every frozen tier threshold satisfies `threshold >= fixed + nameMin` | Lower a threshold below its fixed cost plus 8 |
 | `LayoutForWidth(40)` still picks the compact tier | Recompute the thresholds from the fixed costs |
-| `Runner.Run` skips cleanup when `fetch.CurrentSession` names the event's session | Trust an `IsCurrent` field instead |
+| `Runner.Run` skips cleanup when any client is attached to the event's session (amended from `fetch.CurrentSession`, see above) | Trust an `IsCurrent` field instead |
 | The polling query contains no `comments(`, and `UnresolvedComments` is still populated | Restore the inner connection |
 
 The identical-paths test is the one that matters most structurally: "both paths must render
