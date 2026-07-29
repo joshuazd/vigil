@@ -159,6 +159,30 @@ func TestProbeReconnectsAndRetiresSelfPolling(t *testing.T) {
 	}
 }
 
+// TestProbeReconnectSetsDaemonSeenSinceArm covers handleProbeResult's half of
+// the spawn-grace re-arm rule: only a real connection may set
+// daemonSeenSinceArm, and a live probe result is one of the two places that
+// happens (newModel's dial is the other, covered by
+// TestNewConnectedToADaemonDoesNotPrimePollInFlight in panel_test.go). A
+// panel whose daemon dies, reconnects here, then dies again needs this flag
+// true to re-arm the spawn grace on the second respawn.
+func TestProbeReconnectSetsDaemonSeenSinceArm(t *testing.T) {
+	m := newTestModel()
+	m.epoch = 5
+
+	conn := serveOneSnapshot(t, &protocol.Snapshot{Version: protocol.Version})
+	got, _ := m.Update(DaemonProbeResultMsg{
+		Epoch:   m.epoch,
+		Conn:    conn,
+		Decoder: protocol.NewDecoder(conn),
+	})
+	next := got.(Model)
+
+	if !next.daemonSeenSinceArm {
+		t.Error("a live probe result did not set daemonSeenSinceArm")
+	}
+}
+
 func TestStaleProbeResultClosesTheConnection(t *testing.T) {
 	m := newTestModel()
 	m.epoch = 4

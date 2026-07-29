@@ -79,8 +79,10 @@ type Model struct {
 	// It is set only by a real connection, never by a spawn attempt merely
 	// succeeding: handleProbeResult calls spawnDaemonOnce again on every
 	// failed probe, but a failed probe never touches this field, so a daemon
-	// that keeps spawning but never actually comes up cannot chain re-arms
-	// into suppressing effects indefinitely.
+	// that keeps spawning but never actually comes up cannot chain re-arms.
+	// Without this gate, a re-arm on every spawn would suppress effects for
+	// about spawnGrace out of every spawnCooldown (5s of every 15s at the
+	// current values), recurring for as long as the daemon keeps failing.
 	daemonSeenSinceArm bool
 
 	// UI state

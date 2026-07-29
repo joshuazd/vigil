@@ -178,6 +178,9 @@ func TestNewConnectedToADaemonDoesNotPrimePollInFlight(t *testing.T) {
 	if m.pollInFlight {
 		t.Error("a daemon-fed model should not show a self-poll in flight")
 	}
+	if !m.daemonSeenSinceArm {
+		t.Error("New's successful dial did not set daemonSeenSinceArm, so a later respawn after this daemon dies would never re-arm the spawn grace")
+	}
 }
 
 // TestPanelRespawnsARateLimitedDaemon keeps a crashed daemon from leaving
