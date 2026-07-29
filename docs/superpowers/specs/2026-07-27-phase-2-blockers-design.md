@@ -226,13 +226,15 @@ An invariant test pins the two apart: every frozen threshold must admit at least
 silently producing a sub-`nameMin` name at a tier boundary.
 
 **AMENDED during execution (task 8).** That test shipped as
-`TestFrozenThresholdsAdmitAUsefulName` at 1f8cb7e and was replaced at 15357ec by
-`TestTierBoundariesAreFrozen`, which pins the tier chosen on both sides of all five
+`TestFrozenThresholdsAdmitAUsefulName` at 1f8cb7e, was deleted at 15357ec in favour of the
+new `TestTierBoundariesAreFrozen`, which pins the tier chosen on both sides of all five
 boundaries - stronger against threshold drift, weaker on this particular invariant, since
 its name-width assertion is computed from the tier's own fixed cost and is therefore
-self-referential. A fixed-cost edit is still caught, by `TestTableNeverExceedsItsWidth`.
-Lowering `nameMin` is caught by nothing; `nameMin` never binds. The comment in
-`internal/view/layout.go` still names the deleted test.
+self-referential - and was restored at 76d7779, so at HEAD both tests exist
+(`internal/view/layout_test.go`). A fixed-cost edit is caught by `TestTableNeverExceedsItsWidth`
+regardless. Lowering `nameMin` is caught by nothing; `nameMin` never binds. The comment in
+`internal/view/layout.go` correctly names `TestFrozenThresholdsAdmitAUsefulName`, which exists
+and passes.
 
 The durable part is a test asserting `VisibleWidth(renderRow(...)) == layout.Total()` at
 every tier. The constants drifted from the renderers precisely because nothing compared

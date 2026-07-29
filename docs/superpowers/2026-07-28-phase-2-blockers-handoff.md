@@ -1,7 +1,7 @@
 # Phase 2 blockers: state after the branch
 
-Written 2026-07-28, at the point the `phase-2-blockers` branch was finished (43 commits,
-HEAD `2f7173c`). Suite green under `-race`, `golangci-lint` clean. Read this plus the specs
+Written 2026-07-28, at the point the `phase-2-blockers` branch was finished (45 commits,
+HEAD `76d7779`). Suite green under `-race`, `golangci-lint` clean. Read this plus the specs
 before starting phase 3.
 
 - Design for this work: `docs/superpowers/specs/2026-07-27-phase-2-blockers-design.md`.
@@ -173,7 +173,7 @@ now carries a marked amendment stating what shipped and why, and the testing tab
 updated. Two other sections of that doc were amended the same way, because they were also
 falsified by execution: "Double cleanup cannot happen by construction" (it can, via the
 bell oscillation above), and the `threshold >= fixed + nameMin` invariant test, which
-shipped and was then replaced.
+shipped, was deleted, and was then restored - see the layout note below.
 
 The executed plan's "Landmines" section still says "`Runner.Run` skips cleanup for the
 current session before reaching this". That is stale in the same way. The concern behind it
@@ -186,37 +186,30 @@ client.
 ## The path-parity gap, measured
 
 `CLAUDE.md` requires the daemon-fed and self-polling paths to behave identically. There is
-a real, quantified exception. Stating it rather than glossing it:
+a real, quantified exception, and the earlier measurement below was superseded. Stating the
+current one rather than glossing it:
 
-**Seven transitions on one session, with the first `Done`-bound effect blocked, produced 5
-`notify` hook invocations on the daemon path and 7 on the model path.** The difference is
-exactly the two repeat-`Done` events that arrived during their own cleanup. Each is logged
-by the daemon (`transition effects for %s still running, skipping a repeat Done`). Nothing
-wider than that was found: an earlier version of the gate covered every effect rather than
-only the destructive one, and that produced 1 notify invocation against a self-polling
-client's 3, silently. Narrowing the gate to `ev.New == session.Done` is what reduced the
-divergence to these two events.
+**Re-measured at HEAD `76d7779` (the final whole-branch review): seven transitions on one
+session, with the first `Done`-bound effect blocked, produced 5 `notify` hook invocations on
+the daemon path and 5 on the model path. Toasts are 7 of 7 on both.** The gap that used to
+separate the two paths is closed. The earlier figure (5 on the daemon path, 7 on the model
+path) was measured at `ebbdc83`, before the client-side gate landed at `dc558fd`, and was
+never re-run until this review - do not cite "model: 7" as current.
 
-**Caveat on those numbers, and it is important.** They were measured at `ebbdc83`, before
-the client-side gate landed at `dc558fd`. At HEAD, `internal/model`'s
-`checkStateTransitions` applies the same `Done`-only per-session gate the daemon applies,
-so the two paths are structurally identical on this behaviour and the model path should now
-also skip a repeat `Done` and its hook. A review confirmed the two paths agree on all four
-behaviours the gate implies (gate only `Done`, do not gate when not owning effects, leave
-non-`Done` ungated, re-dispatch after completion), but **the 5-versus-7 measurement was not
-re-run after `dc558fd`**, so treat "model: 7" as describing the older code.
+The surviving deviation is not between the two paths, it is from "the `notify` hook fires
+once per real transition": a repeat `Done` arriving during its own session's slow cleanup
+loses its hook, on both paths, exactly the two repeat-`Done` events out of seven transitions.
+Each is logged by the daemon (`transition effects for %s still running, skipping a repeat
+Done`). Only the hook is suppressed - **the toast still fires**, because
+`checkStateTransitions` adds the notification before the `!local` check and before the gate.
+An earlier version of this ledger claimed the toast was lost too; that was wrong, and the
+measurement above (7 of 7) is what corrects it. The two remaining path differences are that
+the daemon logs each skip and a client cannot (its `Runner` has a nil `Logf`), and that the
+daemon holds a mutex where the model relies on everything happening on the UI goroutine.
 
-What that means for the invariant: the surviving deviation is not between the two paths, it
-is from "the `notify` hook fires once per real transition". A repeat `Done` arriving during
-a slow cleanup loses its hook, on both paths. Toasts are unaffected - they are per-client
-and ungated, so all seven still appear on screen. The two remaining path differences are
-that the daemon logs each skip and a client cannot (its `Runner` has a nil `Logf`), and
-that the daemon holds a mutex where the model relies on everything happening on the UI
-goroutine.
-
-The comment at `internal/daemon/daemon.go:59-61` still claims the notify hook "fires once
-per real transition on both the daemon-fed and self-polling paths". Given the above that is
-at best imprecise. Fix the comment.
+The comment at `internal/daemon/daemon.go:59-61` was fixed at `76d7779` and no longer makes
+the "fires once per real transition on both paths" claim; it now describes the gate and the
+repeat-`Done` skip directly. No further action needed here.
 
 ## Tripwire: the next early return in `Runner.Run`
 
@@ -269,7 +262,11 @@ socket, and `tmux capture-pane -p` to read what actually rendered.
   refetch.
 - [ ] **`make install` while a daemon runs.** Still the temp-file-and-rename path from
   phase 2. Confirm the new binary runs: overwriting a running image's inode invalidates its
-  code signature and macOS then SIGKILLs every later exec of that path.
+  code signature and macOS then SIGKILLs every later exec of that path. **Also restart the
+  daemon.** This branch makes the daemon an owner of transition effects for the first time;
+  the code-signing check above only proves the new binary launches, not that the *running*
+  daemon (the old image, with no transition wiring) has been replaced. Skipping the restart
+  leaves every daemon-fed panel's `notify` hook firing zero times. See the landmines.
 
 Three panels were live against one installed daemon throughout this work, so the N-clients
 configuration exists on the machine without setting one up. Note that the panels and the
@@ -284,7 +281,10 @@ verification is not, or where something is dead, or where a comment is false.
 **`internal/transition` and the cleanup path**
 
 - `action.builtinCleanup` still runs `git worktree remove --force` after a *failed*
-  `tmux kill-session`. The session survives and its worktree does not.
+  `tmux kill-session`. The session survives and its worktree does not. The attached-session
+  guard makes this hard to reach on the daemon and self-polling routes, but that guard does
+  not run on the interactive/batch `x` path (see the landmines), so the mitigation is
+  partial, not general.
 - `internal/fetch/tmux.go`'s `TrimRight(line, "\r")` is dead: the per-value `TrimSpace`
   already strips CR. Proved by a 400k-sample differential run with zero diffs. Worse, the
   function's doc comment reads as though that line is what fixed the leading-whitespace
@@ -296,7 +296,13 @@ verification is not, or where something is dead, or where a comment is false.
 - Two contradictory lines for one session are last-write-wins, so line order decides.
   Unreachable through tmux, which enforces unique session names.
 - `fetch.BellFlags` still has both weaknesses `AttachedSessions` was fixed for: it splits
-  on the *first* pipe and trims the whole output. Non-destructive path, left alone.
+  on the *first* pipe and trims the whole output. **This is on the destructive path, not
+  off it** - `session.State()` checks `HasBell` before the merged check, so a bell mis-keyed
+  by the first-pipe split, or lost to the leading-whitespace trim on tmux's first-sorted
+  session, turns `Attention` into `Done`, and `Done` is the only state that reaches
+  `CleanupSession`. Deferred for merge anyway, because it needs a session name containing
+  `|` or a leading space and the attached-session guard still holds, but the earlier framing
+  of this as a non-destructive path was wrong and should not carry forward as written.
 - `return` instead of `continue` on a skip in the daemon's effect loop survives the whole
   suite, and that mutant permanently drops every later event in the same `Detect` batch,
   including another session's notify *and* cleanup. A ~30-line two-session test catches it.
@@ -324,7 +330,11 @@ verification is not, or where something is dead, or where a comment is false.
 - The `notifSeverity` test table omits `Unresolved` and the default warning case.
   Pre-existing, narrow.
 - `internal/model` calls `action.CleanupSession` with `context.Background()` and no
-  attached-session guard on the interactive `x` path and on the batch path. See the
+  attached-session guard on the interactive `x` path and on the batch path. The
+  `context.Background()` and missing-attached-guard halves are defensible - the user named a
+  session and confirmed twice. What is not defensible, and is omitted from that framing: `x`
+  and batch `x` do not participate in `inFlightEffects` at all, so either can start a second
+  `CleanupSession` against a worktree an automatic route is already cleaning up. See the
   landmines.
 
 **Review comments and the gh budget**
@@ -332,7 +342,11 @@ verification is not, or where something is dead, or where a comment is false.
 - **Nothing invalidates the per-branch comment cache automatically.** Not new comments, not
   a merged-and-reopened PR, not a PR state change. `r` clears it, and that is the only
   escape hatch. A TTL and invalidation on PR state change were deliberately left out of
-  scope.
+  scope. The sharper half, omitted from that framing: a *failed* fetch is cached as a
+  settled empty result, not merely a stale one - `FetchReviewComments` returns nil on error,
+  `Update` normalises nil to an empty slice, and `refreshDetailCmd`'s `loaded` check then
+  suppresses every retry. Measured: three failing `gh` retries, then the panel renders
+  `☐ 3` next to "No review comments" indefinitely, until `r`. See the landmines.
 - Rapid revisits to a branch before an in-flight fetch answers can duplicate the `gh` call.
   Worst case is otherwise N calls for N `Unresolved` sessions on N distinct branches,
   visited once each; shared branches and revisits are free.
@@ -346,9 +360,10 @@ verification is not, or where something is dead, or where a comment is false.
   for fixed-cost drift is `TestTableNeverExceedsItsWidth`, which catches a one-column drift
   because a wider name pushes the row past the pane.
 - `internal/view/layout.go`'s comment names `TestFrozenThresholdsAdmitAUsefulName`. That
-  test was replaced at `15357ec` and does not exist. The `threshold >= fixed + nameMin`
-  invariant is consequently not asserted anywhere as such, and lowering `nameMin` is caught
-  by nothing. `nameMin` never binds, so nothing breaks today.
+  test was deleted at `15357ec` but restored at `76d7779`; at HEAD it exists, passes, and is
+  what the comment correctly refers to. Lowering `nameMin` is still caught by nothing -
+  `nameMin` never binds, so nothing breaks today, but the invariant test exists to assert the
+  floor the frozen thresholds must respect.
 - Removing the git cell's `padRight` is uncaught. Pre-existing. Catching it needs a
   narrower fixture, which would weaken the truncation coverage the wide fixture provides -
   a deliberate trade.
@@ -368,6 +383,23 @@ verification is not, or where something is dead, or where a comment is false.
   which is why worktree removal is hard to unit-test.
 - `fetch.nwoCache` and `defaultBranchCache` are package-level mutable state, against the
   project's no-global-mutable-state convention.
+
+**Combinations worse than their parts**
+
+Each deferred item above is individually true and individually narrow. Three combinations of
+them are not narrow, and each is invisible if you only read the per-item list:
+
+1. **`BellFlags` mis-key, plus `HasBell` checked before merged, plus force-remove after a
+   failed kill.** A session whose bell is mis-attributed reads `Done` instead of `Attention`,
+   enters the destructive path, and if `kill-session` then fails, the worktree is
+   force-removed anyway. A bell the user is waiting on is ignored and the worktree goes.
+2. **Route 3's (`x`, batch `x`) missing `inFlightEffects` gate, plus force-remove after a
+   failed kill, plus `context.Background()`.** Two concurrent cleanups can run against one
+   worktree, either able to force-remove while the other is mid-kill, neither cancelled by
+   quitting.
+3. **No automatic comment-cache invalidation, plus a failed fetch cached as a settled empty
+   result.** The documented item alone is "data can be stale". The compound is "data can be
+   wrong and look settled", with the panel showing `☐ 3` beside "No review comments".
 
 **Repository hygiene**
 
@@ -390,9 +422,16 @@ verification is not, or where something is dead, or where a comment is false.
 
 ## Landmines and sharp edges
 
-- **The comment cache is never invalidated automatically.** Stale review comment bodies
-  persist until `r` or a restart. This is the sharpest new edge, because the data looks
-  current and the panel gives no indication of its age.
+- **The comment cache is never invalidated automatically, and a failed fetch is cached as a
+  settled empty result, forever.** Stale review comment bodies persist until `r` or a
+  restart - that alone is the "data can be stale" version. The sharper version, confirmed by
+  a review with a `MockCommander` whose `gh` handler errors: after three failing retries,
+  `FetchReviewComments` returns nil, `Update`'s `PRCommentsMsg` case normalises that nil to
+  an empty slice, and `refreshDetailCmd`'s `loaded` check then suppresses every further
+  attempt. The panel renders `☐ 3` next to "No review comments" - the header says there are
+  unresolved comments, the body says there are none - indefinitely, until `r`. This is the
+  sharpest edge in the branch, because the data does not merely age, it looks settled and
+  wrong at the same time.
 - **There is no `recover()` around `Effects.Run`, on either path.** A panicking hook kills
   the daemon. Verified on both paths, and a wedge table confirmed the failure mode is a
   crash rather than a silent hang, which is the better of the two but is still a crash.
@@ -405,17 +444,55 @@ verification is not, or where something is dead, or where a comment is false.
   is a hook whose grandchild inherits stdout and outlives the killed `sh`, since
   `cmd.Output()` waits for the pipe. Treat 65s as the bound and 0.85ms as the typical case,
   and do not quote either as settled.
-- **A self-polling client's cleanup failures are silent.** It constructs its `Runner` with
-  a nil `Logf`. The design routes failures to the daemon log and a client has no log;
-  writing to stderr would corrupt the TUI, and `Run` cannot call `addNotification` safely
-  from a `tea.Cmd` goroutine. Accepted, because a client only owns effects when no daemon
-  exists and a failed cleanup leaves the session visible in the next snapshot, which is
-  itself the feedback. It is a small regression from the `ActionResultMsg` toast the
-  interactive path gives.
+- **A self-polling client's auto-cleanup produces no toast at all, success or failure, and no
+  follow-up forced refresh.** It constructs its `Runner` with a nil `Logf`. The design routes
+  failures to the daemon log and a client has no log; writing to stderr would corrupt the
+  TUI, and `Run` cannot call `addNotification` safely from a `tea.Cmd` goroutine. Accepted,
+  because a client only owns effects when no daemon exists (the degraded mode) and a failed
+  cleanup leaves the session visible in the next snapshot, which is itself the feedback. Note
+  precisely what regressed, corrected from an earlier framing here that understated it: on
+  `main`, the automatic cleanup path itself emitted `ActionResultMsg` for both outcomes, not
+  only the interactive `x` path. The toast that is missing now is one `main`'s own automatic
+  route used to give, not merely one borrowed from the manual route.
 - **`internal/model` still calls `action.CleanupSession` with `context.Background()` and no
-  attached-session guard on the interactive `x` path** (and on the batch path). Arguably
-  fine - the user asked for it - but it means the hardened guards live only on the
-  automatic path, and a `context.Background()` cleanup is not cancelled by quitting.
+  attached-session guard on the interactive `x` path** (and on the batch path). The
+  `context.Background()` and missing-attached-guard halves are defensible - the user named a
+  session and confirmed twice, and a cleanup the user explicitly asked for arguably should
+  finish even if they quit. **What is not defensible: `x` and batch `x` do not participate in
+  `inFlightEffects` at all**, the one guard whose entire purpose is "never run two cleanups
+  against one worktree" - `grep -n inFlightEffects internal/model/model.go` never shows up
+  inside `cleanupCmd` or `batchCleanupCmd`. With `auto_cleanup = true`, pressing `x` on a
+  session whose automatic Done-bound cleanup is already in flight starts a second
+  `CleanupSession` against the same worktree. Acceptable for this merge because
+  `auto_cleanup` is off by default and `x` needs two keypresses, but it is the last live
+  instance of this branch's headline bug and should be first on the phase 3 list, ahead of
+  the ownership-handoff item below.
+- **The daemon/client ownership handoff is not atomic during a daemon's startup window.**
+  Measured with two independent owners over one shared worktree, running two real
+  transitions: `notify=4` (want 2), `kill-session=2` (want 1). Reachable because `newModel`
+  spawns a daemon and starts self-polling immediately, while the client's reconnect probe
+  only lands at `daemonProbeInterval` later - a window of roughly 1 to 2.3 seconds (the probe
+  interval plus the ~300ms dial) opens every time `vigil --panel` starts with no daemon
+  running, during which both the freshly spawned daemon and the still-self-polling client can
+  run effects for the same event. This is new with this branch: on `main` the daemon never
+  ran effects, so a self-polling client was always the only owner; making the daemon an owner
+  is what creates the overlap. Not a merge blocker - the window is short, needs a real
+  transition inside it, and the pre-branch behaviour (N clients, every event) was strictly
+  worse - but it belongs here, and the cheap phase 3 fix is for a client to stop owning
+  effects the moment it has spawned a daemon, rather than the moment it reconnects.
+  **Deployment corollary, worth a line on its own:** after `make install` without restarting
+  the already-running daemon, that daemon is the old image with no transition wiring at all.
+  Panels are daemon-fed, so the `notify` hook fires **zero** times - the exact condition the
+  project's merge gate was set against. The `make install` checklist item in "Verification
+  status" above now says so.
+- **`internal/protocol` treats a version mismatch as a permanent per-snapshot error**
+  (`protocol.go:70-72`), which gives the ownership-handoff window above an unbounded form the
+  first time `Version` changes: a client dialing a daemon of a different `Version` reconnects
+  every 2s and falls back every time, self-polling in each gap while the daemon also owns
+  effects, forever rather than for a bounded startup window. `Version` is 1 on both sides
+  today, so this is latent, and it is explicitly out of scope for this branch - but phase 3
+  is where a version bump would plausibly happen, and a permanent decode error should
+  probably stop the client re-dialing and say so rather than oscillating.
 - **`action.builtinCleanup` still force-removes a worktree after a failed
   `kill-session`.** The kill error is discarded. With the attached-session guard in front
   of it this is hard to reach automatically, but the interactive path has no such guard.
@@ -533,9 +610,13 @@ One thing about this document. The phase 2 retro recorded that its working ledge
 defect list, the adjudications and the verification results, that the finishing workflow
 deletes the workspace on merge because "git history is the record now", and that git history
 held none of it - the phase 2 handoff exists only because someone reconstructed it before
-the session ended. This document was written from the ledger, before the workspace was
-touched, and every factual claim in it and in `CLAUDE.md` was checked against the code as it
-stands rather than against the ledger. Where the two disagreed, the code won and the
-disagreement is stated: the 5-versus-7 parity numbers predate a fix, the design doc's
-`CurrentSession` reference was reconciled, and the layout comment names a test that no
-longer exists. Write the handoff before deleting the workspace, not after.
+the session ended. This document was originally written from the ledger at `a012fa2`, before
+the workspace was touched, with every factual claim in it and in `CLAUDE.md` checked against
+the code as it stood at that commit rather than against the ledger. That check is correct
+only up to the commit it was run at: the very next commit, `76d7779`, restored
+`TestFrozenThresholdsAdmitAUsefulName` and fixed the `internal/daemon/daemon.go` comment,
+which falsified this document's claim that the layout comment "names a test that no longer
+exists" and the deferred-minor entry asking for the daemon.go fix. Both are corrected above,
+by a later review at HEAD `76d7779`, which also re-ran the 5-versus-7 parity measurement and
+found the gap closed rather than merely predating a fix. Write the handoff before deleting
+the workspace, not after - and re-check it against HEAD if any commit lands after it does.
