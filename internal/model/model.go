@@ -64,12 +64,24 @@ type Model struct {
 	// effectsDisownedUntil suppresses this client's transition effects while a
 	// daemon it just spawned is coming up. Both would otherwise own the same
 	// event: newModel spawns and starts self-polling immediately, but the
-	// reconnect probe only lands a probe interval later.
-	//
-	// Set once, on the first spawn only. handleProbeResult respawns on every
-	// failed probe, so re-arming this would let a daemon that never starts
-	// suppress effects forever.
+	// reconnect probe only lands a probe interval later. The same race
+	// reopens whenever a daemon this client was actually connected to later
+	// dies and gets respawned, which is why arming is not simply "once" - see
+	// daemonSeenSinceArm.
 	effectsDisownedUntil time.Time
+
+	// daemonSeenSinceArm is true once this client has actually connected to a
+	// daemon - dialed in newModel, or reconnected in handleProbeResult - since
+	// effectsDisownedUntil was last armed. spawnDaemonOnce re-arms the grace
+	// when this is true, or when the deadline has never been armed at all,
+	// and clears it on every arm.
+	//
+	// It is set only by a real connection, never by a spawn attempt merely
+	// succeeding: handleProbeResult calls spawnDaemonOnce again on every
+	// failed probe, but a failed probe never touches this field, so a daemon
+	// that keeps spawning but never actually comes up cannot chain re-arms
+	// into suppressing effects indefinitely.
+	daemonSeenSinceArm bool
 
 	// UI state
 	cursor          int
@@ -246,6 +258,7 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		_ = conn.SetReadDeadline(time.Now().Add(firstSnapshotTimeout))
 		m.daemonConn = conn
 		m.daemonDecoder = protocol.NewDecoder(conn)
+		m.daemonSeenSinceArm = true
 	} else if panel {
 		m.spawnDaemonOnce()
 	}
@@ -275,13 +288,14 @@ func (m *Model) spawnDaemonOnce() {
 		m.addNotification("could not start daemon: "+err.Error(), "warning")
 		return
 	}
-	if m.effectsDisownedUntil.IsZero() {
+	if m.effectsDisownedUntil.IsZero() || m.daemonSeenSinceArm {
 		m.effectsDisownedUntil = time.Now().Add(spawnGrace)
+		m.daemonSeenSinceArm = false
 	}
 }
 
 func (m *Model) effectsDisowned() bool {
-	return !m.effectsDisownedUntil.IsZero() && time.Now().Before(m.effectsDisownedUntil)
+	return time.Now().Before(m.effectsDisownedUntil)
 }
 
 // startPoll is the only place that issues a collectCmd. It refuses to issue a
@@ -1073,6 +1087,7 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 	// before that straggler arrives.
 	m.daemonConn = msg.Conn
 	m.daemonDecoder = msg.Decoder
+	m.daemonSeenSinceArm = true
 	m.daemonReady = false
 	m.addNotification("daemon back, streaming snapshots", "info")
 
