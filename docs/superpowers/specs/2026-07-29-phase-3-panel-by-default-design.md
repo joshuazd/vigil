@@ -98,7 +98,8 @@ onto the shared function, since that is where the behaviour now lives.
 
 ### `create_tmux_session` gains a panel step
 
-Between `setup_secondary_pane` and `launch_claude_in_pane`:
+Immediately after the `server` window is created and **before**
+`setup_secondary_pane`:
 
 ```bash
 if [ "$(vigil config get panel_auto)" = "true" ]; then
@@ -131,8 +132,21 @@ the thing about to be split in half really is.
 
 ### Ordering
 
-Panel after the nit split, so that split sees post-panel width. Panel before
-`launch_claude_in_pane`, so `respawn-pane -k` lands on a pane whose geometry is final.
+The panel goes in **before** `setup_secondary_pane`, and this is the whole reason the
+`pane_width` change above is worth making. The two are one change in two files: the panel
+must already be taking its 40 columns at the moment the nit split measures, or the split
+measures a pane that is about to be narrowed and the corrected metric reports a stale
+number. Panel second would leave `setup_secondary_pane` reading full width and choosing
+`-h` at an effective 160 - the exact bug the `window_width` fix exists to remove.
+
+The panel is also before `launch_claude_in_pane`, so `respawn-pane -k` lands on a pane
+whose geometry is final.
+
+Resulting order in `create_tmux_session`: `new-session -d` and mark the claude pane →
+`new-window server` → panel → `setup_secondary_pane` → `launch_claude_in_pane` →
+`select-window`. Splitting the window target `=<session>:claude` splits that window's
+active pane, which at that point is the only pane, and `-d` leaves the claude pane active
+for the steps that follow.
 
 ## The vigil side
 
@@ -211,8 +225,20 @@ blockers branch and unchanged here. This closes exactly the spawn-to-reconnect o
 
 ### Dotfiles (bats)
 
-The harness already has what this needs: `setup_tmux_stub`, `assert_arg_after`, and a
-`tests/stubs` directory for a `vigil` stub answering `config get`.
+The harness already has most of what this needs: `setup_tmux_stub`, `assert_arg_after`,
+`tmux_call_args_matching`, and a `tests/stubs` directory to hold a new `vigil` stub
+answering `config get`.
+
+Two harness gaps have to be closed first, and both are the "a stub that ignores its input
+caps how much any mutation can prove" lesson from the blockers retro:
+
+- **The tmux stub answers every `display-message` with one canned value.** Once
+  `panel_geometry` asks for `#{client_height} #{client_width}` and `setup_secondary_pane`
+  asks for `#{pane_width}` in the same run, one value cannot serve both, and a mutant
+  asking the *wrong* question would still receive the *right* answer. The stub must key
+  its answer on the requested format.
+- **No helper exposes call order.** Every existing helper throws position away, so the
+  ordering row below is unassertable as the harness stands.
 
 | Property | Assertion |
 |---|---|
@@ -226,8 +252,8 @@ The harness already has what this needs: `setup_tmux_stub`, `assert_arg_after`, 
 | No panel when disabled | stub returns `false`; `refute_tmux_subcommand` on the panel split |
 | No panel when `vigil` is absent | stub removed from `PATH`; session still created |
 | Panel failure does not abort | `split-window` stub fails; session exists and `respawn-pane` still ran |
-| `setup_secondary_pane` measures the pane | its `display-message` target is the claude pane, not the window |
-| Ordering | panel split recorded after the nit split and before `respawn-pane` |
+| `setup_secondary_pane` measures the pane | its `display-message` asks for `#{pane_width}` and targets the claude pane, not the window |
+| Ordering | the panel split is recorded **before** the nit split, and both before `respawn-pane` |
 | Toggle still toggles | existing `vigil-panel` tests, against the refactored script |
 
 ### Vigil (go, `-race`)
