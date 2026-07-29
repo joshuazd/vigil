@@ -32,6 +32,13 @@ const autoFocusCooldown = 15 * time.Second
 // daemon.
 const spawnCooldown = 15 * time.Second
 
+// spawnGrace is how long a panel that just spawned a daemon waits before it
+// will run transition effects itself. A healthy reconnect lands at
+// daemonProbeInterval plus the dial, well inside this.
+//
+// A var, not a const, so tests shorten it rather than sleeping.
+var spawnGrace = 5 * time.Second
+
 type Model struct {
 	// Data
 	sessions []*session.Session
@@ -53,6 +60,16 @@ type Model struct {
 	// gets a bell re-enters Done, and two concurrent CleanupSession calls
 	// would race one worktree.
 	inFlightEffects map[string]struct{}
+
+	// effectsDisownedUntil suppresses this client's transition effects while a
+	// daemon it just spawned is coming up. Both would otherwise own the same
+	// event: newModel spawns and starts self-polling immediately, but the
+	// reconnect probe only lands a probe interval later.
+	//
+	// Set once, on the first spawn only. handleProbeResult respawns on every
+	// failed probe, so re-arming this would let a daemon that never starts
+	// suppress effects forever.
+	effectsDisownedUntil time.Time
 
 	// UI state
 	cursor          int
@@ -256,7 +273,15 @@ func (m *Model) spawnDaemonOnce() {
 	m.lastSpawn = time.Now()
 	if err := daemonSpawner(); err != nil {
 		m.addNotification("could not start daemon: "+err.Error(), "warning")
+		return
 	}
+	if m.effectsDisownedUntil.IsZero() {
+		m.effectsDisownedUntil = time.Now().Add(spawnGrace)
+	}
+}
+
+func (m *Model) effectsDisowned() bool {
+	return !m.effectsDisownedUntil.IsZero() && time.Now().Before(m.effectsDisownedUntil)
 }
 
 // startPoll is the only place that issues a collectCmd. It refuses to issue a
@@ -1322,7 +1347,7 @@ func (m *Model) checkStateTransitions(local bool) []tea.Cmd {
 		if notify {
 			m.addNotification(fmt.Sprintf("%s → %s", ev.Session, ev.New), notifSeverity(ev.New))
 		}
-		if !local {
+		if !local || m.effectsDisowned() {
 			continue
 		}
 
