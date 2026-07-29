@@ -8,8 +8,8 @@ import "strings"
 // out to the right edge.
 const (
 	colIndicator = 3
-	colIndex     = 2
-	colState     = 2
+	colIndex     = 1
+	colState     = 1
 	colName      = 52
 	colGit       = 18
 	colPR        = 22
@@ -24,6 +24,32 @@ const (
 	// name plus everything else.
 	nameMin = 8
 	sep     = 1
+)
+
+// fixed is every column but the name, including every separator: one between
+// each pair, so the name contributes a separator on both sides when a column
+// follows it.
+const (
+	fullFixed    = colIndicator + sep + colIndex + sep + colState + sep + sep + colGit + sep + colPR // 50
+	noGitFixed   = colIndicator + sep + colIndex + sep + colState + sep + sep + colPR                // 31
+	compactFixed = colIndicator + sep + colState + sep + sep + colPRCompact                          // 19
+	noPRFixed    = colIndicator + sep + colState + sep                                               // 6
+	bareFixed    = colState + sep                                                                    // 2
+)
+
+// The width at which each tier is chosen. Tuned, not derived: fixed+nameMin
+// would move tierNoGit to 39, and width 40 - the landscape panel's default -
+// would stop choosing the compact tier, taking a 9-column name beside a full PR
+// column in exchange for 20 columns of name and a compact one. Every value here
+// is the width that tier is chosen at today, so every layout verified on a real
+// pane stays verified. TestFrozenThresholdsAdmitAUsefulName keeps them honest
+// against the costs above.
+const (
+	tierFull    = 60
+	tierNoGit   = 41
+	tierCompact = 28
+	tierNoPR    = 15
+	tierBare    = 4
 )
 
 // TableLayout is which columns fit a given width and how wide each is. Only
@@ -65,47 +91,32 @@ func (l TableLayout) Total() int {
 // drop in reverse order of what a glance needs: git first, then the quick-jump
 // index (with the PR column going compact at the same time), then the PR, then
 // the indicator, and the state dot only when there is nothing left to give.
-//
-// Each tier's floor is fixed+nameMin, which is what keeps Total() <= width: a
-// tier is only chosen when its own fixed cost plus the smallest useful name
-// already fits.
 func LayoutForWidth(width int) TableLayout {
-	// fixed is every column but the name, including every separator: one
-	// between each pair of columns, so the name contributes a separator on
-	// both sides when a column follows it.
-	const (
-		fullFixed    = colIndicator + sep + colIndex + sep + colState + sep + sep + colGit + sep + colPR // 52
-		noGitFixed   = colIndicator + sep + colIndex + sep + colState + sep + sep + colPR                // 33
-		compactFixed = colIndicator + sep + colState + sep + sep + colPRCompact                          // 20
-		noPRFixed    = colIndicator + sep + colState + sep                                               // 7
-		bareFixed    = colState + sep                                                                    // 3
-	)
-
 	switch {
-	case width >= fullFixed+nameMin: // 60
+	case width >= tierFull:
 		return TableLayout{
 			Indicator: true, Index: true, State: true,
 			Name: clamp(width-fullFixed, nameMin, colName),
 			Git:  colGit, PR: colPR,
 		}
-	case width >= noGitFixed+nameMin: // 41
+	case width >= tierNoGit:
 		return TableLayout{
 			Indicator: true, Index: true, State: true,
 			Name: clamp(width-noGitFixed, nameMin, colName),
 			PR:   colPR,
 		}
-	case width >= compactFixed+nameMin: // 28
+	case width >= tierCompact:
 		return TableLayout{
 			Indicator: true, State: true,
 			Name: clamp(width-compactFixed, nameMin, colName),
 			PR:   colPRCompact,
 		}
-	case width >= noPRFixed+nameMin: // 15
+	case width >= tierNoPR:
 		return TableLayout{
 			Indicator: true, State: true,
 			Name: clamp(width-noPRFixed, nameMin, colName),
 		}
-	case width >= bareFixed+1: // 4
+	case width >= tierBare:
 		return TableLayout{State: true, Name: clamp(width-bareFixed, 1, colName)}
 	default:
 		return TableLayout{Name: clamp(width, 1, colName)}

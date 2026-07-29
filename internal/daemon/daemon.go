@@ -17,6 +17,8 @@ import (
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/session"
+	"github.com/jzinkduda/vigil/internal/transition"
 )
 
 var ErrAlreadyRunning = errors.New("daemon already running")
@@ -30,6 +32,14 @@ type Server struct {
 	CachePath  string
 	Log        *log.Logger
 
+	// Detector and Effects fire state-transition side effects once per event.
+	// Clients render their own toasts from their own detectors; only this
+	// process runs the hooks and the cleanups, because only this process has
+	// one view of state. Nil disables them, which is what a zero-valued Server
+	// in a test gets.
+	Detector *transition.Detector
+	Effects  transition.EffectRunner
+
 	// mu guards latest only. clients is owned by Run's goroutine: poll,
 	// addClient and broadcast all run there and nothing else touches it.
 	mu     sync.Mutex
@@ -37,6 +47,22 @@ type Server struct {
 
 	clients []*client
 	writers sync.WaitGroup
+
+	// pendingEffects tracks in-flight effect goroutines so shutdown waits for
+	// them before Run returns.
+	pendingEffects sync.WaitGroup
+
+	// effectsMu guards inFlightEffects, which serializes only the effect that
+	// is actually destructive: a bell flip on a merged session yields two
+	// New == session.Done events, and without this, both could start a
+	// CleanupSession against the same worktree concurrently. Every other
+	// transition dispatches ungated so the notify hook fires; Done transitions
+	// are gated, and a repeat Done during cleanup is skipped entirely. A
+	// dedicated mutex rather than mu: mu is about a different piece of state
+	// (latest), and the dispatching goroutine, not just poll, needs to take
+	// this one (to delete on completion).
+	effectsMu       sync.Mutex
+	inFlightEffects map[string]struct{}
 
 	// pollFailing is only read and written from poll, which Run only ever
 	// calls from its own goroutine, so it needs no mutex.
@@ -48,12 +74,20 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 	if interval <= 0 {
 		interval = defaultInterval
 	}
+	logger := log.New(os.Stderr, "vigil: ", log.LstdFlags)
 	return &Server{
 		Collector:  collect.New(cfg, cmd),
 		Interval:   interval,
 		SocketPath: protocol.SocketPath(),
 		CachePath:  cache.CachePath(),
-		Log:        log.New(os.Stderr, "vigil: ", log.LstdFlags),
+		Log:        logger,
+		Detector:   transition.NewDetector(),
+		Effects: transition.Runner{
+			Cfg:  cfg,
+			Cmd:  cmd,
+			Logf: logger.Printf,
+		},
+		inFlightEffects: make(map[string]struct{}),
 	}
 }
 
@@ -98,6 +132,7 @@ func (s *Server) Run(ctx context.Context) error {
 			_ = listener.Close()
 			accepted.Wait()
 			s.closeClients()
+			s.pendingEffects.Wait()
 			return nil
 		case conn := <-incoming:
 			s.addClient(conn)
@@ -177,6 +212,46 @@ func (s *Server) poll(ctx context.Context) {
 
 	if s.CachePath != "" {
 		_ = cache.Save(s.CachePath, sessions)
+	}
+
+	if s.Detector == nil || s.Effects == nil {
+		return
+	}
+	for _, ev := range s.Detector.Detect(sessions) {
+		ev := ev
+		if ev.New != session.Done {
+			// Every other transition dispatches ungated: the notify hook
+			// must fire once per real transition on this path exactly as it
+			// does on the self-polling path, and only cleanup is destructive
+			// enough to need serializing.
+			s.pendingEffects.Add(1)
+			go func() {
+				defer s.pendingEffects.Done()
+				s.Effects.Run(ctx, ev)
+			}()
+			continue
+		}
+
+		s.effectsMu.Lock()
+		if s.inFlightEffects == nil {
+			s.inFlightEffects = make(map[string]struct{})
+		}
+		if _, running := s.inFlightEffects[ev.Session]; running {
+			s.effectsMu.Unlock()
+			s.logf("transition effects for %s still running, skipping a repeat Done", ev.Session)
+			continue
+		}
+		s.inFlightEffects[ev.Session] = struct{}{}
+		s.effectsMu.Unlock()
+
+		s.pendingEffects.Add(1)
+		go func() {
+			defer s.pendingEffects.Done()
+			s.Effects.Run(ctx, ev)
+			s.effectsMu.Lock()
+			delete(s.inFlightEffects, ev.Session)
+			s.effectsMu.Unlock()
+		}()
 	}
 }
 

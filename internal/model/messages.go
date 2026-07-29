@@ -8,50 +8,21 @@ import (
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
-// TmuxTickMsg triggers a tmux metadata polling cycle. Epoch is the polling
-// generation it was scheduled in: Bubble Tea ticks cannot be cancelled, so a
-// tick from a superseded generation is dropped instead of rescheduling
-// itself. Without that, every switch between daemon and self-polling would
-// leave the previous mode's tickers running for the life of the process.
-type TmuxTickMsg struct {
-	Time  time.Time
-	Epoch int
-}
-
-// GitTickMsg triggers a git polling cycle.
-type GitTickMsg struct {
-	Time  time.Time
-	Epoch int
-}
-
-// PRTickMsg triggers a PR polling cycle.
-type PRTickMsg struct {
-	Time  time.Time
-	Epoch int
-}
-
 // RenderTickMsg triggers a repaint with no fetch work. The daemon path uses
-// it to get the same 1s render cadence self-polling gets for free from
-// TmuxTickMsg, so time-based rendering (like notification expiry) behaves
+// it to get the same render cadence self-polling gets for free from
+// CollectTickMsg, so time-based rendering (like notification expiry) behaves
 // the same whether or not a daemon is connected.
 type RenderTickMsg struct {
 	Time  time.Time
 	Epoch int
 }
 
-// TmuxUpdatedMsg carries tmux session metadata (fast, no git/PR).
-type TmuxUpdatedMsg struct {
-	Sessions []*session.Session
-}
-
-// GitUpdatedMsg carries git status data for sessions.
-type GitUpdatedMsg struct {
-	GitData map[string]session.GitStatus
-}
-
-// PRUpdatedMsg carries refreshed PR data.
-type PRUpdatedMsg struct {
-	PRData map[string]*session.PRStatus
+// CollectTickMsg paces the self-polling loop. Its handler is the only thing
+// that consumes one and the only thing that schedules the next, so exactly one
+// is outstanding per self-polling generation: a heartbeat, independent of
+// whether the poll it asks for is actually issued.
+type CollectTickMsg struct {
+	Epoch int
 }
 
 // PaneCapturedMsg carries captured pane output.
@@ -81,24 +52,42 @@ type NotifyMsg struct {
 	Severity string // "info", "warning", "error"
 }
 
-// DelayedPRRefreshMsg triggers a follow-up PR fetch after a short delay
+// DelayedPRRefreshMsg triggers a follow-up forced poll after a short delay
 // to catch GitHub API updates that lag behind the action.
 type DelayedPRRefreshMsg struct{}
 
 // DetailRefreshMsg triggers a detail panel content refresh.
 type DetailRefreshMsg struct{}
 
-// SnapshotMsg carries a full session snapshot received from the daemon,
-// with per-client flags already resolved.
+// PRCommentsMsg carries review comment bodies fetched on demand for one branch.
+// Polling stopped fetching these: they are read by one detail panel for one
+// session, and requesting them for every open PR every cycle was the bulk of
+// the review-threads query's cost.
+type PRCommentsMsg struct {
+	Branch   string
+	Comments []session.ReviewComment
+}
+
+// SnapshotMsg carries a full session snapshot, with per-client flags already
+// resolved. Local says this client collected it itself rather than receiving it
+// from a daemon, which is what makes this client the owner of the poll loop and
+// therefore responsible for state-transition side effects.
 type SnapshotMsg struct {
 	Sessions []*session.Session
 	Epoch    int
+	Local    bool
 }
 
 // DaemonLostMsg reports that the daemon stream ended, so the TUI should
 // resume self-polling.
 type DaemonLostMsg struct {
 	Epoch int
+}
+
+// EffectDoneMsg reports that a transition's side effects finished, so the
+// session can accept another Done-bound effect.
+type EffectDoneMsg struct {
+	Session string
 }
 
 // ProbeTickMsg schedules the next attempt to reach the daemon. It only fires

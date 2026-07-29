@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,7 +15,7 @@ import (
 
 // MergePR squash-merges the PR for the given branch.
 func MergePR(ctx context.Context, cfg *config.Config, cmd fetch.Commander, gitRoot, branch string) (string, error) {
-	out, err := cfg.RunHook("merge", map[string]string{
+	out, err := cfg.RunHook(ctx, cmd, "merge", map[string]string{
 		"branch": branch, "git_root": gitRoot,
 	}, gitRoot, 30_000_000_000) // 30s
 	if err != nil {
@@ -37,8 +36,8 @@ func MergePR(ctx context.Context, cfg *config.Config, cmd fetch.Commander, gitRo
 }
 
 // ApprovePR approves the PR for the given branch.
-func ApprovePR(ctx context.Context, cfg *config.Config, gitRoot, branch string) (string, error) {
-	out, err := cfg.RunHook("approve", map[string]string{
+func ApprovePR(ctx context.Context, cfg *config.Config, cmd fetch.Commander, gitRoot, branch string) (string, error) {
+	out, err := cfg.RunHook(ctx, cmd, "approve", map[string]string{
 		"branch": branch, "git_root": gitRoot,
 	}, gitRoot, 30_000_000_000)
 	if err != nil {
@@ -55,7 +54,7 @@ func CleanupSession(ctx context.Context, cfg *config.Config, cmd fetch.Commander
 
 	hook := cfg.GetHook("cleanup")
 	if hook != "" {
-		out, err := cfg.RunHook("cleanup", map[string]string{
+		out, err := cfg.RunHook(ctx, cmd, "cleanup", map[string]string{
 			"session": sessionName, "path": worktreePath,
 			"branch": branch, "git_root": gitRoot,
 		}, "", 30_000_000_000)
@@ -85,7 +84,7 @@ func builtinCleanup(ctx context.Context, cmd fetch.Commander, sessionName, workt
 	var messages []string
 
 	// Kill tmux session
-	_, err := cmd.Run(ctx, "", "tmux", "kill-session", "-t", sessionName)
+	_, err := cmd.Run(ctx, "", "tmux", "kill-session", "-t", "="+sessionName)
 	if err == nil {
 		messages = append(messages, "killed session "+sessionName)
 	}
@@ -121,7 +120,7 @@ func isWorktree(path string) bool {
 }
 
 // Dispatch routes input via the dispatch hook.
-func Dispatch(ctx context.Context, cfg *config.Config, input string) (string, error) {
+func Dispatch(ctx context.Context, cfg *config.Config, cmd fetch.Commander, input string) (string, error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		err := fmt.Errorf("dispatch input must not be empty")
@@ -137,7 +136,7 @@ func Dispatch(ctx context.Context, cfg *config.Config, input string) (string, er
 			return FailureMessage("dispatch", "", err), err
 		}
 	}
-	out, err := cfg.RunHook("dispatch", map[string]string{"input": input}, "", 15_000_000_000)
+	out, err := cfg.RunHook(ctx, cmd, "dispatch", map[string]string{"input": input}, "", 15_000_000_000)
 	if err != nil {
 		return FailureMessage("dispatch", out, err), err
 	}
@@ -206,12 +205,14 @@ func ToggleDraft(ctx context.Context, cmd fetch.Commander, gitRoot, branch strin
 	return "converted to draft", nil
 }
 
-// OpenPRInBrowser opens a URL in the default browser.
-// Uses Run() instead of Start() so the process completes before the caller exits.
-func OpenPRInBrowser(url string) error {
+// OpenPRInBrowser opens a URL in the default browser. Routed through
+// Commander like every other subprocess call here: a test that reaches this
+// with a real commander opens a real browser window.
+func OpenPRInBrowser(ctx context.Context, cmd fetch.Commander, url string) error {
 	opener := "xdg-open"
 	if runtime.GOOS == "darwin" {
 		opener = "open"
 	}
-	return exec.Command(opener, url).Run()
+	_, err := cmd.Run(ctx, "", opener, url)
+	return err
 }

@@ -8,6 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/jzinkduda/vigil/internal/collect"
+	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/protocol"
 )
 
@@ -20,24 +22,32 @@ func liveDecoder() *protocol.Decoder {
 	return protocol.NewDecoder(strings.NewReader(""))
 }
 
-// staleTickCases covers every self-rescheduling tick. A tick born in an
-// earlier epoch must die rather than reschedule itself, or a mode switch
-// leaves two independent tickers running for the life of the process.
+// TestStaleTicksDoNotReschedule covers the daemon path's render heartbeat. A
+// message born in an earlier epoch must die rather than reschedule itself,
+// or a mode switch leaves two independent pollers running for the life of
+// the process.
+//
+// A stale-epoch local SnapshotMsg is deliberately NOT part of this table: it
+// is the one case that must produce a command anyway, to restart a self-poll
+// loop a stale straggler was the last thing holding open. See
+// TestStaleLocalSnapshotRestartsTheLoopWhenSelfPolling and
+// TestStaleLocalSnapshotDoesNothingWhenDaemonConnected.
 func TestStaleTicksDoNotReschedule(t *testing.T) {
 	cases := []struct {
 		name  string
 		msg   tea.Msg
 		setup func(*Model)
 	}{
-		{"tmux", TmuxTickMsg{Time: time.Now(), Epoch: 0}, nil},
-		{"git", GitTickMsg{Time: time.Now(), Epoch: 0}, nil},
-		{"pr", PRTickMsg{Time: time.Now(), Epoch: 0}, nil},
 		// RenderTickMsg is also gated on daemonDecoder == nil, so this case
 		// must set a live decoder: otherwise a nil decoder alone would force
 		// cmd == nil and the epoch check would never be exercised.
 		{"render", RenderTickMsg{Time: time.Now(), Epoch: 0}, func(m *Model) {
 			m.daemonDecoder = liveDecoder()
 		}},
+		// CollectTickMsg's epoch check is not redundant with startPoll's own
+		// guards: losing it would double the poll chain on every reconnect,
+		// the exact class of bug the epoch mechanism exists to prevent.
+		{"collect tick", CollectTickMsg{Epoch: 0}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,18 +63,70 @@ func TestStaleTicksDoNotReschedule(t *testing.T) {
 	}
 }
 
+// TestStaleLocalSnapshotRestartsTheLoopWhenSelfPolling pins the fix for the
+// wedge a stale straggler would otherwise leave: pollInFlight tracks a
+// running goroutine, not a generation, so it is always cleared when that
+// goroutine's result lands, even from a retired epoch. If this client is
+// self-polling in the current generation, that straggler landing is the only
+// thing that can ever flip pollInFlight back to false and unblock startPoll,
+// so this is where the loop has to restart.
+func TestStaleLocalSnapshotRestartsTheLoopWhenSelfPolling(t *testing.T) {
+	cmd := collectFixtureCommander()
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+	m.epoch = 1
+	m.pollInFlight = true
+
+	next, got := m.Update(SnapshotMsg{Sessions: fixtureSessions(), Epoch: 0, Local: true})
+	if got == nil {
+		t.Fatal("a stale local snapshot restarted nothing while self-polling; the fallback is wedged")
+	}
+	if next.(Model).pollInFlight != true {
+		t.Error("restarting the loop should mark a new poll in flight")
+	}
+	// One command, and it is a poll: deliberately no tick. handleDaemonLost
+	// already created this generation's chain, and a second one here would
+	// fork it - two self-perpetuating chains that never recover.
+	msg, ok := got().(SnapshotMsg)
+	if !ok || !msg.Local || msg.Epoch != 1 {
+		t.Fatalf("got %+v, want a fresh local poll for the current epoch (1) and nothing else", msg)
+	}
+}
+
+// TestStaleLocalSnapshotDoesNothingWhenDaemonConnected is the other half:
+// once a daemon has taken over, a straggler from the self-poll loop it
+// replaced must not restart anything - startPoll's own daemon check makes
+// this a no-op rather than a special case here.
+func TestStaleLocalSnapshotDoesNothingWhenDaemonConnected(t *testing.T) {
+	m := newTestModel()
+	m.epoch = 1
+	m.pollInFlight = true
+	m.daemonConn = &fakeConn{}
+
+	_, got := m.Update(SnapshotMsg{Sessions: fixtureSessions(), Epoch: 0, Local: true})
+	if got != nil {
+		t.Error("a stale local snapshot restarted self-polling after a daemon took over")
+	}
+}
+
+// TestCurrentTicksReschedule is the positive half of the table above: a
+// current-epoch tick must extend its own chain.
+//
+// A completed local SnapshotMsg is deliberately NOT in this table either: poll
+// completions do not extend the chain at all any more, precisely because a tick
+// can be consumed without producing one. See
+// TestAmbientPollCompletionSchedulesNoTick.
 func TestCurrentTicksReschedule(t *testing.T) {
 	cases := []struct {
 		name  string
 		msg   tea.Msg
 		setup func(*Model)
 	}{
-		{"tmux", TmuxTickMsg{Time: time.Now(), Epoch: 7}, nil},
-		{"git", GitTickMsg{Time: time.Now(), Epoch: 7}, nil},
-		{"pr", PRTickMsg{Time: time.Now(), Epoch: 7}, nil},
 		{"render", RenderTickMsg{Time: time.Now(), Epoch: 7}, func(m *Model) {
 			m.daemonDecoder = liveDecoder()
 		}},
+		{"collect tick", CollectTickMsg{Epoch: 7}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -80,10 +142,17 @@ func TestCurrentTicksReschedule(t *testing.T) {
 	}
 }
 
+// TestStaleSnapshotIsIgnored covers a stale-epoch daemon (non-local)
+// snapshot. It sets a live decoder so the epoch check is what produces the
+// outcome, not the separate nil-connection guard the daemon branch also has:
+// without a live connection here, both guards would return the same result
+// for the same reason handleSnapshot has each, and the test could not tell
+// which one it was actually pinning.
 func TestStaleSnapshotIsIgnored(t *testing.T) {
 	m := newTestModel()
 	m.epoch = 2
 	m.sessions = nil
+	m.daemonDecoder = liveDecoder()
 	got, _ := m.Update(SnapshotMsg{Sessions: fixtureSessions(), Epoch: 1})
 	if len(got.(Model).sessions) != 0 {
 		t.Error("a snapshot from a closed connection was applied")

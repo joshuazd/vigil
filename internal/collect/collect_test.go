@@ -328,6 +328,37 @@ func TestSnapshotRefetchesGitAfterGitInterval(t *testing.T) {
 	}
 }
 
+// TestInvalidateForcesARefetchOfGitAndPR pins the escape hatch a forced
+// refresh (an action, the model's Refresh key) relies on: without it, a
+// caller that just changed state would have to wait out GitInterval and
+// PRInterval to see the memoized values replaced.
+func TestInvalidateForcesARefetchOfGitAndPR(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "MERGED"}`, nil)
+
+	c := New(&config.Config{}, cmd)
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	if got := countGitCalls(cmd); got != 1 {
+		t.Fatalf("got %d git calls on the first Snapshot, want 1", got)
+	}
+	if got := countGhCalls(cmd); got != 1 {
+		t.Fatalf("got %d gh calls on the first Snapshot, want 1", got)
+	}
+
+	c.Invalidate()
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if got := countGitCalls(cmd); got != 2 {
+		t.Errorf("got %d git calls after Invalidate, want 2 (the memo should have been dropped)", got)
+	}
+	if got := countGhCalls(cmd); got != 2 {
+		t.Errorf("got %d gh calls after Invalidate, want 2 (the memo should have been dropped)", got)
+	}
+}
+
 // TestSnapshotAppliesMemoizedGitStatusWhenSkipped pins the highest-blast-radius
 // failure mode: a tick that skips the git fetch must still populate Git from
 // the memo. A fillGit that skips without applying the memo leaves Git zeroed,

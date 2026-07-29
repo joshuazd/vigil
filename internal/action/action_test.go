@@ -28,6 +28,7 @@ func TestMergePR_HookFailsStateMerged(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{Hooks: map[string]any{"merge": "false"}}
 	cmd := fetch.NewMockCommander()
+	cmd.On("sh", "", fmt.Errorf("exit status 1"))
 	cmd.OnArgs("gh pr view feat --json state --jq .state", "MERGED", nil)
 
 	out, err := MergePR(context.Background(), cfg, cmd, dir, "feat")
@@ -43,6 +44,7 @@ func TestMergePR_HookFailsPRNotMerged(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{Hooks: map[string]any{"merge": "false"}}
 	cmd := fetch.NewMockCommander()
+	cmd.On("sh", "", fmt.Errorf("exit status 1"))
 	cmd.OnArgs("gh pr view feat --json state --jq .state", "OPEN", nil)
 
 	out, err := MergePR(context.Background(), cfg, cmd, dir, "feat")
@@ -61,9 +63,14 @@ func TestMergePR_HookFailsPRNotMerged(t *testing.T) {
 
 func TestApprovePR_UsesApproveHook(t *testing.T) {
 	cfg := &config.Config{Hooks: map[string]any{"approve": "echo approved"}}
-	_, err := ApprovePR(context.Background(), cfg, "/repo", "feat")
-	// Will fail because sh -c runs in subprocess, but verifies no panic
-	_ = err
+	cmd := fetch.NewMockCommander()
+	out, err := ApprovePR(context.Background(), cfg, cmd, "/repo", "feat")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "approved" {
+		t.Errorf("got %q, want %q", out, "approved")
+	}
 }
 
 // --- CleanupSession ---
@@ -90,6 +97,33 @@ func TestCleanupSession_BuiltinKillsSession(t *testing.T) {
 	}
 	if !strings.Contains(out, "killed session") {
 		t.Errorf("expected killed session in output, got %q", out)
+	}
+}
+
+// TestCleanupSession_KillsTheExactSessionByName pins the "=" exact-match
+// prefix on kill-session's target. Without it, tmux falls back to prefix and
+// fnmatch matching on -t, so `kill-session -t alpha` can hit an unrelated
+// session like "alpha2" or "alpha|pha" instead of the one this call means to
+// destroy. SwitchClient and CapturePane in this package already use "=";
+// kill-session did not.
+func TestCleanupSession_KillsTheExactSessionByName(t *testing.T) {
+	cfg := &config.Config{}
+	cmd := fetch.NewMockCommander()
+	cmd.On("tmux", "", nil)
+
+	if _, err := CleanupSession(context.Background(), cfg, cmd, "mysession", "", "", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var killed bool
+	for _, c := range cmd.Calls {
+		if c.Name == "tmux" && len(c.Args) == 3 &&
+			c.Args[0] == "kill-session" && c.Args[1] == "-t" && c.Args[2] == "=mysession" {
+			killed = true
+		}
+	}
+	if !killed {
+		t.Fatalf("no exact `tmux kill-session -t =mysession` in %+v", cmd.Calls)
 	}
 }
 
@@ -296,7 +330,7 @@ func TestToggleDraft_ReadyToDraft(t *testing.T) {
 
 func TestDispatch_EmptyInput(t *testing.T) {
 	cfg := &config.Config{}
-	out, err := Dispatch(context.Background(), cfg, "")
+	out, err := Dispatch(context.Background(), cfg, fetch.NewMockCommander(), "")
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("expected empty error, got: %v", err)
 	}
@@ -307,7 +341,7 @@ func TestDispatch_EmptyInput(t *testing.T) {
 
 func TestDispatch_TooLong(t *testing.T) {
 	cfg := &config.Config{}
-	out, err := Dispatch(context.Background(), cfg, strings.Repeat("a", 501))
+	out, err := Dispatch(context.Background(), cfg, fetch.NewMockCommander(), strings.Repeat("a", 501))
 	if err == nil || !strings.Contains(err.Error(), "too long") {
 		t.Errorf("expected too long error, got: %v", err)
 	}
@@ -318,7 +352,7 @@ func TestDispatch_TooLong(t *testing.T) {
 
 func TestDispatch_ControlCharacters(t *testing.T) {
 	cfg := &config.Config{}
-	out, err := Dispatch(context.Background(), cfg, "hello\x01world")
+	out, err := Dispatch(context.Background(), cfg, fetch.NewMockCommander(), "hello\x01world")
 	if err == nil || !strings.Contains(err.Error(), "control characters") {
 		t.Errorf("expected control characters error, got: %v", err)
 	}
@@ -329,7 +363,7 @@ func TestDispatch_ControlCharacters(t *testing.T) {
 
 func TestDispatch_NoHookConfigured(t *testing.T) {
 	cfg := &config.Config{}
-	out, err := Dispatch(context.Background(), cfg, "valid input")
+	out, err := Dispatch(context.Background(), cfg, fetch.NewMockCommander(), "valid input")
 	if err == nil {
 		t.Error("expected error for unconfigured dispatch hook")
 	}

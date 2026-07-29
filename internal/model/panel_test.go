@@ -2,6 +2,9 @@ package model
 
 import (
 	"context"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +82,10 @@ func TestNewPanelSetsPanelMode(t *testing.T) {
 	daemonSpawner = func() error { return nil }
 	t.Cleanup(func() { daemonSpawner = spawnDaemon })
 
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+
 	m := NewPanel(&config.Config{}, fetch.NewMockCommander())
 	if !m.panelMode {
 		t.Error("NewPanel did not set panelMode")
@@ -95,7 +102,9 @@ func TestNewPanelSpawnsTheDaemon(t *testing.T) {
 	daemonSpawner = func() error { spawned++; return nil }
 	t.Cleanup(func() { daemonSpawner = spawnDaemon })
 
-	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t)) // no socket to dial
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
 	NewPanel(&config.Config{}, fetch.NewMockCommander())
 	if spawned != 1 {
 		t.Errorf("spawned %d daemons, want 1", spawned)
@@ -107,10 +116,67 @@ func TestNewDoesNotSpawnTheDaemon(t *testing.T) {
 	daemonSpawner = func() error { spawned++; return nil }
 	t.Cleanup(func() { daemonSpawner = spawnDaemon })
 
-	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
-	New(&config.Config{}, fetch.NewMockCommander())
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	m := New(&config.Config{}, fetch.NewMockCommander())
+	if m.daemonDecoder != nil {
+		t.Fatal("New dialed a real daemon; the TUI should not reach the daemon on this path")
+	}
 	if spawned != 0 {
 		t.Errorf("the TUI spawned %d daemons; only panels do that", spawned)
+	}
+}
+
+// TestNewPrimesPollInFlightBeforeInitRuns closes a startup race Init alone
+// cannot: Init has a value receiver and returns no Model, so a mutation
+// startPoll made inside it would never reach the model the Bubble Tea
+// runtime actually holds - it would land on a copy Init discards. newModel
+// primes pollInFlight itself instead, before Init ever runs, so a key press
+// or action result landing before the first SnapshotMsg cannot slip a second
+// collectCmd past startPoll's guard.
+func TestNewPrimesPollInFlightBeforeInitRuns(t *testing.T) {
+	dir := shortTempDir(t)
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+
+	m := New(&config.Config{}, fetch.NewMockCommander())
+	if m.daemonDecoder != nil {
+		t.Fatal("New dialed a real daemon; this test exercises the self-polling path")
+	}
+	if !m.pollInFlight {
+		t.Fatal("a freshly constructed self-polling model should already show a poll in flight")
+	}
+	if cmd := m.startPoll(true); cmd != nil {
+		t.Error("startPoll issued a poll before Init's own first poll had even run")
+	}
+}
+
+// TestNewConnectedToADaemonDoesNotPrimePollInFlight is the other half: a
+// daemon-fed model never calls collectCmd at all, so marking a poll in
+// flight for it would wedge every future startPoll call (a forced refresh)
+// for as long as the daemon stays connected.
+func TestNewConnectedToADaemonDoesNotPrimePollInFlight(t *testing.T) {
+	dir := shortTempDir(t)
+	sockDir := filepath.Join(dir, "vigil")
+	if err := os.Mkdir(sockDir, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("HOME", dir)
+
+	l, err := net.Listen("unix", filepath.Join(sockDir, "vigild.sock"))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	m := New(&config.Config{}, fetch.NewMockCommander())
+	if m.daemonDecoder == nil {
+		t.Fatal("New did not dial the daemon; want it to have connected to the listener above")
+	}
+	if m.pollInFlight {
+		t.Error("a daemon-fed model should not show a self-poll in flight")
 	}
 }
 
@@ -209,5 +275,24 @@ func TestPanelOpenPRDoesNotQuit(t *testing.T) {
 	got, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
 	if got.(Model).ctx.Err() != nil {
 		t.Error("o cancelled the panel's context, so the panel is shutting down")
+	}
+}
+
+// TestOpenPRGoesThroughTheCommander pins the seam. Before this, opening a PR
+// shelled out directly and running the suite opened real browser windows.
+func TestOpenPRGoesThroughTheCommander(t *testing.T) {
+	m := withCancellableCtx(t, panelModel(t))
+	m.sessions[0].PR = &session.PRStatus{Number: 1, URL: "https://example.invalid/pr/1"}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+
+	var found bool
+	for _, c := range tmuxCalls(t, m) {
+		if (c.Name == "open" || c.Name == "xdg-open") && len(c.Args) == 1 && c.Args[0] == "https://example.invalid/pr/1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no opener call for the PR URL in %+v", tmuxCalls(t, m))
 	}
 }

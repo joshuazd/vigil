@@ -9,7 +9,7 @@ import (
 )
 
 // RenderDetail renders the detail panel content for a session.
-func RenderDetail(s *session.Session, mode DetailMode, paneContent string, staleThreshold int, width, height int) string {
+func RenderDetail(s *session.Session, mode DetailMode, paneContent string, comments []session.ReviewComment, staleThreshold int, width, height int) string {
 	if s == nil {
 		return ""
 	}
@@ -22,7 +22,7 @@ func RenderDetail(s *session.Session, mode DetailMode, paneContent string, stale
 	case DetailPRDesc:
 		renderPRDesc(&b, s, height-3)
 	case DetailPRComments:
-		renderPRComments(&b, s, height-3)
+		renderPRComments(&b, s, comments, height-3)
 	default:
 		renderPane(&b, paneContent, height-3, width)
 	}
@@ -195,13 +195,27 @@ func renderPRDesc(b *strings.Builder, s *session.Session, maxLines int) {
 	}
 }
 
-func renderPRComments(b *strings.Builder, s *session.Session, maxLines int) {
-	if s.PR == nil || len(s.PR.ReviewComments) == 0 {
+func renderPRComments(b *strings.Builder, s *session.Session, comments []session.ReviewComment, maxLines int) {
+	if s.PR == nil {
+		b.WriteString(DimStyle.Render("  No review comments"))
+		return
+	}
+	// nil means not fetched yet; the model stores an empty non-nil slice once a
+	// fetch has answered, so an in-flight fetch does not read as "none".
+	if comments == nil {
+		if s.PR.UnresolvedComments > 0 {
+			b.WriteString(DimStyle.Render("  Loading comments…"))
+		} else {
+			b.WriteString(DimStyle.Render("  No review comments"))
+		}
+		return
+	}
+	if len(comments) == 0 {
 		b.WriteString(DimStyle.Render("  No review comments"))
 		return
 	}
 	var unresolved []session.ReviewComment
-	for _, c := range s.PR.ReviewComments {
+	for _, c := range comments {
 		if !c.Resolved {
 			unresolved = append(unresolved, c)
 		}

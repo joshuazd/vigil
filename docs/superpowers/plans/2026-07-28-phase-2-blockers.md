@@ -51,6 +51,15 @@
 
 Pure refactor with no behaviour change, so the collapse in Task 3 has one definition of "which flags belong to this tmux client" to call.
 
+> **Amended during execution.** This task's `if !names[last] { last = "" }` guard and its
+> test `TestAnnotateClientFlagsBlanksAStaleLast` were removed rather than kept. The guard is
+> unobservable: `last` feeds only `s.IsLast = s.Name == last`, so when it names a session
+> outside the snapshot nothing matched it anyway, and when it names one inside the snapshot
+> the guard does not fire. No fixture can distinguish the two versions, which is why the test
+> below was vacuous. The pre-existing `TestListenDaemonClearsLastWhenSessionGone` went for the
+> same reason, and a real test for `IsLast` on a live session replaced them. Steps 1, 3 and 6
+> below are superseded on that point; see the ledger's Task 1 adjudication.
+
 **Files:**
 - Modify: `internal/model/client.go:68-101` (`listenDaemonCmd`)
 - Test: `internal/model/client_test.go`

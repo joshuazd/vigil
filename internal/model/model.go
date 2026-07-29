@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -18,10 +17,12 @@ import (
 
 	"github.com/jzinkduda/vigil/internal/action"
 	"github.com/jzinkduda/vigil/internal/cache"
+	"github.com/jzinkduda/vigil/internal/collect"
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
+	"github.com/jzinkduda/vigil/internal/transition"
 	"github.com/jzinkduda/vigil/internal/view"
 )
 
@@ -33,10 +34,25 @@ const spawnCooldown = 15 * time.Second
 
 type Model struct {
 	// Data
-	sessions   []*session.Session
-	gitCache   map[string]session.GitStatus
-	prCache    map[string]*session.PRStatus
-	prevStates map[string]session.SessionState
+	sessions []*session.Session
+	prCache  map[string]*session.PRStatus
+
+	// reviewComments caches review comment bodies fetched on demand, keyed by
+	// branch, the way pane capture already works: only the detail panel's
+	// comments mode reads them, and only for the selected session.
+	reviewComments map[string][]session.ReviewComment
+
+	// detector tracks per-session state across snapshots to produce
+	// transition events; effects runs their side effects. Both are shared
+	// with internal/transition so the daemon and a self-polling client agree
+	// on what counts as a transition.
+	detector *transition.Detector
+	effects  transition.EffectRunner
+
+	// inFlightEffects serializes cleanup per session: a merged session that
+	// gets a bell re-enters Done, and two concurrent CleanupSession calls
+	// would race one worktree.
+	inFlightEffects map[string]struct{}
 
 	// UI state
 	cursor          int
@@ -63,10 +79,8 @@ type Model struct {
 	// popup and a session panel - and conflating them is what made Enter close
 	// the panel. When the question is "should acting here end the process?",
 	// ask exitsAfterAction instead of testing this directly.
-	insideTmux     bool
-	initialLoad   bool
-	initialPRDone bool
-	cursorPlaced  bool
+	insideTmux   bool
+	cursorPlaced bool
 
 	// Current session (detected at startup)
 	currentSessionName string
@@ -79,6 +93,12 @@ type Model struct {
 
 	// Config
 	cfg *config.Config
+
+	// cachePath is where the session cache is read and written. Explicit
+	// rather than resolved at the call site so a test cannot write the
+	// developer's real cache, the way internal/daemon's Server.CachePath
+	// works. Empty disables both the load and the save.
+	cachePath string
 
 	// Commander for subprocess calls
 	cmd fetch.Commander
@@ -113,6 +133,19 @@ type Model struct {
 	// daemon snapshots and self-polling bumps it, which retires the previous
 	// generation's ticks and any snapshot or loss still in flight from it.
 	epoch int
+
+	// collector runs the self-polling path. Only collectCmd touches it, and
+	// only one collectCmd is ever in flight, which is what keeps its memos
+	// single-goroutine: Collector.Snapshot is not safe against reentry.
+	collector *collect.Collector
+
+	// pollInFlight is true from the moment startPoll issues a collectCmd
+	// until that poll's SnapshotMsg is processed by handleSnapshot's Local
+	// branch. startPoll is the only issuer of collectCmd, and it refuses to
+	// issue a second one while this is true, which is what makes a forced
+	// refresh (a user action, the Refresh key) safe to offer alongside the
+	// ambient self-poll loop without ever reentering Collector.Snapshot.
+	pollInFlight bool
 }
 
 // New creates a Model for the full dashboard.
@@ -143,20 +176,23 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 
 	m := Model{
 		currentSessionName: currentSession,
-		gitCache:   make(map[string]session.GitStatus),
-		prCache:    make(map[string]*session.PRStatus),
-		prevStates: make(map[string]session.SessionState),
-		selected:   make(map[string]bool),
+		prCache:            make(map[string]*session.PRStatus),
+		reviewComments:     make(map[string][]session.ReviewComment),
+		detector:           transition.NewDetector(),
+		effects:            transition.Runner{Cfg: cfg, Cmd: cmd},
+		inFlightEffects:    make(map[string]struct{}),
+		selected:           make(map[string]bool),
 
-		insideTmux:   insideTmux,
-		initialLoad: true,
-		detailOpen:  !panel,
-		panelMode:   panel,
+		insideTmux: insideTmux,
+		detailOpen: !panel,
+		panelMode:  panel,
 
-		cfg:    cfg,
-		cmd:    cmd,
-		ctx:    ctx,
-		cancel: cancel,
+		cfg:       cfg,
+		cachePath: cache.CachePath(),
+		cmd:       cmd,
+		ctx:       ctx,
+		cancel:    cancel,
+		collector: collect.New(cfg, cmd),
 
 		dispatchInput: ti,
 		help:          help.New(),
@@ -167,20 +203,22 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 	// completed a successful poll yet. Doing it here rather than as a command
 	// keeps a stale cache out of handleTmuxUpdated, where it would rebuild
 	// sessions from cached data and reset HasBell.
-	if cached := cache.Load(cache.CachePath(), cfg.GetSettingDuration("cache_ttl")); cached != nil {
-		m.sessions = cached
-		for _, s := range cached {
-			if s.Name == currentSession {
-				s.IsCurrent = true
-				break
+	if m.cachePath != "" {
+		if cached := cache.Load(m.cachePath, cfg.GetSettingDuration("cache_ttl")); cached != nil {
+			m.sessions = cached
+			for _, s := range cached {
+				if s.Name == currentSession {
+					s.IsCurrent = true
+					break
+				}
 			}
+			m.warmCaches()
+			// The cache is written in tmux order, and nothing else sorts before the
+			// first render, so without this the first frame ignores the configured
+			// sort. placeCursor indexes into visibleSessions, so it sorts first.
+			session.SortSessions(m.sessions, m.sortMode)
+			m.placeCursor()
 		}
-		m.warmCaches()
-		// The cache is written in tmux order, and nothing else sorts before the
-		// first render, so without this the first frame ignores the configured
-		// sort. placeCursor indexes into visibleSessions, so it sorts first.
-		session.SortSessions(m.sessions, m.sortMode)
-		m.placeCursor()
 	}
 
 	if conn, err := dialDaemon(protocol.SocketPath()); err == nil {
@@ -193,6 +231,17 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		m.daemonDecoder = protocol.NewDecoder(conn)
 	} else if panel {
 		m.spawnDaemonOnce()
+	}
+
+	if m.daemonDecoder == nil {
+		// Init is about to issue the first collectCmd directly (see below),
+		// not through startPoll: Init has a value receiver and returns no
+		// Model, so a mutation startPoll made inside it would land on a copy
+		// the Bubble Tea runtime never sees, leaving pollInFlight false on
+		// the model it actually holds. Set it here instead, before Init ever
+		// runs, so a key press or action result arriving before the first
+		// SnapshotMsg cannot slip a second collectCmd past startPoll's guard.
+		m.pollInFlight = true
 	}
 
 	return m
@@ -210,6 +259,36 @@ func (m *Model) spawnDaemonOnce() {
 	}
 }
 
+// startPoll is the only place that issues a collectCmd. It refuses to issue a
+// second one while pollInFlight is already true, which is what makes it safe
+// for a forced refresh (an action result, the Refresh key) to ask for a poll
+// alongside the ambient self-poll loop: at most one of them ever wins, and
+// the loser gets nil rather than a second concurrent Collector.Snapshot call.
+//
+// It also refuses while a daemon is connected: that client has nothing of
+// its own to poll for, since the daemon already polls at tmux_interval and
+// pushes every snapshot, and this client cannot reach the daemon's memos to
+// invalidate them anyway. Checking it here, once, replaces the daemon guard
+// that used to be duplicated at every call site.
+func (m *Model) startPoll(force bool) tea.Cmd {
+	if m.daemonConn != nil || m.pollInFlight {
+		return nil
+	}
+	m.pollInFlight = true
+	return m.collectCmd(force)
+}
+
+// pollInterval paces the self-poll loop between one CollectTickMsg and the
+// next, mirroring the daemon's own floor logic (internal/daemon/daemon.go)
+// so a self-polling client refreshes tmux state no less often than a
+// daemon-fed one would.
+func (m Model) pollInterval() time.Duration {
+	if d := m.cfg.GetSettingDuration("tmux_interval"); d > 0 {
+		return d
+	}
+	return defaultPollInterval
+}
+
 func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
@@ -225,16 +304,18 @@ func (m Model) Init() tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 
-	// Start independent poll cycles: tmux (1s), git (configurable), PR (configurable)
+	// Not startPoll: newModel already set pollInFlight for this branch, since
+	// Init cannot report its own mutation back to the runtime (see there).
+	// Calling startPoll here would see that flag and refuse to poll at all.
+	//
+	// This is one of exactly two places that start a self-poll chain (the
+	// other is handleDaemonLost). The first collectCmd is for immediacy - the
+	// chain would poll on its own within pollInterval regardless.
 	cmds = append(cmds,
-		m.fetchTmuxCmd(),
-		m.fetchGitCmd(),
-		tmuxTickCmd(1*time.Second, m.epoch),
-		gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch),
-		prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch),
+		m.collectCmd(false),
+		collectTickCmd(m.pollInterval(), m.epoch),
 		probeTickCmd(m.epoch),
 	)
-
 	return tea.Batch(cmds...)
 }
 
@@ -252,26 +333,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.help.Width = msg.Width
 		return m, nil
 
-	case TmuxTickMsg:
-		if msg.Epoch != m.epoch {
-			return m, nil
-		}
-		return m, tea.Batch(m.fetchTmuxCmd(), tmuxTickCmd(1*time.Second, m.epoch))
-
-	case GitTickMsg:
-		if msg.Epoch != m.epoch {
-			return m, nil
-		}
-		return m, tea.Batch(m.fetchGitCmd(), gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch))
-
-	case PRTickMsg:
-		if msg.Epoch != m.epoch {
-			return m, nil
-		}
-		return m, tea.Batch(m.fetchPRsCmd(), prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch))
-
 	case SnapshotMsg:
 		return m.handleSnapshot(msg)
+
+	case CollectTickMsg:
+		// An epoch mismatch means this tick belongs to a retired generation:
+		// drop it without rescheduling, or a reconnect would leave two chains
+		// running for the life of the process.
+		if msg.Epoch != m.epoch {
+			return m, nil
+		}
+		// A daemon has taken over; the chain ends here and handleDaemonLost
+		// starts a fresh one if that daemon later dies.
+		if m.daemonConn != nil {
+			return m, nil
+		}
+		// The reschedule is unconditional and does not depend on startPoll
+		// succeeding. A tick consumed while a poll is already in flight would
+		// otherwise vanish - tea.Tick is one-shot - and kill the loop.
+		c := m.startPoll(false)
+		return m, tea.Batch(c, collectTickCmd(m.pollInterval(), m.epoch))
 
 	case DaemonLostMsg:
 		return m.handleDaemonLost(msg)
@@ -305,19 +386,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, renderTickCmd(1*time.Second, m.epoch)
 
-	case TmuxUpdatedMsg:
-		return m.handleTmuxUpdated(msg)
-
-	case GitUpdatedMsg:
-		return m.handleGitUpdated(msg)
-
-	case PRUpdatedMsg:
-		return m.handlePRUpdated(msg)
-
 	case PaneCapturedMsg:
 		if s := m.selectedSession(); s != nil && s.Name == msg.SessionName {
 			m.paneContent = msg.Content
 		}
+		return m, nil
+
+	case PRCommentsMsg:
+		comments := msg.Comments
+		if comments == nil {
+			comments = []session.ReviewComment{}
+		}
+		m.reviewComments[msg.Branch] = comments
 		return m, nil
 
 	case ActionResultMsg:
@@ -326,18 +406,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			severity = "error"
 		}
 		m.addNotification(msg.Message, severity)
-		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd(), m.fetchPRsCmd(), delayedPRRefreshCmd())
+		// startPoll's own daemon check would make this guard redundant on
+		// its own, but it also gates delayedPRRefreshCmd: a daemon-fed
+		// client has nothing to force now and nothing to follow up on in
+		// 3s either, so the guard stays to skip both, not just the poll.
+		if m.daemonConn != nil {
+			return m, nil
+		}
+		c := tea.Batch(m.startPoll(true), delayedPRRefreshCmd())
+		return m, c
 
 	case BatchResultMsg:
 		m.selected = make(map[string]bool)
 		m.addNotification(fmt.Sprintf("%s: %d ok, %d failed", msg.Action, msg.OK, msg.Failed), "info")
-		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd(), m.fetchPRsCmd(), delayedPRRefreshCmd())
+		if m.daemonConn != nil {
+			return m, nil
+		}
+		c := tea.Batch(m.startPoll(true), delayedPRRefreshCmd())
+		return m, c
 
 	case DelayedPRRefreshMsg:
-		return m, m.fetchPRsCmd()
+		// Catches GitHub API updates that lagged behind the action's own
+		// forced poll above. No explicit daemon guard needed: startPoll's
+		// own check is the only thing this case would otherwise skip.
+		c := m.startPoll(true)
+		return m, c
 
 	case NotifyMsg:
 		m.addNotification(msg.Text, msg.Severity)
+		return m, nil
+
+	case EffectDoneMsg:
+		delete(m.inFlightEffects, msg.Session)
 		return m, nil
 	}
 
@@ -369,7 +469,11 @@ func (m Model) View() string {
 		detailHeight := m.detailHeight()
 		s := m.selectedSession()
 		mode := m.activeDetailMode()
-		detail = view.RenderDetail(s, mode, m.paneContent, staleThreshold, m.width, detailHeight)
+		var comments []session.ReviewComment
+		if s != nil && s.Git.Branch != "" {
+			comments = m.reviewComments[s.Git.Branch]
+		}
+		detail = view.RenderDetail(s, mode, m.paneContent, comments, staleThreshold, m.width, detailHeight)
 	}
 
 	// Footer
@@ -500,7 +604,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case key.Matches(msg, keys.Refresh):
-		return m, tea.Batch(m.fetchTmuxCmd(), m.fetchGitCmd(), m.fetchPRsCmd())
+		// Cleared unconditionally, ahead of startPoll's own daemon check: this
+		// is the one escape hatch a daemon-fed client has for a stale review
+		// comment cache, since that client can never force a poll of its own.
+		// Clearing costs nothing on the self-polling path either.
+		m.reviewComments = make(map[string][]session.ReviewComment)
+		// startPoll's daemon check covers "nothing to force while a daemon
+		// is connected"; its single-flight guard covers "already polling" -
+		// either wins and invalidates the memos before the next Snapshot, or
+		// loses silently to a poll already in flight.
+		c := m.startPoll(true)
+		return m, c
 
 	case key.Matches(msg, keys.ToggleDetail):
 		if m.panelMode {
@@ -643,7 +757,7 @@ func (m Model) handleOpenPR() (tea.Model, tea.Cmd) {
 	if s == nil || s.PR == nil || s.PR.URL == "" {
 		return m, nil
 	}
-	if err := action.OpenPRInBrowser(s.PR.URL); err != nil {
+	if err := action.OpenPRInBrowser(m.ctx, m.cmd, s.PR.URL); err != nil {
 		m.addNotification("open: "+err.Error(), "error")
 		return m, nil
 	}
@@ -748,14 +862,13 @@ func (m Model) handleRebasePush() (tea.Model, tea.Cmd) {
 
 // --- Data handlers ---
 
-// warmCaches records each session's git state by name and PR state by branch,
-// and backfills any session missing PR data from the last known value for its
-// branch. The backfill keeps a single failed gh call from blanking the PR
-// column and flipping the session to idle, which would fire a state
-// transition notification and the notify hook.
+// warmCaches records each session's PR state by branch, and backfills any
+// session missing PR data from the last known value for its branch. The
+// backfill keeps a single failed gh call from blanking the PR column and
+// flipping the session to idle, which would fire a state transition
+// notification and the notify hook.
 func (m *Model) warmCaches() {
 	for _, s := range m.sessions {
-		m.gitCache[s.Name] = s.Git
 		if s.Git.Branch == "" {
 			continue
 		}
@@ -781,53 +894,89 @@ func (m *Model) placeCursor() {
 	}
 }
 
-// handleSnapshot applies a complete daemon snapshot. Unlike
-// handleTmuxUpdated, it does not merge into existing sessions: the snapshot
-// already carries git and PR state, and merging would discard it.
 func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
+	if msg.Local {
+		// The poll goroutine that produced this message has finished,
+		// whichever generation issued it - pollInFlight tracks a running
+		// goroutine, not a generation, so this must be cleared before the
+		// epoch check below, unconditionally. handleDaemonLost and
+		// handleProbeResult's epoch bumps deliberately do not touch this
+		// flag themselves: an epoch bump does not mean the poll it retires
+		// has actually stopped running, and clearing the flag there instead
+		// of here let a stale straggler's completion race a wrongly-started
+		// second poll against the same Collector.
+		m.pollInFlight = false
+
+		if msg.Epoch != m.epoch {
+			// A retired generation's data is not applied. But this straggler
+			// was the only thing that could ever set pollInFlight back to
+			// false, so handleDaemonLost's own startPoll call was refused
+			// while it was in flight and the current generation has not
+			// actually polled yet - poll now rather than waiting out a full
+			// pollInterval. Deliberately no tick: the current generation's
+			// chain already exists (handleDaemonLost scheduled it), and a
+			// second one here would fork it. startPoll's own daemon check
+			// makes this a no-op if a daemon has taken over instead.
+			c := m.startPoll(false)
+			return m, c
+		}
+
+		// A failed poll carries no sessions. Leave state alone rather than
+		// blanking the table.
+		if msg.Sessions != nil {
+			m.applySnapshot(msg.Sessions)
+		}
+		cmds := m.checkStateTransitions(true)
+		if m.detailOpen {
+			cmds = append(cmds, m.refreshDetailCmd())
+		}
+		// A completed poll schedules no tick. The chain is continued by the
+		// tick handler instead, where every consumption of a tick is visible:
+		// continuing it from here meant a tick consumed without producing a
+		// completion (one that landed while a poll was already in flight) left
+		// the chain with no successor at all.
+		return m, tea.Batch(cmds...)
+	}
+
 	if msg.Epoch != m.epoch {
-		// In flight when the connection was retired. Applying it would
-		// overwrite self-polled state with data from a dead daemon.
+		return m, nil
+	}
+	if m.daemonConn == nil && m.daemonDecoder == nil {
 		return m, nil
 	}
 	if !m.daemonReady {
-		// The first snapshot arrived within the deadline set in New; clear
-		// it so a healthy daemon is never dropped for going idle between
-		// poll cycles.
 		if m.daemonConn != nil {
 			_ = m.daemonConn.SetReadDeadline(time.Time{})
 		}
 		m.daemonReady = true
 	}
 	m.lastSnapshot = time.Now()
+	m.applySnapshot(msg.Sessions)
 
-	m.sessions = msg.Sessions
-
-	// A snapshot delivers git and PR together, so if any session actually has
-	// PR data, there is no self-polling-style wait for a branch to show up
-	// before fetching PRs. Judge that on the snapshot as received, before
-	// warmCaches can backfill PRs from the cache: if the daemon's PR fetch
-	// failed or is still pending, a later fallback should still do its own
-	// eager PR fetch rather than sit on cached data for a full pr_interval.
-	for _, s := range m.sessions {
-		if s.PR != nil {
-			m.initialPRDone = true
-			break
-		}
-	}
-	m.warmCaches()
-
-	session.SortSessions(m.sessions, m.sortMode)
-	m.placeCursor()
-
-	cmds := m.checkStateTransitions()
+	cmds := m.checkStateTransitions(false)
 	if m.detailOpen {
 		cmds = append(cmds, m.refreshDetailCmd())
 	}
-	cmds = append(cmds,
-		listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName, m.epoch))
-
+	cmds = append(cmds, listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName, m.epoch))
 	return m, tea.Batch(cmds...)
+}
+
+// applySnapshot installs a set of sessions and everything derived from them.
+// Both paths funnel through here so neither can grow its own idea of what a
+// snapshot implies.
+func (m *Model) applySnapshot(sessions []*session.Session) {
+	m.sessions = sessions
+	m.warmCaches()
+	session.SortSessions(m.sessions, m.sortMode)
+	m.placeCursor()
+
+	if m.cachePath == "" {
+		return
+	}
+	snap := make([]*session.Session, len(m.sessions))
+	copy(snap, m.sessions)
+	path := m.cachePath
+	go func() { _ = cache.Save(path, snap) }()
 }
 
 func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
@@ -847,16 +996,23 @@ func (m Model) handleDaemonLost(msg DaemonLostMsg) (tea.Model, tea.Cmd) {
 		m.daemonDecoder = nil
 	}
 	m.epoch++
+	// pollInFlight is intentionally left untouched: it tracks whether a
+	// Snapshot goroutine is outstanding, not which generation started it, and
+	// an epoch bump does not mean one isn't. If a poll from the retired
+	// generation is still running, startPoll below correctly refuses to
+	// start a second one on top of it; handleSnapshot's Local branch is what
+	// restarts the loop once that straggler lands, whichever epoch it was
+	// for. See the comment there for why touching this flag here instead
+	// used to open a race between two concurrent Collector.Snapshot calls.
 	m.daemonReady = false
 	m.addNotification("daemon lost, polling directly", "warning")
-	return m, tea.Batch(
-		m.fetchTmuxCmd(),
-		m.fetchGitCmd(),
-		tmuxTickCmd(1*time.Second, m.epoch),
-		gitTickCmd(m.cfg.GetSettingDuration("git_interval"), m.epoch),
-		prTickCmd(m.cfg.GetSettingDuration("pr_interval"), m.epoch),
-		probeTickCmd(m.epoch),
-	)
+	// The second of the two places that start a self-poll chain (Init is the
+	// other). The tick is scheduled unconditionally, even if startPoll refuses
+	// because a straggler from the retired generation is still running: the
+	// chain belongs to this new generation, not to that poll.
+	poll := m.startPoll(false)
+	c := tea.Batch(poll, collectTickCmd(m.pollInterval(), m.epoch), probeTickCmd(m.epoch))
+	return m, c
 }
 
 // handleProbeResult installs a reconnected daemon, or keeps probing. Bumping
@@ -884,6 +1040,12 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 	// the deadline once something arrives.
 	_ = msg.Conn.SetReadDeadline(time.Now().Add(firstSnapshotTimeout))
 	m.epoch++
+	// pollInFlight is not reset here either, and for the same reason as
+	// handleDaemonLost: it tracks a goroutine, not this generation. A
+	// self-poll that was in flight when this reconnect happened stays true
+	// until it actually lands in handleSnapshot, which is what is now
+	// responsible for restarting the loop if this client falls back again
+	// before that straggler arrives.
 	m.daemonConn = msg.Conn
 	m.daemonDecoder = msg.Decoder
 	m.daemonReady = false
@@ -926,279 +1088,24 @@ func (m Model) staleAfter() time.Duration {
 	return d
 }
 
-func (m Model) handleTmuxUpdated(msg TmuxUpdatedMsg) (tea.Model, tea.Cmd) {
-	// Merge tmux metadata into existing sessions, preserving git/PR data
-	newByName := make(map[string]*session.Session)
-	for _, s := range msg.Sessions {
-		newByName[s.Name] = s
-	}
-
-	// Update existing sessions with fresh tmux data, keep git/PR
-	var merged []*session.Session
-	seen := make(map[string]bool)
-	for _, s := range msg.Sessions {
-		if old, ok := m.findSession(s.Name); ok {
-			old.IsCurrent = s.IsCurrent
-			old.IsLast = s.IsLast
-			old.HasBell = s.HasBell
-			old.PanePath = s.PanePath
-			merged = append(merged, old)
-		} else {
-			// New session — apply cached data
-			if git, ok := m.gitCache[s.Name]; ok {
-				s.Git = git
-			}
-			if s.Git.Branch != "" {
-				if pr, ok := m.prCache[s.Git.Branch]; ok {
-					s.PR = pr
-				}
-			}
-			merged = append(merged, s)
-		}
-		seen[s.Name] = true
-	}
-	m.sessions = merged
-
-	// Sort
-	session.SortSessions(m.sessions, m.sortMode)
-
-	m.placeCursor()
-
-	// State transitions
-	cmds := m.checkStateTransitions()
-
-	if m.detailOpen {
-		cmds = append(cmds, m.refreshDetailCmd())
-	}
-
-	return m, tea.Batch(cmds...)
-}
-
-func (m Model) handleGitUpdated(msg GitUpdatedMsg) (tea.Model, tea.Cmd) {
-	for name, git := range msg.GitData {
-		m.gitCache[name] = git
-	}
-	for _, s := range m.sessions {
-		if git, ok := msg.GitData[s.Name]; ok {
-			s.Git = git
-		}
-	}
-	m.warmCaches()
-
-	// Save cache (snapshot slice to avoid data race with main thread)
-	snap := make([]*session.Session, len(m.sessions))
-	copy(snap, m.sessions)
-	go func() { _ = cache.Save(cache.CachePath(), snap) }()
-
-	// Trigger initial PR poll once we have branches
-	var cmds []tea.Cmd
-	if !m.initialPRDone {
-		for _, s := range m.sessions {
-			if s.Git.Branch != "" {
-				m.initialPRDone = true
-				cmds = append(cmds, m.fetchPRsCmd())
-				break
-			}
-		}
-	}
-
-	cmds = append(cmds, m.checkStateTransitions()...)
-
-	if m.detailOpen {
-		cmds = append(cmds, m.refreshDetailCmd())
-	}
-
-	return m, tea.Batch(cmds...)
-}
-
-func (m Model) findSession(name string) (*session.Session, bool) {
-	for _, s := range m.sessions {
-		if s.Name == name {
-			return s, true
-		}
-	}
-	return nil, false
-}
-
-func (m Model) handlePRUpdated(msg PRUpdatedMsg) (tea.Model, tea.Cmd) {
-	for branch, pr := range msg.PRData {
-		if pr != nil {
-			m.prCache[branch] = pr
-		}
-	}
-	// Apply to sessions
-	for _, s := range m.sessions {
-		if s.Git.Branch != "" {
-			if pr, ok := m.prCache[s.Git.Branch]; ok {
-				s.PR = pr
-			}
-		}
-	}
-
-	cmds := m.checkStateTransitions()
-
-	if m.detailOpen {
-		cmds = append(cmds, m.refreshDetailCmd())
-	}
-
-	return m, tea.Batch(cmds...)
-}
-
 // --- Commands ---
 
-func tmuxTickCmd(interval time.Duration, epoch int) tea.Cmd {
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return TmuxTickMsg{Time: t, Epoch: epoch}
-	})
-}
-
-func gitTickCmd(interval time.Duration, epoch int) tea.Cmd {
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return GitTickMsg{Time: t, Epoch: epoch}
-	})
-}
-
 // renderTickCmd triggers a repaint with no fetch work, so the daemon path
-// gets the same render cadence tmuxTickCmd gives self-polling.
+// gets the same render cadence self-polling gets for free from its own
+// tight collectCmd loop.
 func renderTickCmd(interval time.Duration, epoch int) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return RenderTickMsg{Time: t, Epoch: epoch}
 	})
 }
 
+// delayedPRRefreshCmd triggers a follow-up forced poll a few seconds after an
+// action, to catch GitHub API updates (merge, review state) that lag behind
+// the action's own immediate refresh.
 func delayedPRRefreshCmd() tea.Cmd {
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
 		return DelayedPRRefreshMsg{}
 	})
-}
-
-func prTickCmd(interval time.Duration, epoch int) tea.Cmd {
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return PRTickMsg{Time: t, Epoch: epoch}
-	})
-}
-
-// fetchTmuxCmd fetches tmux session metadata only (fast, ~15ms).
-func (m Model) fetchTmuxCmd() tea.Cmd {
-	currentName := m.currentSessionName
-	return func() tea.Msg {
-		ctx := m.ctx
-		raw, err := fetch.ListSessions(ctx, m.cmd)
-		if err != nil {
-			return nil
-		}
-		current := fetch.CurrentSession(ctx, m.cmd)
-		if current == "" {
-			current = currentName
-		}
-		last := fetch.LastSession(ctx, m.cmd)
-		bells := fetch.BellFlags(ctx, m.cmd)
-
-		// Build name set to validate last session still exists
-		nameSet := make(map[string]bool, len(raw))
-		for _, r := range raw {
-			nameSet[r.Name] = true
-		}
-		if !nameSet[last] {
-			last = ""
-		}
-
-		sessions := make([]*session.Session, len(raw))
-		for i, r := range raw {
-			sessions[i] = &session.Session{
-				Name:      r.Name,
-				PanePath:  r.PanePath,
-				Created:   r.Created,
-				IsCurrent: r.Name == current,
-				IsLast:    r.Name == last,
-				HasBell:   bells[r.Name],
-			}
-		}
-		return TmuxUpdatedMsg{Sessions: sessions}
-	}
-}
-
-// fetchGitCmd fetches git status for all sessions in parallel.
-func (m Model) fetchGitCmd() tea.Cmd {
-	// Snapshot current sessions for path lookup
-	type sessionInfo struct {
-		Name     string
-		PanePath string
-	}
-	var infos []sessionInfo
-	for _, s := range m.sessions {
-		infos = append(infos, sessionInfo{Name: s.Name, PanePath: s.PanePath})
-	}
-	return func() tea.Msg {
-		ctx := m.ctx
-		if len(infos) == 0 {
-			return nil
-		}
-		gitWorkers := m.cfg.GetSettingInt("git_workers")
-		if gitWorkers < 1 {
-			gitWorkers = 1
-		}
-		result := make(map[string]session.GitStatus)
-		var mu sync.Mutex
-		sem := make(chan struct{}, gitWorkers)
-		var wg sync.WaitGroup
-		for _, info := range infos {
-			wg.Add(1)
-			go func(name, path string) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				if ctx.Err() != nil {
-					return
-				}
-				git := fetch.FetchGitStatus(ctx, m.cmd, path)
-				mu.Lock()
-				result[name] = git
-				mu.Unlock()
-			}(info.Name, info.PanePath)
-		}
-		wg.Wait()
-		return GitUpdatedMsg{GitData: result}
-	}
-}
-
-func (m Model) fetchPRsCmd() tea.Cmd {
-	return func() tea.Msg {
-		ctx := m.ctx
-		type branchRoot struct {
-			branch, gitRoot string
-		}
-		var branches []branchRoot
-		seen := make(map[string]bool)
-		for _, s := range m.sessions {
-			if s.Git.Branch != "" && s.Git.GitRoot != "" && !seen[s.Git.Branch] {
-				seen[s.Git.Branch] = true
-				branches = append(branches, branchRoot{s.Git.Branch, s.Git.GitRoot})
-			}
-		}
-
-		result := make(map[string]*session.PRStatus)
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, 4) // limit concurrent gh calls
-		for _, br := range branches {
-			wg.Add(1)
-			go func(branch, gitRoot string) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				if ctx.Err() != nil {
-					return
-				}
-				pr := fetch.FetchPRStatus(ctx, m.cmd, branch, gitRoot)
-				mu.Lock()
-				result[branch] = pr
-				mu.Unlock()
-			}(br.branch, br.gitRoot)
-		}
-		wg.Wait()
-		return PRUpdatedMsg{PRData: result}
-	}
 }
 
 func (m Model) refreshDetailCmd() tea.Cmd {
@@ -1206,17 +1113,33 @@ func (m Model) refreshDetailCmd() tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	mode := m.activeDetailMode()
-	if mode != view.DetailPane {
-		return nil
+	switch m.activeDetailMode() {
+	case view.DetailPane:
+		name := s.Name
+		window := m.cfg.GetSetting("capture_window")
+		return func() tea.Msg {
+			return PaneCapturedMsg{
+				SessionName: name,
+				Content:     fetch.CapturePane(m.ctx, m.cmd, name, 20, window),
+			}
+		}
+	case view.DetailPRComments:
+		if s.PR == nil || s.Git.Branch == "" {
+			return nil
+		}
+		if _, loaded := m.reviewComments[s.Git.Branch]; loaded {
+			return nil
+		}
+		branch, gitRoot, number := s.Git.Branch, s.Git.GitRoot, s.PR.Number
+		ctx, cmd := m.ctx, m.cmd
+		return func() tea.Msg {
+			return PRCommentsMsg{
+				Branch:   branch,
+				Comments: fetch.FetchReviewComments(ctx, cmd, gitRoot, number),
+			}
+		}
 	}
-	name := s.Name
-	window := m.cfg.GetSetting("capture_window")
-	return func() tea.Msg {
-		lines := 20
-		content := fetch.CapturePane(m.ctx, m.cmd, name, lines, window)
-		return PaneCapturedMsg{SessionName: name, Content: content}
-	}
+	return nil
 }
 
 func (m Model) mergeCmd(s *session.Session) tea.Cmd {
@@ -1237,7 +1160,7 @@ func (m Model) approveCmd(s *session.Session) tea.Cmd {
 	branch := s.Git.Branch
 	name := s.Name
 	return func() tea.Msg {
-		out, err := action.ApprovePR(context.Background(), m.cfg, gitRoot, branch)
+		out, err := action.ApprovePR(context.Background(), m.cfg, m.cmd, gitRoot, branch)
 		if err != nil {
 			return ActionResultMsg{Action: "approve", Session: name, OK: false, Message: out}
 		}
@@ -1287,7 +1210,7 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 
 func (m Model) dispatchCmd(input string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := action.Dispatch(context.Background(), m.cfg, input)
+		out, err := action.Dispatch(context.Background(), m.cfg, m.cmd, input)
 		if err != nil {
 			return ActionResultMsg{Action: "dispatch", Session: "", OK: false, Message: out}
 		}
@@ -1318,7 +1241,7 @@ func (m Model) batchApproveCmd() tea.Cmd {
 	return func() tea.Msg {
 		ok, fail := 0, 0
 		for _, s := range sessions {
-			_, err := action.ApprovePR(context.Background(), m.cfg, s.Git.GitRoot, s.Git.Branch)
+			_, err := action.ApprovePR(context.Background(), m.cfg, m.cmd, s.Git.GitRoot, s.Git.Branch)
 			if err != nil {
 				fail++
 			} else {
@@ -1386,65 +1309,51 @@ func (m Model) batchToggleDraftCmd() tea.Cmd {
 
 // --- State transitions ---
 
-func (m *Model) checkStateTransitions() []tea.Cmd {
+// checkStateTransitions renders the transitions in the current snapshot and,
+// when this client owns the poll loop, runs their side effects. Toasts and
+// auto-focus are per-client on purpose: each panel has its own screen and its
+// own cursor. Hooks and cleanups are not, which is why local gates them.
+func (m *Model) checkStateTransitions(local bool) []tea.Cmd {
+	events := m.detector.Detect(m.sessions)
+	notify := m.cfg.GetSettingBool("notifications_enabled")
+
 	var cmds []tea.Cmd
-	notificationsEnabled := m.cfg.GetSettingBool("notifications_enabled")
-	autoCleanup := m.cfg.GetSettingBool("auto_cleanup")
-
-	for _, s := range m.sessions {
-		newState := s.State()
-		oldState, existed := m.prevStates[s.Name]
-
-		if !existed {
-			m.prevStates[s.Name] = newState
+	for _, ev := range events {
+		if notify {
+			m.addNotification(fmt.Sprintf("%s → %s", ev.Session, ev.New), notifSeverity(ev.New))
+		}
+		if !local {
 			continue
 		}
 
-		if oldState == newState {
-			continue
-		}
+		ev := ev
+		effects, ctx := m.effects, m.ctx
 
-		m.prevStates[s.Name] = newState
-
-		if m.initialLoad {
-			continue
-		}
-
-		// Notification
-		if notificationsEnabled {
-			m.addNotification(fmt.Sprintf("%s → %s", s.Name, newState), notifSeverity(newState))
-
-			// Notify hook
-			hookVars := map[string]string{
-				"session":   s.Name,
-				"old_state": oldState.String(),
-				"new_state": newState.String(),
-			}
-			cfg := m.cfg
+		if ev.New != session.Done {
+			// Every other transition dispatches ungated: the notify hook
+			// must fire once per real transition, and only cleanup is
+			// destructive enough to need serializing.
 			cmds = append(cmds, func() tea.Msg {
-				_, _ = cfg.RunHook("notify", hookVars, "", 5_000_000_000)
+				effects.Run(ctx, ev)
 				return nil
 			})
+			continue
 		}
 
-		// Auto-cleanup
-		if autoCleanup && newState == session.Done && !s.IsCurrent {
-			s := s // capture
-			cmds = append(cmds, func() tea.Msg {
-				out, err := action.CleanupSession(context.Background(), m.cfg, m.cmd, s.Name, s.PanePath, s.Git.Branch, s.Git.GitRoot)
-				if err != nil {
-					return ActionResultMsg{Action: "auto-cleanup", Session: s.Name, OK: false, Message: out}
-				}
-				return ActionResultMsg{Action: "auto-cleanup", Session: s.Name, OK: true, Message: out}
-			})
+		if _, running := m.inFlightEffects[ev.Session]; running {
+			// A merged session that gets a bell re-enters Done before its
+			// first cleanup finished. Skipping silently is deliberate: the
+			// user already got the "-> done" toast, and a client has no log
+			// to explain a skip to the way the daemon does.
+			continue
 		}
+		m.inFlightEffects[ev.Session] = struct{}{}
+		cmds = append(cmds, func() tea.Msg {
+			effects.Run(ctx, ev)
+			return EffectDoneMsg{Session: ev.Session}
+		})
 	}
 
-	if m.initialLoad {
-		m.initialLoad = false
-	}
-
-	// Auto-focus
 	if !m.insideTmux && m.cfg.GetSettingBool("auto_focus") && time.Since(m.lastManualNav) > autoFocusCooldown {
 		m.maybeAutoFocus()
 	}
