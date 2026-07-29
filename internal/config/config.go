@@ -40,6 +40,7 @@ var settingDefaults = map[string]settingDef{
 	"notifications_enabled": {"VIGIL_NOTIFICATIONS", "true"},
 	"auto_cleanup":          {"VIGIL_AUTO_CLEANUP", "false"},
 	"auto_focus":            {"VIGIL_AUTO_FOCUS", "true"},
+	"panel_auto":            {"VIGIL_PANEL_AUTO", "true"},
 }
 
 var hookDefaults = map[string]string{
@@ -104,6 +105,13 @@ func (c *Config) GetSettingBool(name string) bool {
 // GetSettingDuration returns a setting as a time.Duration in seconds.
 func (c *Config) GetSettingDuration(name string) time.Duration {
 	return time.Duration(c.GetSettingInt(name)) * time.Second
+}
+
+// IsSetting reports whether name is a known setting. Callers need this to
+// tell an unknown key from a setting whose value is legitimately empty.
+func IsSetting(name string) bool {
+	_, ok := settingDefaults[name]
+	return ok
 }
 
 // GetHook returns the hook command template, or "" if disabled/unconfigured.

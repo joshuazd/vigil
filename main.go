@@ -26,6 +26,8 @@ func parseArgs(args []string) (string, []string, error) {
 	switch args[0] {
 	case "daemon":
 		return "daemon", args[1:], nil
+	case "config":
+		return "config", args[1:], nil
 	case "--panel":
 		return "panel", args[1:], nil
 	case "--help", "-h":
@@ -42,7 +44,7 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	command, _, err := parseArgs(args)
+	command, rest, err := parseArgs(args)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "vigil: %v\n", err)
 		printUsage(stderr)
@@ -56,6 +58,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "version":
 		_, _ = fmt.Fprintln(stdout, "vigil "+version)
 		return 0
+	case "config":
+		return runConfigGet(rest, stdout, stderr)
 	}
 
 	for _, dep := range []string{"tmux", "git", "gh"} {
@@ -83,6 +87,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "vigil: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+// runConfigGet answers before the dependency check on purpose: reading a
+// config value has no business requiring gh to be installed.
+func runConfigGet(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 2 || args[0] != "get" {
+		_, _ = fmt.Fprintln(stderr, "vigil: usage: vigil config get <key>")
+		return 2
+	}
+	key := args[1]
+	if !config.IsSetting(key) {
+		_, _ = fmt.Fprintf(stderr, "vigil: unknown setting: %s\n", key)
+		return 1
+	}
+	cfg, err := config.Load(config.ConfigPath())
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "vigil: %v (using defaults)\n", err)
+	}
+	_, _ = fmt.Fprintln(stdout, cfg.GetSetting(key))
 	return 0
 }
 
@@ -115,6 +139,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  vigil            Run the dashboard")
 	_, _ = fmt.Fprintln(w, "  vigil daemon     Run the state daemon in the foreground")
 	_, _ = fmt.Fprintln(w, "  vigil --panel    Run the compact session list for a tmux pane")
+	_, _ = fmt.Fprintln(w, "  vigil config get <key>   Print a config value")
 	_, _ = fmt.Fprintln(w, "  vigil --help")
 	_, _ = fmt.Fprintln(w, "  vigil --version")
 	_, _ = fmt.Fprintln(w)

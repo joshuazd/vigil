@@ -91,3 +91,45 @@ func TestRunRejectsAnUnknownArgumentWithExitTwo(t *testing.T) {
 		t.Errorf("got stderr %q, want it to mention the unknown argument", stderr.String())
 	}
 }
+
+// The dependency check must not run before config get. A bash caller that
+// receives "gh not found" instead of a value would silently disable the panel
+// on any machine mid-setup, which looks identical to panel_auto = false.
+func TestConfigGetAnswersWithoutTheDependencies(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "get", "panel_auto"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("got exit code %d and stderr %q, want 0", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "true" {
+		t.Errorf("got stdout %q, want true", stdout.String())
+	}
+}
+
+func TestConfigGetRejectsAnUnknownKey(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "get", "no_such_setting"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("got exit code %d, want 1", code)
+	}
+	if stdout.String() != "" {
+		t.Errorf("got stdout %q, want nothing", stdout.String())
+	}
+}
+
+func TestConfigRejectsAMissingSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("got exit code %d, want 2", code)
+	}
+}
+
+func TestConfigGetHonoursTheEnvironment(t *testing.T) {
+	t.Setenv("VIGIL_PANEL_AUTO", "false")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"config", "get", "panel_auto"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("got exit code %d, want 0", code)
+	}
+	if strings.TrimSpace(stdout.String()) != "false" {
+		t.Errorf("got stdout %q, want false", stdout.String())
+	}
+}
