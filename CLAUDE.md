@@ -7,11 +7,18 @@ TUI dashboard for tmux sessions. Monitors git status and GitHub PR state across 
 An approved 6-phase design is turning the session list into the primary surface, with
 sessions expanded next to it. Phases 0, 1 and 2 are merged. The three items phase 2 listed
 as blocking phase 3 are **merged to main** as commit 31721d4 on 2026-07-29. The blocker branch was
-`phase-2-blockers`; its history is in that merge commit. Phase 3 is next, and the
-design says to live on phase 2 before planning it.
+`phase-2-blockers`; its history is in that merge commit. Phase 3 is built on branch
+`phase-3-panel`, which spans **two repositories** - `~/vigil` and `~/dotfiles`, both on a
+branch of that name - and neither half works without the other.
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
 `internal/view`'s layout, or the launch path in `~/dotfiles`:
 
+- `docs/superpowers/specs/2026-07-29-phase-3-panel-by-default-design.md` - the phase 3
+  design. Its "What this does not fix" section is the honest account of the effect-ownership
+  race and is worth reading before touching `spawnDaemonOnce` or `handleDaemonLost`.
+- `docs/superpowers/plans/2026-07-29-phase-3-panel-by-default.md` - the phase 3 plan. Two
+  of its briefs carry inline **Correction** blocks where the shipped code diverged from
+  what they prescribed; the corrections are right and the surrounding brief is not.
 - `docs/superpowers/2026-07-28-phase-2-blockers-handoff.md` - current state, the debt
   still open, the landmines, and the verification results (the four load-bearing checks are
   run and passed; four smaller ones are not). **Start here.**
@@ -30,7 +37,7 @@ Read these before changing the daemon, `internal/collect`, `internal/transition`
 
 Go + Bubble Tea TUI. Single static binary.
 
-- `main.go` — Entry point, dependency checks, tea.NewProgram
+- `main.go` — Entry point, dependency checks, tea.NewProgram. `main` is one line: the body is `run(args []string, stdout, stderr io.Writer) int`, which exists so exit codes and dispatch order are assertable. `vigil config get <key>` dispatches alongside `help` and `version`, i.e. **before** the `tmux`/`git`/`gh` `LookPath` check - a bash caller receiving "gh not found" instead of a value would silently disable the panel on a machine mid-setup, which is indistinguishable from `panel_auto = false`
 - `internal/model/model.go` — Bubble Tea Model/Update/View, polling, state management
 - `internal/model/keys.go` — Keybindings
 - `internal/model/messages.go` — All tea.Msg types
@@ -44,7 +51,7 @@ Go + Bubble Tea TUI. Single static binary.
 - `internal/transition/` - state-change detection (`Detector`) and the side effects a change triggers (`Runner`: the `notify` hook and `auto_cleanup`). Shared, because side effects belong to whoever owns the poll loop - the daemon when a client is connected to one, a self-polling client otherwise - and detection must not be implemented twice
 - `internal/protocol/` - newline-delimited JSON snapshot protocol over a unix socket
 - `internal/daemon/` - `vigil daemon`: runs one `Snapshot` per tick at `tmux_interval` (default 1s) so tmux metadata (including bell flags) is never more than a tick stale; git state is gated inside `Snapshot` on `git_interval` (default 3s) and PR state per branch on `pr_interval` (default 30s), each via its own memo. Startup serializes on an flock'd lock file beside the socket (`vigild.sock.lock`), held across the stale-socket removal and the bind, so racing daemons cannot both bind. Every client gets its own writer goroutine and a one-deep latest-wins queue, so a client that stops reading can neither stall the poll loop nor block new connections. `New` wires a `transition.Detector` and a `transition.Runner` (nil disables both, which is what a `Server` literal in a test gets); effects run in one goroutine per event because `poll` is synchronous per tick, and `Run` waits on `pendingEffects` before returning
-- `vigil --panel` - the same `Model` with `panelMode` set: compact status bar, width-responsive table, no detail panel and no footer. A panel starts the daemon if none is running; the dashboard does not
+- `vigil --panel` - the same `Model` with `panelMode` set: compact status bar, width-responsive table, no detail panel and no footer. A panel starts the daemon if none is running; the dashboard does not. Since phase 3 a panel is also created for every new tmux session, so this is the common way vigil runs, not the rare one
 
 ## Testing
 
@@ -70,6 +77,8 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - Both the daemon and a self-polling client run one `Collector.Snapshot` per `tmux_interval` (default 1s); git and PR work is gated inside it by the `git_interval` (default 3s) and `pr_interval` (default 30s) memos. The TUI has no separate tmux/git/PR tick cycles - `fetchTmuxCmd`, `fetchGitCmd`, `fetchPRsCmd` and their messages and ticks are gone
 - `Collector.Snapshot` is not reentrant: its memos are owned by the calling goroutine. `Model.startPoll` is the only issuer of `collectCmd` and refuses while `pollInFlight`, so at most one `Snapshot` is ever in flight per client. The self-poll chain is a self-rescheduling one-shot `CollectTickMsg`, created at exactly two sites (`Init`'s fallback branch and `handleDaemonLost`) and continued only in the tick handler
 - State-transition side effects run once per event, in whichever process owns the poll loop. Toasts and auto-focus stay per-client. `auto_cleanup` failures go to the daemon log, not to a client
+- A panel that spawns a daemon stops owning effects for `spawnGrace` (5s), because `newModel` spawns and starts self-polling in the same breath while the reconnect probe only lands a probe interval later, and both would run the same event's effects. The rule is **arm on any successful spawn, provided the client has had a live daemon connection since the last arm** - not "arm once". The proviso is a `daemonSeenSinceArm` bool set only where a working connection is established (`newModel`'s dial, `handleProbeResult`'s live-conn branch) and cleared on every arm, so a daemon that spawns and never comes up arms exactly once and cannot chain suppressions. Arm-once was the original decision and missed daemon *restart*, where the two processes then run one `Done` event's `CleanupSession` twice against one worktree. Toasts are above the gate and unaffected
+- The spawn grace **narrows** the two-owner window rather than closing it. It arms on spawn, but the hazardous state is "self-polling while a daemon is alive": `handleDaemonLost` starts self-polling and owning effects immediately and arms nothing, and only a *failed* probe reaches `spawnDaemonOnce`. A slow first snapshot (`firstSnapshotTimeout`, 5s, re-armed per reconnect) can loop a panel through connect/timeout/self-poll with an unsuppressed window each lap. `inFlightEffects` is per-process and cannot help across it. The real fix is asserted ownership, not a timer
 - `Done`-bound effects are serialized per session on both paths (`inFlightEffects`), because a merged session that gets a bell re-enters `Done` and would otherwise run two `CleanupSession` calls against one worktree. Every other transition dispatches ungated
 - `transition.Runner` refuses cleanup for a session that any client is attached to (`fetch.AttachedSessions`), and for a malformed event (empty `Session`, `PanePath` or `GitRoot`, logged). Both guards fail closed: if tmux cannot be reached, or the session is absent from tmux's list, cleanup is skipped
 - The review-threads poll fetches only the unresolved count (`reviewThreadsQuery` has no `comments(` connection). Comment bodies are fetched on demand for the selected branch (`FetchReviewComments`) and cached by branch in `Model.reviewComments`; the cache is only cleared by `r`
@@ -91,4 +100,7 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - `nameMin` (8) never binds: the narrowest name the top four tiers yield at their own thresholds is 9 or 10, and the bare tier clamps to 1 instead. It documents the floor the frozen thresholds must respect rather than clamping anything, and lowering it is not caught by any test
 - Every self-rescheduling tick carries an `epoch`. Bubble Tea ticks cannot be cancelled, so switching between daemon snapshots and self-polling bumps the epoch and the previous generation's ticks retire themselves
 - A client that loses the daemon self-polls and probes the socket every 2s until it is back. A connected but silent daemon shows `daemon stale Ns` in the status bar after three poll intervals
-- Panel geometry is tmux's concern, not vigil's: vigil renders to fit whatever pane it is given and never chooses or changes its own size. The toggle that measures the client and splits lives on the dotfiles side (`~/dotfiles`, `scripts/scripts/vigil-panel`, bound to `prefix p`) - a separate repository, merged there already
+- `panel_auto` (env `VIGIL_PANEL_AUTO`, default `"true"`) is the on/off switch for the phase 3 behaviour, read by bash as `vigil config get panel_auto`. Geometry stays in tmux user options because it is per-client and per-monitor; *whether the user wants panels at all* is a vigil preference and belongs in the file the user already edits. `config.IsSetting` exists because `GetSetting` cannot tell an unknown key from a setting that is legitimately empty, which `capture_window` is by default
+- Any test that reaches `config.Load(config.ConfigPath())` must set its own `HOME`. `ConfigPath` resolves under `os.UserHomeDir`, so without one the suite reads the developer's real `~/.config/vigil/config.toml` - and `panel_auto = "false"` there, the documented way to turn the panel off, turned the suite red. Same class as the `cachePath` note above, different file
+- Panel geometry is tmux's concern, not vigil's: vigil renders to fit whatever pane it is given and never chooses or changes its own size. Both panel creation paths live on the dotfiles side (`~/dotfiles`, `scripts/scripts/lib/tmux.sh`) - a separate repository. `add_vigil_panel <window-target>` is the one implementation of "split a panel and mark the pane"; `vigil-panel` (bound to `prefix p`) is a thin toggle over it, and `create_tmux_session` calls it for every new session
+- The dotfiles half has one non-obvious rule vigil readers keep rediscovering: `create_tmux_session` runs `tmux new-session -d`, and a detached session has no client, so tmux sizes its windows to `default-size` 80x24. A 40-column panel is then half the window and tmux scales it to ~175 columns when a 350-column client attaches. `new-session` therefore takes `-x/-y` from the calling client (omitted entirely when there is no client - real tmux rejects an empty `-x` and would cost the user the session). `prefix p` never had this problem, because the window it splits is already at client size
