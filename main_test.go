@@ -25,6 +25,43 @@ func TestParseArgsRejectsAnUnknownArgument(t *testing.T) {
 	}
 }
 
+func TestParseArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no args runs the tui", nil, "tui"},
+		{"daemon subcommand", []string{"daemon"}, "daemon"},
+		{"long help", []string{"--help"}, "help"},
+		{"short help", []string{"-h"}, "help"},
+		{"long version", []string{"--version"}, "version"},
+		{"short version", []string{"-v"}, "version"},
+		{"panel flag", []string{"--panel"}, "panel"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := parseArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseArgs(%v): %v", tc.args, err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseArgsRejectsUnknown(t *testing.T) {
+	got, _, err := parseArgs([]string{"--bogus"})
+	if err == nil {
+		t.Fatalf("want an error, got command %q", got)
+	}
+	if !strings.Contains(err.Error(), "--bogus") {
+		t.Errorf("error %q should name the offending argument", err)
+	}
+}
+
 func TestRunPrintsVersion(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"--version"}, &stdout, &stderr); code != 0 {
