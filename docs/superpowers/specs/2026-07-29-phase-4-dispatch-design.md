@@ -10,10 +10,12 @@ This is the design for phase 4 of the cockpit plan
 > The menu bar calls `vigil dispatch` instead of the popup tunnel. The standalone `dispatch`
 > CLI keeps working unchanged for direct terminal use.
 
-Read `docs/superpowers/2026-07-29-phase-3-handoff.md` first. This design depends on two of
-its findings: the effect-ownership race it says is narrowed rather than closed, and the
-80x24 headless-window landmine it says is still open. Phase 4 is the case that landmine
-fires in.
+Read `docs/superpowers/2026-07-29-phase-3-handoff.md` first. This design started from two of
+its findings. One is now history: the effect-ownership race it describes as narrowed rather
+than closed *is* closed, by `b8afd82`, which landed ahead of phase 4 precisely because a cold
+dispatch was the named trigger. See "What this does not fix" for why the ordering went that
+way. The other is still live: the 80x24 headless-window landmine it says remains open. Phase
+4 is the case that landmine fires in, on every dispatch.
 
 Like phase 3, this spans **two repositories** and neither half works without the other.
 
@@ -381,21 +383,39 @@ Real-machine verification list:
 
 ## What this does not fix
 
-**Phase 4 makes the effect-ownership race more likely to bite.** The phase 3 handoff names
-the scenario precisely: `firstSnapshotTimeout` is 5 seconds and is re-armed on every
-reconnect, so *"a daemon whose first `Snapshot` exceeds it - git plus `gh` across many
-sessions on a cold dispatch, which is precisely the phase-3 scenario - can put a panel in a
-repeating loop of connect, timeout, self-poll, reconnect"*, and `inFlightEffects` is
-per-process, so a `Done` landing in one of those laps is two `CleanupSession` calls against
-one worktree.
+**The effect-ownership race was closed before this phase started, deliberately.** As first
+written, this section said phase 4 made the race more likely to bite and should not be
+merged without deciding whether the spawn-grace timer held under it. That was the right
+concern and it was answered by fixing it rather than by measuring it: asserted effect
+ownership landed on `main` as `b8afd82`, ahead of phase 4.
 
-Phase 4 does two things that push on exactly that. A dispatch adds a session, and every new
-session gets a panel, so both the snapshot cost and the client count grow. And
-`vigil dispatch` can now spawn the daemon, which means a cold daemon's first snapshot can
-be triggered by a dispatch rather than by a panel. This design does not close the race -
-the real fix is asserted ownership, not a timer - but it should not be merged without
-someone deciding whether the timer holds under it. Raising `firstSnapshotTimeout` is a
-mitigation, not a fix, and it trades against how long a panel waits before falling back.
+The reasoning is worth keeping, because it is why the ordering is what it is. The phase 3
+handoff named the trigger precisely - *"a daemon whose first `Snapshot` exceeds it - git plus
+`gh` across many sessions on a cold dispatch, which is precisely the phase-3 scenario - can
+put a panel in a repeating loop of connect, timeout, self-poll, reconnect"* - and phase 4
+pushes on it from two directions: a dispatch adds a session and every new session gets a
+panel, so both the snapshot cost and the client count grow; and `vigil dispatch` can spawn
+the daemon, so a cold daemon's first snapshot can now be triggered by a dispatch rather than
+by a panel. Building dispatch on a timer that only narrowed that window would have meant
+inheriting a known hole and widening it in the same phase.
+
+What phase 4 now builds on: the daemon is the sole owner of transition side effects, clients
+hold no `EffectRunner`, and `transition.Runner` is constructed only in `internal/daemon`.
+Two things follow for this design. There is no client-side effect path for a dispatch to
+perturb, so nothing in this spec needs to reason about who owns an event. And every mode now
+spawns a daemon when none answers and retries on every failed probe, which subsumes the
+"spawn one, then submit" decision above rather than conflicting with it - `vigil dispatch`
+spawning a daemon is the same behavior every other entry point already has.
+
+The inherited cost is the one asserted ownership chose: **while no daemon is running, the
+`notify` hook does not fire and nothing is auto-cleaned.** For phase 4 that means a dispatch
+submitted against a daemon that fails to come up produces no hooks for the sessions it
+creates until one does. Toasts are unaffected.
+
+One piece of debt carries into this phase: nothing enforces that `transition.Runner` is
+constructed only in `internal/daemon`. It is true by inspection and asserted in two doc
+comments, but a client-side effect path would compile and pass the suite. Phase 4 adds a job
+runner to the daemon, which is the first new code to sit next to that boundary.
 
 **A job dies with the daemon.** The job is a child of `vigild` because capturing its output
 is the whole point of the status line, and a `setsid`'d grandchild cannot be watched. This
