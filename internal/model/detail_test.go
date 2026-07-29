@@ -172,11 +172,12 @@ func TestRefreshDetailCmdEmptyBranchProducesNoCommand(t *testing.T) {
 
 // TestRefreshKeyClearsReviewCommentsCache is the escape hatch for a comment
 // cache that otherwise never invalidates: pressing r must drop any cached
-// entries so the next comments-mode render refetches, on both the
-// self-polling and daemon-fed paths (a daemon-fed client cannot force a poll
-// at all, so this clear is the only lever it has). Driven through Update
+// entries so the next comments-mode render refetches. Driven through Update
 // with a real key message, not by calling handleKey's Refresh branch
-// directly, so production is what supplies the clear.
+// directly, so production is what supplies the clear. This is the
+// self-polling configuration (daemonConn is nil); see
+// TestRefreshKeyClearsReviewCommentsCacheWhenDaemonFed for the daemon-fed
+// one, which is the configuration where this clear actually matters.
 func TestRefreshKeyClearsReviewCommentsCache(t *testing.T) {
 	m := newTestModel()
 	s := commentSession()
@@ -193,6 +194,37 @@ func TestRefreshKeyClearsReviewCommentsCache(t *testing.T) {
 
 	if _, ok := m2.reviewComments[s.Git.Branch]; ok {
 		t.Fatal("refresh did not clear the cached comments")
+	}
+	if cmd := m2.refreshDetailCmd(); cmd == nil {
+		t.Error("want refreshDetailCmd to refetch once the cache entry is cleared")
+	}
+}
+
+// TestRefreshKeyClearsReviewCommentsCacheWhenDaemonFed pins the clear in the
+// one configuration where it is not merely nice to have but the only lever
+// available: a daemon-fed client (daemonConn set) cannot force a poll of its
+// own, since startPoll refuses outright while a daemon is connected, so the
+// unconditional clear ahead of that refusal is its sole escape hatch from a
+// stale comment cache. Gating the clear on m.daemonConn == nil would leave
+// TestRefreshKeyClearsReviewCommentsCache (daemonConn nil) as the only
+// coverage and this exact regression would pass the whole suite.
+func TestRefreshKeyClearsReviewCommentsCacheWhenDaemonFed(t *testing.T) {
+	m := newTestModel()
+	s := commentSession()
+	m.sessions = []*session.Session{s}
+	m.detailOpen = true
+	mode := view.DetailPRComments
+	m.detailMode = &mode
+	m.daemonConn = &fakeConn{}
+	m.reviewComments = map[string][]session.ReviewComment{
+		s.Git.Branch: {{Author: "reviewer", Body: "stale"}},
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m2 := next.(Model)
+
+	if _, ok := m2.reviewComments[s.Git.Branch]; ok {
+		t.Fatal("refresh did not clear the cached comments for a daemon-fed client")
 	}
 	if cmd := m2.refreshDetailCmd(); cmd == nil {
 		t.Error("want refreshDetailCmd to refetch once the cache entry is cleared")
