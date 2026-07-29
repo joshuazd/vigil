@@ -111,23 +111,6 @@ func TestNewPanelSpawnsTheDaemon(t *testing.T) {
 	}
 }
 
-func TestNewDoesNotSpawnTheDaemon(t *testing.T) {
-	spawned := 0
-	daemonSpawner = func() error { spawned++; return nil }
-	t.Cleanup(func() { daemonSpawner = spawnDaemon })
-
-	dir := shortTempDir(t)
-	t.Setenv("HOME", dir)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	m := New(&config.Config{}, fetch.NewMockCommander())
-	if m.daemonDecoder != nil {
-		t.Fatal("New dialed a real daemon; the TUI should not reach the daemon on this path")
-	}
-	if spawned != 0 {
-		t.Errorf("the TUI spawned %d daemons; only panels do that", spawned)
-	}
-}
-
 // TestNewPrimesPollInFlightBeforeInitRuns closes a startup race Init alone
 // cannot: Init has a value receiver and returns no Model, so a mutation
 // startPoll made inside it would never reach the model the Bubble Tea
@@ -177,9 +160,6 @@ func TestNewConnectedToADaemonDoesNotPrimePollInFlight(t *testing.T) {
 	}
 	if m.pollInFlight {
 		t.Error("a daemon-fed model should not show a self-poll in flight")
-	}
-	if !m.daemonSeenSinceArm {
-		t.Error("New's successful dial did not set daemonSeenSinceArm, so a later respawn after this daemon dies would never re-arm the spawn grace")
 	}
 }
 

@@ -1,6 +1,9 @@
 // Package transition detects session state changes and runs the side effects
-// they trigger. Both the daemon and the TUI need this, and one of them is
-// always the owner of the poll loop, so it lives here rather than in either.
+// they trigger. The two halves have different owners. Detection is shared:
+// every TUI client runs a Detector of its own, because a toast belongs to a
+// screen. The effects are the daemon's alone - Runner is constructed nowhere
+// else - so that ownership is asserted rather than inferred from which process
+// happens to own the poll loop at the time.
 package transition
 
 import (
@@ -73,9 +76,11 @@ type EffectRunner interface {
 	Run(ctx context.Context, ev Event)
 }
 
-// Runner performs the side effects of one transition. Exactly one process runs
-// these per event: the daemon when clients are attached to one, a self-polling
-// client otherwise. Logf is where failures go, because the daemon has no screen.
+// Runner performs the side effects of one transition. Only the daemon runs
+// these, whether or not any client is attached to it, and a client that is
+// self-polling for data does not become an owner by doing so. The consequence
+// is deliberate: while no daemon is running, no notify hook fires and nothing
+// is auto-cleaned. Logf is where failures go, because the daemon has no screen.
 type Runner struct {
 	Cfg  *config.Config
 	Cmd  fetch.Commander

@@ -522,12 +522,10 @@ func TestDoneDispatchesAfterPriorCleanupCompletes(t *testing.T) {
 // TestNonDoneEventsDispatchWhileACleanupIsInFlight pins finding 1's fix
 // directly: gating every effect (not just the destructive one) silently
 // suppressed the notify hook for every transition on a session while any one
-// of its effects was running, breaking CLAUDE.md's requirement that the
-// daemon-fed and self-polling paths behave identically - a self-polling
-// client has no such gate and fires all three. Only the Done-bound
-// (cleanup-eligible) dispatch may serialize; every other transition must
-// still dispatch immediately, even with a slow cleanup in flight for the
-// very same session.
+// of its effects was running, breaking the rule that the hook fires once per
+// real transition. Only the Done-bound (cleanup-eligible) dispatch may
+// serialize; every other transition must still dispatch immediately, even
+// with a slow cleanup in flight for the very same session.
 func TestNonDoneEventsDispatchWhileACleanupIsInFlight(t *testing.T) {
 	cmd, toggle := newDoneToggleCommander("alpha")
 	effects := newDoneGate("alpha")
