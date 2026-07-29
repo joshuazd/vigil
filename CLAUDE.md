@@ -6,9 +6,9 @@ TUI dashboard for tmux sessions. Monitors git status and GitHub PR state across 
 
 An approved 6-phase design is turning the session list into the primary surface, with
 sessions expanded next to it. Phases 0, 1 and 2 are merged. The three items phase 2 listed
-as blocking phase 3 are **done on branch `phase-2-blockers` (48 commits), which was not yet
-merged when this was written** - check `git log main..phase-2-blockers` before assuming
-either way. Phase 3 is next, and the design says to live on phase 2 before planning it.
+as blocking phase 3 are **merged to main** as commit 31721d4 on 2026-07-29. The blocker branch was
+`phase-2-blockers`; its history is in that merge commit. Phase 3 is next, and the
+design says to live on phase 2 before planning it.
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
 `internal/view`'s layout, or the launch path in `~/dotfiles`:
 

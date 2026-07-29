@@ -1,7 +1,7 @@
 # Phase 2 blockers: state after the branch
 
 Written 2026-07-28 and updated 2026-07-29 with the verification results, at the point the
-`phase-2-blockers` branch was finished (48 commits, HEAD at the verification update). Suite
+`phase-2-blockers` branch was finished (merged to main as 31721d4). Suite
 green under `-race`, `golangci-lint` clean. Read this plus the specs before phase 3.
 
 - Design for this work: `docs/superpowers/specs/2026-07-27-phase-2-blockers-design.md`.
