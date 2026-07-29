@@ -56,11 +56,11 @@ type Server struct {
 	// is actually destructive: a bell flip on a merged session yields two
 	// New == session.Done events, and without this, both could start a
 	// CleanupSession against the same worktree concurrently. Every other
-	// transition dispatches unconditionally and untracked, so the notify
-	// hook fires once per real transition on both the daemon-fed and
-	// self-polling paths. A dedicated mutex rather than mu: mu is about a
-	// different piece of state (latest), and the dispatching goroutine, not
-	// just poll, needs to take this one (to delete on completion).
+	// transition dispatches ungated so the notify hook fires; Done transitions
+	// are gated, and a repeat Done during cleanup is skipped entirely. A
+	// dedicated mutex rather than mu: mu is about a different piece of state
+	// (latest), and the dispatching goroutine, not just poll, needs to take
+	// this one (to delete on completion).
 	effectsMu       sync.Mutex
 	inFlightEffects map[string]struct{}
 

@@ -395,6 +395,39 @@ func TestTierBoundariesAreFrozen(t *testing.T) {
 	}
 }
 
+// TestFrozenThresholdsAdmitAUsefulName asserts that every tier threshold leaves
+// at least nameMin columns of name (except the bare tier, which floors at 1
+// rather than nameMin because the panel cannot waste space below that width).
+// This keeps the tiers honest against the costs: if nameMin rises or a fixed
+// cost grows, the threshold must grow too.
+func TestFrozenThresholdsAdmitAUsefulName(t *testing.T) {
+	tests := []struct {
+		name  string
+		tier  int
+		fixed int
+	}{
+		{"full", tierFull, fullFixed},
+		{"noGit", tierNoGit, noGitFixed},
+		{"compact", tierCompact, compactFixed},
+		{"noPR", tierNoPR, noPRFixed},
+	}
+	for _, tc := range tests {
+		available := tc.tier - tc.fixed
+		if available < nameMin {
+			t.Errorf("%s tier: threshold %d - fixed %d = %d columns, want >= nameMin (%d)",
+				tc.name, tc.tier, tc.fixed, available, nameMin)
+		}
+	}
+	// Bare tier clamps to 1 instead of nameMin: at width 4, the available
+	// name space is only 2 columns (4 - bareFixed(2)), so the threshold
+	// itself proves nameMin is incompatible with bare tier geometry.
+	availableBare := tierBare - bareFixed
+	if availableBare < 1 {
+		t.Errorf("bare tier: threshold %d - fixed %d = %d columns, want >= 1",
+			tierBare, bareFixed, availableBare)
+	}
+}
+
 // TestPanelWidthStillPicksTheCompactTier pins the layout the phase 2 resize
 // verification was run at. Deriving the thresholds from the corrected costs
 // moves 40 onto the noGit tier, where it gets a 9-column name beside a full PR
