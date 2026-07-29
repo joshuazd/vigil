@@ -70,8 +70,9 @@ type PRCommentsMsg struct {
 
 // SnapshotMsg carries a full session snapshot, with per-client flags already
 // resolved. Local says this client collected it itself rather than receiving it
-// from a daemon, which is what makes this client the owner of the poll loop and
-// therefore responsible for state-transition side effects.
+// from a daemon, which is what tells handleSnapshot to clear pollInFlight and
+// to keep the self-poll chain alive. It says nothing about side effects: those
+// are the daemon's regardless of who collected this snapshot.
 type SnapshotMsg struct {
 	Sessions []*session.Session
 	Epoch    int
@@ -82,12 +83,6 @@ type SnapshotMsg struct {
 // resume self-polling.
 type DaemonLostMsg struct {
 	Epoch int
-}
-
-// EffectDoneMsg reports that a transition's side effects finished, so the
-// session can accept another Done-bound effect.
-type EffectDoneMsg struct {
-	Session string
 }
 
 // ProbeTickMsg schedules the next attempt to reach the daemon. It only fires

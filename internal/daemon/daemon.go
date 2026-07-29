@@ -221,9 +221,8 @@ func (s *Server) poll(ctx context.Context) {
 		ev := ev
 		if ev.New != session.Done {
 			// Every other transition dispatches ungated: the notify hook
-			// must fire once per real transition on this path exactly as it
-			// does on the self-polling path, and only cleanup is destructive
-			// enough to need serializing.
+			// must fire once per real transition, and only cleanup is
+			// destructive enough to need serializing.
 			s.pendingEffects.Add(1)
 			go func() {
 				defer s.pendingEffects.Done()

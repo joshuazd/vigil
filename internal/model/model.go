@@ -28,16 +28,9 @@ import (
 
 const autoFocusCooldown = 15 * time.Second
 
-// spawnCooldown is the floor between two attempts by one panel to start a
+// spawnCooldown is the floor between two attempts by one client to start a
 // daemon.
 const spawnCooldown = 15 * time.Second
-
-// spawnGrace is how long a panel that just spawned a daemon waits before it
-// will run transition effects itself. A healthy reconnect lands at
-// daemonProbeInterval plus the dial, well inside this.
-//
-// A var, not a const, so tests shorten it rather than sleeping.
-var spawnGrace = 5 * time.Second
 
 type Model struct {
 	// Data
@@ -49,41 +42,13 @@ type Model struct {
 	// comments mode reads them, and only for the selected session.
 	reviewComments map[string][]session.ReviewComment
 
-	// detector tracks per-session state across snapshots to produce
-	// transition events; effects runs their side effects. Both are shared
-	// with internal/transition so the daemon and a self-polling client agree
-	// on what counts as a transition.
+	// detector tracks per-session state across snapshots to produce the
+	// transition events this client renders as toasts. It is shared with
+	// internal/transition so a client and the daemon cannot grow two ideas of
+	// what counts as a transition. The side effects of a transition - the
+	// notify hook and auto_cleanup - are the daemon's alone, so no client
+	// holds a transition.EffectRunner.
 	detector *transition.Detector
-	effects  transition.EffectRunner
-
-	// inFlightEffects serializes cleanup per session: a merged session that
-	// gets a bell re-enters Done, and two concurrent CleanupSession calls
-	// would race one worktree.
-	inFlightEffects map[string]struct{}
-
-	// effectsDisownedUntil suppresses this client's transition effects while a
-	// daemon it just spawned is coming up. Both would otherwise own the same
-	// event: newModel spawns and starts self-polling immediately, but the
-	// reconnect probe only lands a probe interval later. The same race
-	// reopens whenever a daemon this client was actually connected to later
-	// dies and gets respawned, which is why arming is not simply "once" - see
-	// daemonSeenSinceArm.
-	effectsDisownedUntil time.Time
-
-	// daemonSeenSinceArm is true once this client has actually connected to a
-	// daemon - dialed in newModel, or reconnected in handleProbeResult - since
-	// effectsDisownedUntil was last armed. spawnDaemonOnce re-arms the grace
-	// when this is true, or when the deadline has never been armed at all,
-	// and clears it on every arm.
-	//
-	// It is set only by a real connection, never by a spawn attempt merely
-	// succeeding: handleProbeResult calls spawnDaemonOnce again on every
-	// failed probe, but a failed probe never touches this field, so a daemon
-	// that keeps spawning but never actually comes up cannot chain re-arms.
-	// Without this gate, a re-arm on every spawn would suppress effects for
-	// about spawnGrace out of every spawnCooldown (5s of every 15s at the
-	// current values), recurring for as long as the daemon keeps failing.
-	daemonSeenSinceArm bool
 
 	// UI state
 	cursor          int
@@ -185,10 +150,10 @@ func New(cfg *config.Config, cmd fetch.Commander) Model {
 }
 
 // NewPanel creates a Model for a session's panel: a compact, always-on
-// session list in a tmux pane. A panel starts the daemon if none is running,
-// because a panel per session self-polling would multiply the gh budget by
-// the number of open sessions. Startup races between panels are safe: the
-// daemon serializes on an flock and every loser exits immediately.
+// session list in a tmux pane. Both modes start the daemon if none is running
+// (see newModel): a panel per session self-polling would multiply the gh
+// budget by the number of open sessions, and no daemon at all means no
+// transition side effects at all.
 func NewPanel(cfg *config.Config, cmd fetch.Commander) Model {
 	return newModel(cfg, cmd, true)
 }
@@ -210,8 +175,6 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		prCache:            make(map[string]*session.PRStatus),
 		reviewComments:     make(map[string][]session.ReviewComment),
 		detector:           transition.NewDetector(),
-		effects:            transition.Runner{Cfg: cfg, Cmd: cmd},
-		inFlightEffects:    make(map[string]struct{}),
 		selected:           make(map[string]bool),
 
 		insideTmux: insideTmux,
@@ -260,8 +223,11 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		_ = conn.SetReadDeadline(time.Now().Add(firstSnapshotTimeout))
 		m.daemonConn = conn
 		m.daemonDecoder = protocol.NewDecoder(conn)
-		m.daemonSeenSinceArm = true
-	} else if panel {
+	} else {
+		// Every mode spawns, panel or dashboard: the daemon is the only
+		// process that runs transition side effects, so a client that finds no
+		// daemon and starts none would never see the notify hook fire or a
+		// merged session cleaned up.
 		m.spawnDaemonOnce()
 	}
 
@@ -280,7 +246,9 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 }
 
 // spawnDaemonOnce starts a daemon at most once every spawnCooldown, so a
-// daemon that refuses to stay up cannot turn a panel into a fork loop.
+// daemon that refuses to stay up cannot turn a client into a fork loop.
+// Racing clients are safe: the daemon serializes on an flock and every loser
+// exits immediately.
 func (m *Model) spawnDaemonOnce() {
 	if time.Since(m.lastSpawn) < spawnCooldown {
 		return
@@ -288,16 +256,7 @@ func (m *Model) spawnDaemonOnce() {
 	m.lastSpawn = time.Now()
 	if err := daemonSpawner(); err != nil {
 		m.addNotification("could not start daemon: "+err.Error(), "warning")
-		return
 	}
-	if m.effectsDisownedUntil.IsZero() || m.daemonSeenSinceArm {
-		m.effectsDisownedUntil = time.Now().Add(spawnGrace)
-		m.daemonSeenSinceArm = false
-	}
-}
-
-func (m *Model) effectsDisowned() bool {
-	return time.Now().Before(m.effectsDisownedUntil)
 }
 
 // startPoll is the only place that issues a collectCmd. It refuses to issue a
@@ -475,10 +434,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case NotifyMsg:
 		m.addNotification(msg.Text, msg.Severity)
-		return m, nil
-
-	case EffectDoneMsg:
-		delete(m.inFlightEffects, msg.Session)
 		return m, nil
 	}
 
@@ -967,7 +922,8 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		if msg.Sessions != nil {
 			m.applySnapshot(msg.Sessions)
 		}
-		cmds := m.checkStateTransitions(true)
+		m.checkStateTransitions()
+		var cmds []tea.Cmd
 		if m.detailOpen {
 			cmds = append(cmds, m.refreshDetailCmd())
 		}
@@ -994,7 +950,8 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	m.lastSnapshot = time.Now()
 	m.applySnapshot(msg.Sessions)
 
-	cmds := m.checkStateTransitions(false)
+	m.checkStateTransitions()
+	var cmds []tea.Cmd
 	if m.detailOpen {
 		cmds = append(cmds, m.refreshDetailCmd())
 	}
@@ -1064,9 +1021,10 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 		if msg.Epoch != m.epoch || m.daemonConn != nil {
 			return m, nil
 		}
-		if m.panelMode {
-			m.spawnDaemonOnce()
-		}
+		// Panel or dashboard: whoever finds no daemon tries to start one,
+		// because nothing else will run the notify hook or auto_cleanup while
+		// there is none.
+		m.spawnDaemonOnce()
 		return m, probeTickCmd(m.epoch)
 	}
 	if msg.Epoch != m.epoch || m.daemonConn != nil {
@@ -1089,7 +1047,6 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 	// before that straggler arrives.
 	m.daemonConn = msg.Conn
 	m.daemonDecoder = msg.Decoder
-	m.daemonSeenSinceArm = true
 	m.daemonReady = false
 	m.addNotification("daemon back, streaming snapshots", "info")
 
@@ -1351,56 +1308,31 @@ func (m Model) batchToggleDraftCmd() tea.Cmd {
 
 // --- State transitions ---
 
-// checkStateTransitions renders the transitions in the current snapshot and,
-// when this client owns the poll loop, runs their side effects. Toasts and
-// auto-focus are per-client on purpose: each panel has its own screen and its
-// own cursor. Hooks and cleanups are not, which is why local gates them.
-func (m *Model) checkStateTransitions(local bool) []tea.Cmd {
+// checkStateTransitions renders the transitions in the current snapshot: a
+// toast per event and, outside tmux, the auto-focus jump. Both are per-client
+// on purpose - each panel has its own screen and its own cursor - and neither
+// depends on where the snapshot came from.
+//
+// It runs no side effects. The notify hook and auto_cleanup belong to the
+// daemon, asserted rather than inferred from which process happens to own the
+// poll loop: a client that self-polls while a daemon it just lost is still
+// alive would otherwise run the same event's effects alongside it, and for a
+// Done event that means two CleanupSession calls against one worktree. The
+// cost is that no daemon means no hook and no cleanup until one is running,
+// which spawnDaemonOnce is what keeps rare.
+func (m *Model) checkStateTransitions() {
+	// Detect runs whether or not toasts are on: the detector's job is to track
+	// state, and only the reporting of an event is configurable.
 	events := m.detector.Detect(m.sessions)
-	notify := m.cfg.GetSettingBool("notifications_enabled")
-
-	var cmds []tea.Cmd
-	for _, ev := range events {
-		if notify {
+	if m.cfg.GetSettingBool("notifications_enabled") {
+		for _, ev := range events {
 			m.addNotification(fmt.Sprintf("%s → %s", ev.Session, ev.New), notifSeverity(ev.New))
 		}
-		if !local || m.effectsDisowned() {
-			continue
-		}
-
-		ev := ev
-		effects, ctx := m.effects, m.ctx
-
-		if ev.New != session.Done {
-			// Every other transition dispatches ungated: the notify hook
-			// must fire once per real transition, and only cleanup is
-			// destructive enough to need serializing.
-			cmds = append(cmds, func() tea.Msg {
-				effects.Run(ctx, ev)
-				return nil
-			})
-			continue
-		}
-
-		if _, running := m.inFlightEffects[ev.Session]; running {
-			// A merged session that gets a bell re-enters Done before its
-			// first cleanup finished. Skipping silently is deliberate: the
-			// user already got the "-> done" toast, and a client has no log
-			// to explain a skip to the way the daemon does.
-			continue
-		}
-		m.inFlightEffects[ev.Session] = struct{}{}
-		cmds = append(cmds, func() tea.Msg {
-			effects.Run(ctx, ev)
-			return EffectDoneMsg{Session: ev.Session}
-		})
 	}
 
 	if !m.insideTmux && m.cfg.GetSettingBool("auto_focus") && time.Since(m.lastManualNav) > autoFocusCooldown {
 		m.maybeAutoFocus()
 	}
-
-	return cmds
 }
 
 func (m *Model) maybeAutoFocus() {

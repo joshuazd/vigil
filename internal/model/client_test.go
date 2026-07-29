@@ -20,20 +20,29 @@ import (
 	"github.com/jzinkduda/vigil/internal/transition"
 )
 
+// TestMain keeps the suite from ever starting a real daemon. Both New and
+// NewPanel spawn one when no socket answers, and so does every failed
+// reconnect probe, which between them cover most of this package - while the
+// real spawnDaemon forks a detached `vigil daemon` that would outlive the test
+// binary. A test that wants to observe spawning installs its own stub over
+// this one.
+func TestMain(m *testing.M) {
+	daemonSpawner = func() error { return nil }
+	os.Exit(m.Run())
+}
+
 func newTestModel() Model {
 	cmd := fetch.NewMockCommander()
 	cfg := &config.Config{}
 	return Model{
-		prCache:         make(map[string]*session.PRStatus),
-		reviewComments:  make(map[string][]session.ReviewComment),
-		detector:        transition.NewDetector(),
-		effects:         transition.Runner{Cfg: &config.Config{}, Cmd: fetch.NewMockCommander()},
-		inFlightEffects: make(map[string]struct{}),
-		selected:        make(map[string]bool),
-		cfg:             cfg,
-		cmd:             cmd,
-		ctx:             context.Background(),
-		collector:       collect.New(cfg, cmd),
+		prCache:        make(map[string]*session.PRStatus),
+		reviewComments: make(map[string][]session.ReviewComment),
+		detector:       transition.NewDetector(),
+		selected:       make(map[string]bool),
+		cfg:            cfg,
+		cmd:            cmd,
+		ctx:            context.Background(),
+		collector:      collect.New(cfg, cmd),
 	}
 }
 
