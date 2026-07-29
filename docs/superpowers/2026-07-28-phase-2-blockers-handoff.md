@@ -1,8 +1,8 @@
 # Phase 2 blockers: state after the branch
 
-Written 2026-07-28, at the point the `phase-2-blockers` branch was finished (45 commits,
-HEAD `76d7779`). Suite green under `-race`, `golangci-lint` clean. Read this plus the specs
-before starting phase 3.
+Written 2026-07-28 and updated 2026-07-29 with the verification results, at the point the
+`phase-2-blockers` branch was finished (48 commits, HEAD at the verification update). Suite
+green under `-race`, `golangci-lint` clean. Read this plus the specs before phase 3.
 
 - Design for this work: `docs/superpowers/specs/2026-07-27-phase-2-blockers-design.md`.
   Amended in three places during execution; the amendments are marked inline.
@@ -132,7 +132,7 @@ a tmux failure *disabled* the guard while `action.builtinCleanup` went on to
 uncommitted work in it. A reviewer proved the code was indifferent to the guard's polarity
 by flipping it to the safe form and watching the whole suite stay green.
 
-None of this has been observed on a real machine. See "Verification status".
+The four load-bearing checks are now run and passed, including the counterfactual against `main`. See "Verification status".
 
 ## Corrections to the previous handoff and the design doc
 
@@ -233,45 +233,58 @@ reason cleanup is refused - `func (r Runner) cleanupBlockedBy(ctx, ev) reason`, 
 meaning proceed - so tests assert a *reason* and a newly added guard changes a reason
 instead of silently intercepting the fixture of an older test.
 
-## Verification status: NOT run
+## Verification status: the four load-bearing checks are RUN and PASSED
 
-**Nothing below has been observed.** Everything in this branch is verified statically, by
-tests and mutations. The properties these fixes exist to protect are not properties the
-suite can see. The phase 2 gate's method applies: detached tmux sessions of fixed sizes
-with vigil as the pane command, an isolated `XDG_RUNTIME_DIR` so nothing touches the live
-socket, and `tmux capture-pane -p` to read what actually rendered.
+Run 2026-07-29, before merge, on the real machine. Method: a `tmux` shim on `PATH`
+forwarding every call to an isolated server (`tmux -L vigilverify`), an isolated `HOME` and
+`XDG_RUNTIME_DIR`, a branch binary built to a temp path, and a `gh` shim reading its PR
+state from a file so `OPEN -> MERGED` produces a real transition. The developer's tmux
+server, daemon, cache and installed binary were never touched, and `make install` was
+deliberately not run - see the landmine about replacing a running daemon's image.
 
-- [ ] **Hooks fire once with N panels.** Set
-  `notify = "echo $(date +%s%N) >> /tmp/vigil-notify.log"`, open three panels against one
-  daemon, force a state change, confirm exactly one line per transition. This is blocker 1;
-  it has never been observed either way.
-- [ ] **`auto_cleanup` runs once.** `auto_cleanup = true`, three panels, merge a PR:
-  one `git worktree remove`, no duplicate-failure noise in the daemon log, session leaves
-  every panel. On a throwaway worktree.
-- [ ] **A session with a client attached is never cleaned up.** `auto_cleanup = true`, be
-  attached to a session whose PR merges. It must survive.
-- [ ] **Daemon-up versus daemon-down is still byte-identical.** Repeat the phase 2 gate
-  check at 120x20: capture with a daemon, kill it, capture again. Git and PR columns must
-  match. This is the collapse's whole claim.
+- [x] **Hooks fire once with N panels. PASSED, with the counterfactual.** Three panels
+  against one daemon, one `idle -> attention` transition: **1** hook invocation. The same
+  experiment against `main` at `7c6cc5a`, same three panels, same single transition: **3**.
+  This is blocker 1, reproduced and then fixed, observed rather than inferred.
+- [x] **`auto_cleanup` runs once. PASSED.** `auto_cleanup = true`, two panels attached, four
+  sessions transitioning `review -> done` at once: **4** hook invocations, one per session,
+  not per session per panel. Under the previous behaviour that would have been 8. The daemon
+  log stayed empty, so no cleanup failed.
+- [x] **A session with a client attached is never cleaned up. PASSED.** Two throwaway git
+  worktrees, both reaching `Done`. The unattached session was killed and its worktree
+  removed. The session with a client attached survived, and so did its worktree. This is the
+  fail-closed guard that replaced the broken `CurrentSession` check, holding against real
+  tmux.
+- [x] **Daemon-up versus daemon-down is byte-identical. PASSED.** Dashboard captured at
+  120x20 with a daemon, then with the daemon killed and the client fallen back to
+  self-polling: the data rows `diff` clean. This is the collapse's whole claim.
+
+Still not observed, and none of them is a claim this branch makes:
+
 - [ ] **Fallback survives a failing poll.** Break `tmux` on the path for a self-polling
   client; confirm it keeps polling and recovers rather than going quiet forever.
 - [ ] **Width 40 is unchanged.** Capture a 40-column panel before and after the layout
-  change. The name column must be at least as wide as it was.
-- [ ] **Comments mode still works.** Open a PR with unresolved review threads, switch to
-  comments mode, confirm the bodies arrive, and that switching away and back does not
-  refetch.
-- [ ] **`make install` while a daemon runs.** Still the temp-file-and-rename path from
-  phase 2. Confirm the new binary runs: overwriting a running image's inode invalidates its
-  code signature and macOS then SIGKILLs every later exec of that path. **Also restart the
-  daemon.** This branch makes the daemon an owner of transition effects for the first time;
-  the code-signing check above only proves the new binary launches, not that the *running*
-  daemon (the old image, with no transition wiring) has been replaced. Skipping the restart
-  leaves every daemon-fed panel's `notify` hook firing zero times. See the landmines.
+  change. The name column must be at least as wide as it was. Pinned by
+  `TestPanelWidthStillPicksTheCompactTier`, so this is confirmation rather than discovery.
+- [ ] **Comments mode still works.** Open a PR with real unresolved review threads, switch
+  to comments mode, confirm the bodies arrive and that switching away and back does not
+  refetch. The `gh` shim used above returns no threads, so this is untested against real
+  GraphQL.
+- [ ] **`make install` while a daemon runs.** Confirm the new binary runs: overwriting a
+  running image's inode invalidates its code signature and macOS then SIGKILLs every later
+  exec of that path. **Also restart the daemon.** This branch makes the daemon an owner of
+  transition effects for the first time; the code-signing check only proves the new binary
+  launches, not that the *running* daemon (the old image, with no transition wiring) has
+  been replaced. Skipping the restart leaves every daemon-fed panel's `notify` hook firing
+  zero times. See the landmines.
 
-Three panels were live against one installed daemon throughout this work, so the N-clients
-configuration exists on the machine without setting one up. Note that the panels and the
-daemon run `~/.local/bin/vigil`, not this working tree, so `make install` is what exposes
-them to this branch.
+One thing the verification exposed about method, worth keeping: the first two attempts
+produced zero hook invocations and both times the harness was at fault, not the code. Once
+because a bell flag left set from a previous run meant the `Detector` primed at `Attention`
+so no transition occurred, and once because the `gh` shim reported `MERGED` from the very
+first poll, so the sessions primed at `Done`. A test that produces no event proves nothing
+about a system that only acts on events, and "nothing happened" looks identical to "the
+feature is broken". Prime deliberately, then transition.
 
 ## Deferred minors, by area
 
