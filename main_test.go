@@ -92,10 +92,21 @@ func TestRunRejectsAnUnknownArgumentWithExitTwo(t *testing.T) {
 	}
 }
 
+// Every test that reaches config.Load needs its own HOME. ConfigPath resolves
+// under os.UserHomeDir, so without this the suite reads the developer's real
+// ~/.config/vigil/config.toml - and a developer who sets panel_auto = "false"
+// there, which is the documented way to turn the panel off, turns the repo's
+// own suite red.
+func isolateConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+}
+
 // The dependency check must not run before config get. A bash caller that
 // receives "gh not found" instead of a value would silently disable the panel
 // on any machine mid-setup, which looks identical to panel_auto = false.
 func TestConfigGetAnswersWithoutTheDependencies(t *testing.T) {
+	isolateConfig(t)
 	t.Setenv("PATH", t.TempDir())
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"config", "get", "panel_auto"}, &stdout, &stderr); code != 0 {
@@ -124,6 +135,7 @@ func TestConfigRejectsAMissingSubcommand(t *testing.T) {
 }
 
 func TestConfigGetHonoursTheEnvironment(t *testing.T) {
+	isolateConfig(t)
 	t.Setenv("VIGIL_PANEL_AUTO", "false")
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"config", "get", "panel_auto"}, &stdout, &stderr); code != 0 {
