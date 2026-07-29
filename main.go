@@ -19,71 +19,71 @@ import (
 
 var version = "dev"
 
-func parseArgs(args []string) (string, error) {
+func parseArgs(args []string) (string, []string, error) {
 	if len(args) == 0 {
-		return "tui", nil
+		return "tui", nil, nil
 	}
 	switch args[0] {
 	case "daemon":
-		return "daemon", nil
+		return "daemon", args[1:], nil
 	case "--panel":
-		return "panel", nil
+		return "panel", args[1:], nil
 	case "--help", "-h":
-		return "help", nil
+		return "help", args[1:], nil
 	case "--version", "-v":
-		return "version", nil
+		return "version", args[1:], nil
 	default:
-		return "", fmt.Errorf("unknown argument: %s", args[0])
+		return "", nil, fmt.Errorf("unknown argument: %s", args[0])
 	}
 }
 
 func main() {
-	command, err := parseArgs(os.Args[1:])
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	command, _, err := parseArgs(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
-		printUsage(os.Stderr)
-		os.Exit(2)
+		_, _ = fmt.Fprintf(stderr, "vigil: %v\n", err)
+		printUsage(stderr)
+		return 2
 	}
 
 	switch command {
 	case "help":
-		printUsage(os.Stdout)
-		return
+		printUsage(stdout)
+		return 0
 	case "version":
-		fmt.Println("vigil " + version)
-		return
+		_, _ = fmt.Fprintln(stdout, "vigil "+version)
+		return 0
 	}
 
 	for _, dep := range []string{"tmux", "git", "gh"} {
 		if _, err := exec.LookPath(dep); err != nil {
-			fmt.Fprintf(os.Stderr, "vigil: %s not found in PATH\n", dep)
-			os.Exit(1)
+			_, _ = fmt.Fprintf(stderr, "vigil: %s not found in PATH\n", dep)
+			return 1
 		}
 	}
 
 	cfg, err := config.Load(config.ConfigPath())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vigil: %v (using defaults)\n", err)
+		_, _ = fmt.Fprintf(stderr, "vigil: %v (using defaults)\n", err)
 	}
 	cmd := &fetch.ExecCommander{}
 
 	switch command {
 	case "daemon":
-		if err := runDaemon(cfg, cmd); err != nil {
-			fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
-			os.Exit(1)
-		}
+		err = runDaemon(cfg, cmd)
 	case "panel":
-		if err := runPanel(cfg, cmd); err != nil {
-			fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
-			os.Exit(1)
-		}
+		err = runPanel(cfg, cmd)
 	default:
-		if err := runTUI(cfg, cmd); err != nil {
-			fmt.Fprintf(os.Stderr, "vigil: %v\n", err)
-			os.Exit(1)
-		}
+		err = runTUI(cfg, cmd)
 	}
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "vigil: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func runDaemon(cfg *config.Config, cmd fetch.Commander) error {
