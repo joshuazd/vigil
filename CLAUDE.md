@@ -5,14 +5,16 @@ TUI dashboard for tmux sessions. Monitors git status and GitHub PR state across 
 ## In-flight design work
 
 An approved 6-phase design is turning the session list into the primary surface, with
-sessions expanded next to it. Phases 0, 1 and 2 are merged, and so are the three items
-phase 2 listed as blocking phase 3. Phase 3 is next, and the design says to live on
-phase 2 before planning it. Read these before changing the daemon, `internal/collect`,
-`internal/transition`, `internal/view`'s layout, or the launch path in `~/dotfiles`:
+sessions expanded next to it. Phases 0, 1 and 2 are merged. The three items phase 2 listed
+as blocking phase 3 are **done on branch `phase-2-blockers` (48 commits), which was not yet
+merged when this was written** - check `git log main..phase-2-blockers` before assuming
+either way. Phase 3 is next, and the design says to live on phase 2 before planning it.
+Read these before changing the daemon, `internal/collect`, `internal/transition`,
+`internal/view`'s layout, or the launch path in `~/dotfiles`:
 
 - `docs/superpowers/2026-07-28-phase-2-blockers-handoff.md` - current state, the debt
-  still open, the landmines, and the real-machine checks that have not been run yet.
-  **Start here.**
+  still open, the landmines, and the verification results (the four load-bearing checks are
+  run and passed; four smaller ones are not). **Start here.**
 - `docs/superpowers/2026-07-27-phase-2-handoff.md` - the state phase 2 merged at. Still
   the best account of the daemon and panel work, but superseded on the three blockers and
   on the claim that review-thread data is detail-panel-only.
@@ -76,7 +78,7 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - State transition notifications with configurable hooks
 - Stale branch warnings when rebase age exceeds threshold
 - Draft toggle (`D`) with batch support
-- Auto-cleanup merged sessions (configurable via `auto_cleanup` setting, off by default). Safe to enable with panels open, in the sense the handoff spells out; still unobserved on a real machine
+- Auto-cleanup merged sessions (configurable via `auto_cleanup` setting, off by default). Safe to enable with panels open, in the sense the handoff spells out, and verified on a real machine on 2026-07-29: with two panels attached, four sessions reaching `Done` produced four hook invocations rather than eight; an unattached session's worktree was removed and a session with a client attached survived
 - Cache interop with previous Python version (same JSON format)
 - The TUI dials the daemon socket on startup and consumes its broadcast snapshots when reachable; it falls back to self-polling if the daemon is never reached, does not send a first snapshot within a bounded wait, or is lost mid-session
 - Both paths are permanently supported and must render identically (git/PR data, sort order, notifications). One known exception to "the `notify` hook fires once per real transition": a repeat `Done` event arriving while that session's cleanup is still in flight is skipped along with its hook, on both paths. Measured at 5 hook invocations for 7 transitions with the first effect blocked, identically on the daemon path and the model path (re-measured at HEAD `76d7779`, closing what was earlier an open gap between the two). Toasts are unaffected - they are per-client and ungated, 7 of 7. See the handoff for the full measurement
