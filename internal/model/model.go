@@ -34,6 +34,16 @@ const autoFocusCooldown = 15 * time.Second
 // daemon.
 const spawnCooldown = 15 * time.Second
 
+// binCheckInterval is how often a client stats its own binary. A stat is
+// cheap; doing it on every 1s tick would still be pointless.
+const binCheckInterval = 10 * time.Second
+
+// binRestartFloor is the anti-loop guard. A re-exec'd process stamps at its
+// own startup, so a stable binary never fires twice - that is the structural
+// defence. This bounds the damage if a stat is somehow nondeterministic: one
+// exec per floor rather than a hot spin that makes a panel unusable.
+const binRestartFloor = 30 * time.Second
+
 type Model struct {
 	// Data
 	sessions []*session.Session
@@ -124,6 +134,19 @@ type Model struct {
 	// lastSpawn is when this panel last tried to start a daemon.
 	lastSpawn time.Time
 
+	// binProber stats this process's own image. Zero value is the real one.
+	binProber    selfbin.Prober
+	binAtStart   selfbin.Stamp
+	binOnDisk    selfbin.Stamp
+	lastBinCheck time.Time
+	startedAt    time.Time
+
+	// restartRequested asks the caller to re-exec after the program exits.
+	// The exec cannot happen here: Bubble Tea owns raw mode and the alt
+	// screen, and a process exec'd from inside Update inherits a terminal
+	// nobody restored.
+	restartRequested bool
+
 	// Context for cancellation
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -179,6 +202,8 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 
 	insideTmux := os.Getenv("TMUX") != ""
 
+	startStamp, _ := selfbin.Prober{}.Current()
+
 	m := Model{
 		currentSessionName: currentSession,
 		prCache:            make(map[string]*session.PRStatus),
@@ -196,6 +221,10 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		ctx:       ctx,
 		cancel:    cancel,
 		collector: collect.New(cfg, cmd),
+
+		startedAt:  time.Now(),
+		binAtStart: startStamp,
+		binOnDisk:  startStamp,
 
 		dispatchInput: ti,
 		help:          help.New(),
@@ -357,6 +386,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.daemonConn != nil {
 			return m, nil
 		}
+		m.checkBinary(time.Now())
 		// The reschedule is unconditional and does not depend on startPoll
 		// succeeding. A tick consumed while a poll is already in flight would
 		// otherwise vanish - tea.Tick is one-shot - and kill the loop.
@@ -393,6 +423,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Epoch != m.epoch || m.daemonDecoder == nil {
 			return m, nil
 		}
+		m.checkBinary(time.Now())
 		return m, renderTickCmd(1*time.Second, m.epoch)
 
 	case PaneCapturedMsg:
@@ -1079,6 +1110,39 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 		listenDaemonCmd(m.daemonDecoder, m.ctx, m.cmd, m.currentSessionName, m.epoch),
 		renderTickCmd(1*time.Second, m.epoch),
 	)
+}
+
+// RestartRequested reports whether this process asked to be replaced by a
+// newer image on disk. Read by main after p.Run() returns and Bubble Tea has
+// restored the terminal.
+func (m Model) RestartRequested() bool { return m.restartRequested }
+
+func (m *Model) checkBinary(now time.Time) {
+	if m.restartRequested {
+		return
+	}
+	if !m.lastBinCheck.IsZero() && now.Sub(m.lastBinCheck) < binCheckInterval {
+		return
+	}
+	m.lastBinCheck = now
+
+	stamp, ok := m.binProber.Current()
+	if !ok {
+		return
+	}
+	m.binOnDisk = stamp
+	if stamp == m.binAtStart {
+		return
+	}
+	if now.Sub(m.startedAt) < binRestartFloor {
+		return
+	}
+	// Unsaved user intent. All three are states the user is actively in and
+	// about to leave, so no indicator is needed for the wait.
+	if m.confirmAction != ConfirmNone || m.dispatchActive || len(m.selected) > 0 {
+		return
+	}
+	m.restartRequested = true
 }
 
 // daemonHealth describes the state of the data source, for the status bar.
