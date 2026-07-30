@@ -44,11 +44,10 @@ func RenderJobLine(jobs []protocol.Job, width int) string {
 		suffix = fmt.Sprintf(" (+%d)", queued)
 	}
 
-	// TruncateVisible cuts from the end, so the queued suffix is reserved and
-	// rendered on its own rather than folded into the string that gets cut:
-	// the marker, the input, and the queued count are what a glance needs,
-	// and the status - a free-text progress note - is the one piece worth
-	// dropping first to make room.
+	// The suffix's width is reserved before the status is measured against
+	// what remains, so the status - a free-text progress note, the most
+	// expendable of the three - gives way before the marker, input, or
+	// count at any width wide enough to fit them.
 	budget := max(0, width-visibleLen(suffix))
 
 	body := marker + " " + lead.Input
@@ -58,9 +57,17 @@ func RenderJobLine(jobs []protocol.Job, width int) string {
 			body += sep + truncateName(lead.Status, room)
 		}
 	}
+	body = TruncateVisible(body, budget)
 
-	style := lipgloss.NewStyle().Foreground(colour)
-	return style.Render(TruncateVisible(body, budget)) + style.Render(suffix)
+	// The reservation above keeps the suffix intact at any width wide enough
+	// for it, but below the suffix's own width (tierBare is 4 columns) it
+	// cannot: budget floors at 0 and the suffix is still appended whole. This
+	// final clamp is a backstop rather than more arithmetic - one guarantee
+	// that the rendered line never exceeds width, covering every tier
+	// without needing every branch above to be exact.
+	text := TruncateVisible(body+suffix, width)
+
+	return lipgloss.NewStyle().Foreground(colour).Render(text)
 }
 
 func pickJob(jobs []protocol.Job) *protocol.Job {

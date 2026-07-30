@@ -94,3 +94,25 @@ func TestRenderJobLineKeepsTheQueuedCountWhenTheInputIsLong(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderJobLineNeverExceedsWidth sweeps every width from 1 to 40 with a
+// long input and a queued job present - the combination that reservation
+// alone cannot keep in bounds once width drops below the suffix's own
+// width (tierBare, a real frozen tier, is 4 columns). The reservation makes
+// the suffix survive; this is the separate guarantee that the line itself
+// never overflows the tier it is rendered into.
+func TestRenderJobLineNeverExceedsWidth(t *testing.T) {
+	jobs := []protocol.Job{
+		{ID: "a", Input: "https://app.shortcut.com/workspace/story/12345/a-long-title",
+			State: protocol.JobRunning, Status: "creating the worktree and the tmux session"},
+		{ID: "b", Input: "sc-2", State: protocol.JobQueued},
+	}
+	for width := 1; width <= 40; width++ {
+		got := RenderJobLine(jobs, width)
+		for _, line := range strings.Split(got, "\n") {
+			if w := visibleLen(line); w > width {
+				t.Errorf("width %d: line is %d wide, want <= %d: %q", width, w, width, line)
+			}
+		}
+	}
+}
