@@ -1815,13 +1815,17 @@ The load-bearing one: polling must not stall while a job runs. Append to `intern
 // executed there would freeze every panel's snapshot stream for the length of
 // a dispatch - 60s or more for a real one.
 func TestPollingContinuesWhileAJobIsRunning(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	// Two directories, not one. HOME can be a t.TempDir, but the socket path
+	// cannot: macOS caps sun_path at 104 bytes and t.TempDir() exceeds it, so a
+	// shared directory makes this fail for the wrong reason - the socket is
+	// never available, rather than Jobs never being populated.
+	t.Setenv("HOME", t.TempDir())
+	sockDir := shortTempDir(t)
 	stream := newBlockingStream()
 	srv := &Server{
 		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
 		Interval:   10 * time.Millisecond,
-		SocketPath: filepath.Join(dir, "vigild.sock"),
+		SocketPath: filepath.Join(sockDir, "vigild.sock"),
 		Log:        log.New(io.Discard, "", 0),
 		requests:   make(chan *protocol.Request, queueDepth),
 	}
@@ -1887,14 +1891,15 @@ func TestPollingContinuesWhileAJobIsRunning(t *testing.T) {
 // Run does not return while a goroutine that writes the job table is still
 // live - not job survival, which is not a property this design claims.
 func TestRunWaitsForAJobGoroutineToUnwind(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	// Separate directories, for the sun_path reason above.
+	t.Setenv("HOME", t.TempDir())
+	sockDir := shortTempDir(t)
 	stream := newBlockingStream()
 	stream.ignoreContext = true
 	srv := &Server{
 		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
 		Interval:   10 * time.Millisecond,
-		SocketPath: filepath.Join(dir, "vigild.sock"),
+		SocketPath: filepath.Join(sockDir, "vigild.sock"),
 		Log:        log.New(io.Discard, "", 0),
 		requests:   make(chan *protocol.Request, queueDepth),
 	}
