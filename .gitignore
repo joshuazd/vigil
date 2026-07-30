@@ -5,6 +5,10 @@ dist/
 # Claude Code local settings
 .claude/settings.local.json
 
+# Isolated workspaces and agent scratch
+.worktrees/
+.superpowers/
+
 # Python (archived)
 __pycache__/
 *.egg-info/
