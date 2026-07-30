@@ -533,9 +533,13 @@ func TestRunHookStreamMergesStderr(t *testing.T) {
 	}
 }
 
+// Note the hook body uses "$VIGIL_CLIENT", not "${VIGIL_CLIENT}". ExpandHook
+// treats every {...} as a template placeholder, so a braced shell expansion in
+// a hook body fails with "unknown placeholder" before it ever reaches sh. That
+// is a pre-existing property of hook templates, worth knowing when writing one.
 func TestRunHookStreamPassesEnv(t *testing.T) {
 	cfg := &Config{Hooks: map[string]any{
-		"dispatch": `printf '%s\n' "${VIGIL_CLIENT}"`,
+		"dispatch": `printf '%s\n' "$VIGIL_CLIENT"`,
 	}}
 	var got []string
 	err := cfg.RunHookStream(context.Background(), &fetch.ExecCommander{}, "dispatch",
@@ -690,12 +694,21 @@ func (c *Config) RunHookStream(
 Run: `go test ./internal/config/ -race -v`
 Expected: PASS, including every pre-existing test — `RunHook`'s contract must be unchanged.
 
-- [ ] **Step 6: Verify the shared-argv test is not vacuous**
+- [ ] **Step 6: Verify the sharing is real**
 
-In `hookArgv`, change `"exec 2>&1; "` to `""`.
+Two mutations, because they prove different things.
+
+**Mutation A — the stderr merge.** In `hookArgv`, change `"exec 2>&1; "` to `""`.
 Run: `go test ./internal/config/ -run 'StillTrimsAndMerges|RunHookStreamMergesStderr' -v`
-Expected: both FAIL — the stderr line is missing from each.
+Expected: `TestRunHookStillTrimsAndMergesAfterTheRefactor` FAILs. `TestRunHookStreamMergesStderr` **still passes**, and that is correct rather than a defect: `ExecCommander.RunStream` assigns the same pipe to both `Stdout` and `Stderr`, so the streaming path merges at the pipe regardless of what the shell does. The `exec 2>&1` is redundant for the streaming path and load-bearing for the buffered one; keeping one construction for both is what stops them drifting.
 Restore and confirm PASS.
+
+**Mutation B — the shared argv.** In `hookArgv`, delete the `if template == ""` branch that returns `&HookNotConfigured{}`.
+Run: `go test ./internal/config/`
+Expected: **both** `TestRunHookNoTemplateSkipsCommander` (the buffered path) and `TestRunHookStreamUnconfigured` (the streaming path) FAIL with `got <nil>, want *HookNotConfigured`. This is the mutation that proves both runners go through `hookArgv`: only `hookArgv` produces `HookNotConfigured`, and `TestRunHookStreamExpandsAndStreams` likewise can only pass if `RunHookStream` reaches `ExpandHook` through it. Verified against the real code, not predicted.
+Restore and confirm PASS.
+
+(`internal/action`'s `TestDispatch_NoHookConfigured` also fails under this mutation, and panics doing so. Ignore it: Task 8 deletes `action.Dispatch` and that test with it.)
 
 - [ ] **Step 7: Commit**
 
