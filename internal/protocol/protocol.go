@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/jzinkduda/vigil/internal/selfbin"
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
@@ -24,6 +25,14 @@ const maxLine = 8 << 20
 const maxRequestLine = 64 << 10
 
 const RequestDispatch = "dispatch"
+
+// RequestDismiss clears the daemon's failed and refused jobs. It carries an
+// empty ID on purpose: jobs.submit drops an empty-ID request before its reason
+// switch, so a new client pressing dismiss at an old daemon is a silent no-op
+// rather than a fresh refused job naming the type the old daemon does not know
+// - a red line, undismissable for ten minutes, produced by the key meant to
+// clear one.
+const RequestDismiss = "dismiss"
 
 // Job states. JobFailed means the job was accepted and ran, then exited
 // non-zero: "vigil dispatch" exits 0 for it, the same as JobSucceeded,
@@ -69,6 +78,10 @@ type Snapshot struct {
 	// version 1. A client that predates it ignores the key, and a client
 	// that expects it sees nil against a daemon that does not send it.
 	Jobs []Job `json:"jobs,omitempty"`
+	// DaemonBin is the stamp the daemon took of its own image at startup.
+	// Additive for the same reason Jobs is: an old daemon omits it and a new
+	// client reads the zero Stamp, which it correctly reports as outdated.
+	DaemonBin selfbin.Stamp `json:"daemon_bin,omitempty"`
 }
 
 func Encode(w io.Writer, snap *Snapshot) error {
