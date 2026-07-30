@@ -211,6 +211,14 @@ func (s *Server) accept(ctx context.Context, listener net.Listener, incoming cha
 }
 
 func (s *Server) poll(ctx context.Context) {
+	// Taken before the collector's error return: snapshot() prunes expired
+	// jobs as a side effect, and that pruning must not stall for as long as
+	// collection is failing.
+	var jobList []protocol.Job
+	if s.jobs != nil {
+		jobList = s.jobs.snapshot()
+	}
+
 	sessions, err := s.Collector.Snapshot(ctx)
 	if err != nil {
 		if !s.pollFailing {
@@ -227,6 +235,7 @@ func (s *Server) poll(ctx context.Context) {
 		Version:   protocol.Version,
 		Timestamp: time.Now().Unix(),
 		Sessions:  sessions,
+		Jobs:      jobList,
 	}
 
 	s.mu.Lock()

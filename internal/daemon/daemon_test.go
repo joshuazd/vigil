@@ -475,3 +475,120 @@ func TestASubmittedRequestReachesTheJobQueue(t *testing.T) {
 
 	waitForJobState(t, srv.jobs, "job-1", protocol.JobRunning)
 }
+
+// A job runs on its own goroutine. poll is synchronous per tick, so a job
+// executed there would freeze every panel's snapshot stream for the length of
+// a dispatch - 60s or more for a real one.
+func TestPollingContinuesWhileAJobIsRunning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sockDir := shortTempDir(t)
+	stream := newBlockingStream()
+	srv := &Server{
+		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
+		Interval:   10 * time.Millisecond,
+		SocketPath: filepath.Join(sockDir, "vigild.sock"),
+		Log:        log.New(io.Discard, "", 0),
+		requests:   make(chan *protocol.Request, queueDepth),
+	}
+	srv.jobs = newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), srv.logf)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run(ctx) }()
+
+	conn := dialWhenReady(t, srv.SocketPath)
+	defer func() { _ = conn.Close() }()
+
+	if err := protocol.EncodeRequest(conn, &protocol.Request{
+		Version: protocol.Version, Type: protocol.RequestDispatch,
+		ID: "job-1", Input: "sc-1",
+	}); err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+
+	select {
+	case <-stream.started:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-runDone
+		t.Fatal("the job never started")
+	}
+
+	// The job is now blocked inside RunStream. Snapshots must keep arriving,
+	// and must show it running.
+	dec := protocol.NewDecoder(conn)
+	sawRunning := false
+	for i := 0; i < 3; i++ {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		snap, err := dec.Next()
+		if err != nil {
+			cancel()
+			<-runDone
+			t.Fatalf("snapshot %d never arrived while a job was running: %v", i, err)
+		}
+		if job := findJob(snap.Jobs, "job-1"); job != nil && job.State == protocol.JobRunning {
+			sawRunning = true
+		}
+	}
+	if !sawRunning {
+		t.Error("no snapshot showed the job running")
+	}
+
+	close(stream.release)
+	cancel()
+	if err := <-runDone; err != nil {
+		t.Errorf("Run: %v", err)
+	}
+}
+
+// Run must not return while a job goroutine is still unwinding, the same way
+// it already waits on pendingEffects.
+//
+// Note what this does NOT assert. Cancelling the daemon's context kills the
+// job: RunStream uses exec.CommandContext with that same context, and the spec
+// is explicit that "the job dies with the daemon". So this uses a stream that
+// ignores cancellation, because the invariant under test is goroutine hygiene -
+// Run does not return while a goroutine that writes the job table is still
+// live - not job survival, which is not a property this design claims.
+func TestRunWaitsForAJobGoroutineToUnwind(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sockDir := shortTempDir(t)
+	stream := newBlockingStream()
+	stream.ignoreContext = true
+	srv := &Server{
+		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
+		Interval:   10 * time.Millisecond,
+		SocketPath: filepath.Join(sockDir, "vigild.sock"),
+		Log:        log.New(io.Discard, "", 0),
+		requests:   make(chan *protocol.Request, queueDepth),
+	}
+	srv.jobs = newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), srv.logf)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run(ctx) }()
+
+	conn := dialWhenReady(t, srv.SocketPath)
+	if err := protocol.EncodeRequest(conn, &protocol.Request{
+		Version: protocol.Version, Type: protocol.RequestDispatch,
+		ID: "job-1", Input: "sc-1",
+	}); err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	<-stream.started
+	_ = conn.Close()
+
+	cancel()
+	select {
+	case <-runDone:
+		t.Fatal("Run returned while a job was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(stream.release)
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run never returned after the job finished")
+	}
+}
