@@ -13,10 +13,11 @@ important thing on this page; see "What was NOT verified".
   after `make install`, and a failed job line with no way to clear it - both hit on the first
   day of real dispatch use, neither speculative.
 
-Branch: `binary-refresh` in `~/vigil` (code head `ef83fdf`, from `main` at `6a2a97c`; this
-document is the commit on top of it). The earlier revision of this page named `2b81aa0`,
-which was only the base of the last task and never the branch head. This is a
-single-repository change; nothing in `~/dotfiles` is required for it.
+Branch: `binary-refresh` in `~/vigil`, branched from `main` at `6a2a97c`. This page does not
+name its own head commit, and that is deliberate: two earlier revisions tried and both were
+false by the time anyone read them, because any commit after the doc commit invalidates the
+claim. Use `git log 6a2a97c..binary-refresh` instead. This is a single-repository change;
+nothing in `~/dotfiles` is required for it.
 
 ## What landed
 
