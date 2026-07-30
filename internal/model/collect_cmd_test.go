@@ -19,7 +19,7 @@ import (
 
 func collectFixtureCommander() *fetch.MockCommander {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}",
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
 		"1700000000|alpha|/tmp/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|1", nil)
 	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
@@ -86,7 +86,7 @@ func TestCollectCmdEmitsASnapshotWhenTmuxFails(t *testing.T) {
 func TestBothPathsProduceIdenticalSessions(t *testing.T) {
 	fixture := func() *fetch.MockCommander {
 		cmd := fetch.NewMockCommander()
-		cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}",
+		cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
 			"1700000000|alpha|/tmp/alpha\n1700000001|beta|/tmp/beta", nil)
 		cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|1\nbeta|0", nil)
 		cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
@@ -618,7 +618,7 @@ func countCalls(cmd *fetch.MockCommander, name string) int {
 // in this package green.
 func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}",
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
 		"1700000000|alpha|/tmp/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
 	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
@@ -761,7 +761,7 @@ func TestReconnectRaceDoesNotDoublePollOrWedge(t *testing.T) {
 	release := make(chan struct{})
 	cmd := fetch.NewMockCommander()
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
-		"tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}": func(context.Context, string, []string) (string, error) {
+		"tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}": func(context.Context, string, []string) (string, error) {
 			<-release
 			return "1700000000|alpha|/tmp/alpha", nil
 		},
@@ -941,7 +941,7 @@ func TestAFailedForcedPollSchedulesNoTick(t *testing.T) {
 // pr_interval like any other tick".
 func TestRefreshKeyReachesInvalidateEndToEnd(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}",
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
 		"1700000000|alpha|/tmp/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
 	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)

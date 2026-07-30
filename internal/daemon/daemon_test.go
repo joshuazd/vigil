@@ -63,7 +63,7 @@ func startServer(t *testing.T, s *Server) (ctx context.Context, stop func()) {
 func testServer(t *testing.T) *Server {
 	t.Helper()
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}",
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
 		"1700000000|alpha|/tmp/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
 	sockDir := shortTempDir(t)
