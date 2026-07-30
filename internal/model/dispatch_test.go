@@ -1,11 +1,17 @@
 package model
 
 import (
+	"context"
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
 )
 
@@ -77,5 +83,110 @@ func TestTheDispatchKeySubmitsAndValidates(t *testing.T) {
 	}
 	if !strings.Contains(result.Message, "empty") {
 		t.Errorf("got %q, want an empty-input reason", result.Message)
+	}
+}
+
+// --- dispatchCwd ---
+
+func TestDispatchCwdResolvesTheMainWorktree(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.On("git", "worktree /Users/x/portal\nHEAD abc\nbranch refs/heads/main\n\nworktree /Users/x/sc-1\nHEAD def\n", nil)
+	if got := dispatchCwd(context.Background(), cmd, "/Users/x/sc-1"); got != "/Users/x/portal" {
+		t.Errorf("got %q, want /Users/x/portal", got)
+	}
+}
+
+func TestDispatchCwdFallsBackToGetwdWithNoGitRoot(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if got := dispatchCwd(context.Background(), fetch.NewMockCommander(), ""); got != wd {
+		t.Errorf("got %q, want %q", got, wd)
+	}
+}
+
+func TestDispatchCwdFallsBackToGetwdWhenGitFails(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	cmd := fetch.NewMockCommander()
+	cmd.On("git", "", errors.New("not a repository"))
+	if got := dispatchCwd(context.Background(), cmd, "/some/worktree"); got != wd {
+		t.Errorf("got %q, want %q", got, wd)
+	}
+}
+
+// TestTheDispatchKeySubmitsValidInputToTheDaemon covers the path
+// TestTheDispatchKeySubmitsAndValidates does not: a valid input actually
+// reaching dispatch.Submit and getting acked. Mutating dispatchCmd to skip
+// the submission (or dispatchCwd to always return "") would leave every
+// other model test green, because none of them dispatch valid input to a
+// real socket.
+func TestTheDispatchKeySubmitsValidInputToTheDaemon(t *testing.T) {
+	// Unix socket paths are length-limited; t.TempDir can be long on macOS.
+	dir, err := os.MkdirTemp("", "vd")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	sockDir := filepath.Join(dir, "vigil")
+	if err := os.MkdirAll(sockDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	l, err := net.Listen("unix", filepath.Join(sockDir, "vigild.sock"))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req, err := protocol.NewRequestDecoder(conn).Next()
+		if err != nil {
+			return
+		}
+		_ = protocol.Encode(conn, &protocol.Snapshot{
+			Version: protocol.Version,
+			Jobs:    []protocol.Job{{ID: req.ID, Input: req.Input, State: protocol.JobQueued}},
+		})
+	}()
+
+	m := newTestModel()
+	m.dispatchActive = true
+	m.dispatchInput.SetValue("sc-12345")
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("no command was returned")
+	}
+	msg := cmd()
+	result, ok := msg.(ActionResultMsg)
+	if !ok {
+		t.Fatalf("got %T, want ActionResultMsg", msg)
+	}
+	if !result.OK {
+		t.Errorf("got %+v, want OK", result)
+	}
+}
+
+// --- panel row accounting ---
+
+// TestPanelViewFitsItsPaneWithAJobLine is TestPanelViewFitsItsPane's missing
+// case: mutating panelView's job-line branch back to the no-job row count
+// (m.height-1) leaves every other panel test green, because none of them set
+// m.jobs, and a panel that overflows its pane by one row is immediately
+// visible to a user and invisible to the rest of the suite.
+func TestPanelViewFitsItsPaneWithAJobLine(t *testing.T) {
+	m := panelModel(t)
+	m.jobs = []protocol.Job{{ID: "a", Input: "sc-1", State: protocol.JobRunning}}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != m.height {
+		t.Errorf("rendered %d lines, want %d", len(lines), m.height)
 	}
 }

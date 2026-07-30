@@ -39,15 +39,28 @@ func RenderJobLine(jobs []protocol.Job, width int) string {
 		marker, colour = "✓", BrightGreen
 	}
 
-	text := fmt.Sprintf("%s %s", marker, lead.Input)
-	if lead.Status != "" {
-		text += " · " + lead.Status
-	}
+	suffix := ""
 	if queued > 0 {
-		text += fmt.Sprintf(" (+%d)", queued)
+		suffix = fmt.Sprintf(" (+%d)", queued)
 	}
 
-	return lipgloss.NewStyle().Foreground(colour).Render(TruncateVisible(text, width))
+	// TruncateVisible cuts from the end, so the queued suffix is reserved and
+	// rendered on its own rather than folded into the string that gets cut:
+	// the marker, the input, and the queued count are what a glance needs,
+	// and the status - a free-text progress note - is the one piece worth
+	// dropping first to make room.
+	budget := max(0, width-visibleLen(suffix))
+
+	body := marker + " " + lead.Input
+	if lead.Status != "" {
+		const sep = " · "
+		if room := budget - visibleLen(body) - visibleLen(sep); room > 0 {
+			body += sep + truncateName(lead.Status, room)
+		}
+	}
+
+	style := lipgloss.NewStyle().Foreground(colour)
+	return style.Render(TruncateVisible(body, budget)) + style.Render(suffix)
 }
 
 func pickJob(jobs []protocol.Job) *protocol.Job {

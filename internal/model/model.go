@@ -460,11 +460,10 @@ func (m Model) View() string {
 
 	// Table
 	visible := m.visibleSessions()
-	tableHeight := m.tableHeight()
+	jobLine := view.RenderJobLine(m.jobs, m.width)
+	tableHeight := m.tableHeight(jobLine != "")
 	staleThreshold := m.cfg.GetSettingInt("stale_threshold")
 	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight, notif)
-
-	jobLine := view.RenderJobLine(m.jobs, m.width)
 
 	// Detail panel
 	var detail string
@@ -1228,11 +1227,20 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 }
 
 func (m Model) dispatchCmd(input string) tea.Cmd {
-	cwd := m.dispatchCwd()
+	// Only a plain string is captured here. Resolving it into a cwd runs
+	// fetch.MainWorktree - a git subprocess under ExecCommander's 10s default
+	// timeout - and that has to happen inside the returned tea.Cmd, off the
+	// Bubble Tea update goroutine, or a slow or lock-contended git freezes
+	// the whole TUI on a single "d" press.
+	var gitRoot string
+	if s := m.selectedSession(); s != nil {
+		gitRoot = s.Git.GitRoot
+	}
+	ctx, cmd := m.ctx, m.cmd
 	return func() tea.Msg {
 		if _, err := dispatch.Submit(context.Background(), dispatch.Options{
 			Input:      input,
-			Cwd:        cwd,
+			Cwd:        dispatchCwd(ctx, cmd, gitRoot),
 			SocketPath: protocol.SocketPath(),
 			Spawn:      daemonSpawner,
 			AckTimeout: 5 * time.Second,
@@ -1243,12 +1251,13 @@ func (m Model) dispatchCmd(input string) tea.Cmd {
 	}
 }
 
-// dispatchCwd is the repository a new worktree should be cut from. A panel's
-// own cwd is usually a linked worktree, so resolve the main one from the
-// selected session and fall back to this process's cwd.
-func (m Model) dispatchCwd() string {
-	if s := m.selectedSession(); s != nil && s.Git.GitRoot != "" {
-		if main := fetch.MainWorktree(m.ctx, m.cmd, s.Git.GitRoot); main != "" {
+// dispatchCwd is the repository a new worktree should be cut from. gitRoot is
+// the selected session's git root, usually a linked worktree, so it is
+// resolved to the repository's actual main tree; empty gitRoot or a git that
+// cannot answer falls back to this process's cwd.
+func dispatchCwd(ctx context.Context, cmd fetch.Commander, gitRoot string) string {
+	if gitRoot != "" {
+		if main := fetch.MainWorktree(ctx, cmd, gitRoot); main != "" {
 			return main
 		}
 	}
@@ -1510,7 +1519,12 @@ func (m *Model) cycleSort(dir int) {
 	session.SortSessions(m.sessions, m.sortMode)
 }
 
-func (m Model) tableHeight() int {
+// tableHeight is the dashboard's table height. hasJobLine must be whatever
+// the caller is about to render RenderJobLine's result as: gating this on
+// len(m.jobs) > 0 instead let a job in a state pickJob does not recognize
+// reserve a row that RenderJobLine then renders nothing into, leaving a
+// permanent blank line above the footer.
+func (m Model) tableHeight(hasJobLine bool) int {
 	// Status bar (1) + footer (1) + detail (if open)
 	used := 2
 	if m.detailOpen {
@@ -1519,7 +1533,7 @@ func (m Model) tableHeight() int {
 	if m.dispatchActive {
 		used += 3
 	}
-	if len(m.jobs) > 0 {
+	if hasJobLine {
 		used++
 	}
 	h := m.height - used

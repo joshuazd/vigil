@@ -73,3 +73,24 @@ func TestRenderJobLineTreatsARefusalLikeAFailure(t *testing.T) {
 		t.Errorf("got %q, want the refusal reason", got)
 	}
 }
+
+// TestRenderJobLineKeepsTheQueuedCountWhenTheInputIsLong pins the decision on
+// what gives way first when a job line does not fit: a Shortcut URL alone
+// already exceeds a 40-column panel, so the marker, input, and queued count
+// - what a glance needs - must survive, and the status - a free-text
+// progress note, the most expendable of the three - is what gets dropped.
+func TestRenderJobLineKeepsTheQueuedCountWhenTheInputIsLong(t *testing.T) {
+	got := RenderJobLine([]protocol.Job{
+		{ID: "a", Input: "https://app.shortcut.com/workspace/story/12345/a-long-title",
+			State: protocol.JobRunning, Status: "creating the worktree and the tmux session"},
+		{ID: "b", Input: "sc-2", State: protocol.JobQueued},
+	}, 40)
+	if !strings.Contains(got, "+1") {
+		t.Errorf("got %q, want the queued count to survive truncation", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if w := visibleLen(line); w > 40 {
+			t.Errorf("line is %d wide, want <= 40: %q", w, line)
+		}
+	}
+}
