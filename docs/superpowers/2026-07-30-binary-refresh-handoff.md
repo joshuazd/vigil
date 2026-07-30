@@ -13,7 +13,9 @@ important thing on this page; see "What was NOT verified".
   after `make install`, and a failed job line with no way to clear it - both hit on the first
   day of real dispatch use, neither speculative.
 
-Branch: `binary-refresh` in `~/vigil` (head `2b81aa0`, from `main` at `6a2a97c`). This is a
+Branch: `binary-refresh` in `~/vigil` (code head `ef83fdf`, from `main` at `6a2a97c`; this
+document is the commit on top of it). The earlier revision of this page named `2b81aa0`,
+which was only the base of the last task and never the branch head. This is a
 single-repository change; nothing in `~/dotfiles` is required for it.
 
 ## What landed
@@ -38,17 +40,37 @@ change that matters most during development. Stat, not version, is also the righ
 how `make install` works: it renames a new file over `~/.local/bin/vigil`, so a running
 process keeps its old inode while the path resolves to the new file underneath it.
 
-**Every client re-execs when its binary changes on disk.** The check piggybacks on the
-existing per-tick message on both the daemon-fed and self-polling paths, rate-limited to
-`binCheckInterval` (10s), and defers while a confirm prompt, a dispatch prompt, or a
-multi-selection is open - the same three states the esc cascade already protects, because
-they are unsaved user intent. A floor of `binRestartFloor` (30s) since the process's own
-start guards against a pathological re-exec loop if a stat is somehow nondeterministic. The
-exec cannot happen inside `Update` - Bubble Tea owns raw mode and the alt screen there - so
-the model sets a flag and returns `tea.Quit`; `main` inspects the returned model after
-`p.Run()` returns and `syscall.Exec`s the same path with the same `os.Args` and
-`os.Environ()`, through an injectable seam (`execSelf`) so this is testable without a second
-copy of the binary.
+**Every client re-execs when its binary changes on disk** - on macOS only; see the Linux
+landmine below. The check piggybacks on the existing per-tick message on both the daemon-fed
+and self-polling paths, rate-limited to `binCheckInterval` (10s), and defers while a confirm
+prompt, a dispatch prompt, or a multi-selection is open - the same three states the esc
+cascade already protects, because they are unsaved user intent. A floor of
+`binRestartFloor` (30s) since the process's own start guards against a pathological re-exec
+loop if a stat is somehow nondeterministic.
+
+Three things about `checkBinary` are not what the plan described, and each is a defect found
+in the whole-branch review rather than in a per-task one:
+
+- **A changed stamp has to be seen on two consecutive checks before it fires.** `make
+  install` renames, which is atomic, but `make build` writes `./vigil` in place, and the
+  design explicitly wants that case caught. A stat landing mid-write sees a new mtime and a
+  short size; exec'ing that file fails, and by then the TUI is torn down, so the user's panel
+  pane is simply gone. The checks are `binCheckInterval` apart, so a half-written file never
+  survives the pair. It costs up to one extra check interval of latency before a restart.
+- **A failed startup probe is "unknown", not a prior value.** `newModel` discards the ok from
+  its startup probe, so a failure left `binAtStart` zero and any later *successful* stat
+  compared unequal to it - a restart for a binary that never changed, and, when the failure
+  is systematic, a loop the "a re-exec'd process stamps at its own startup" argument does not
+  defend against. `checkBinary` now adopts the first stamp it can actually get as the
+  baseline, which is what `daemonHealth` was already doing with `!m.binOnDisk.Zero()`.
+- **The model returns `tea.Quit`, which it did not before.** See the process note below.
+
+`checkBinary` returns whether this process should quit, both tick arms act on that, and the
+restart path calls `m.cancel()` first exactly as the esc-quit path does. `main` then inspects
+the returned model after `p.Run()` returns and `syscall.Exec`s the same path with the same
+`os.Args` and `os.Environ()`, through an injectable seam (`execSelf`) so this is testable
+without a second copy of the binary. The exec cannot happen inside `Update`: Bubble Tea owns
+raw mode and the alt screen there.
 
 **The daemon publishes its own binary stamp, and does not restart itself.** `Snapshot.DaemonBin`
 carries the stamp the daemon recorded at its own startup. A client compares that against its
@@ -60,14 +82,22 @@ respawns it on the next failed probe through the existing `spawnDaemonOnce` path
 alternative - the daemon noticing its own staleness and restarting or handing off - was
 designed and rejected: `closeClients` drops every connection, so every panel would bounce
 through daemon-lost and back on every install, and it would add new lifecycle code exactly
-where the phase 4 Critical showed lifecycle bugs cost the most.
+where the phase 4 Critical showed lifecycle bugs cost the most. A daemon whose own probe
+fails publishes the zero stamp and is called outdated by every client, which is the correct
+fail-safe; it now logs that once, because previously it accused itself in silence.
+`daemon_bin` carries **no** `omitempty`: `encoding/json` never treats a struct as empty, so
+the tag was a no-op, and the additive claim rests on old clients ignoring an unknown key
+rather than on the key being absent.
 
 ## What was verified and how
 
 `go test -race ./...` across all 14 packages, and `golangci-lint run`, both clean. Every one
-of the nine implementation tasks carries its own per-task review, each reported clean. That
-is the complete list. No real binary has been installed and no real panel has been watched
-re-exec.
+of the nine implementation tasks carries its own per-task review, each reported clean, and a
+whole-branch review then found six findings on top of them - one Critical (Part B was
+unreachable), two Important (the zero startup stamp, the torn read) and three minor. All six
+are fixed; the three behavioural ones each have a test that was watched to fail against the
+unfixed code and against a targeted mutation of the fix. That is the complete list. No real
+binary has been installed and no real panel has been watched re-exec.
 
 ## What was NOT verified
 
@@ -90,6 +120,24 @@ running daemon and panels, which needs their authorization and is being handled 
 
 ## Landmines
 
+- **On Linux this feature silently does nothing.** `.goreleaser.yml` ships
+  `goos: [darwin, linux]`. On Linux `os.Executable()` reads `/proc/self/exe`, and after a
+  rename-over that resolves to `"/path/vigil (deleted)"`; the stat then fails, `Current()`
+  returns false, and both the client re-exec and the client's own `binOnDisk` become
+  permanent no-ops - which also means `daemon outdated` never renders there, since
+  `daemonHealth` requires a non-zero `binOnDisk`. It fails closed, so the Linux binary is
+  safe, it just does not have this feature. **No Linux fallback was implemented**; a fix
+  would have to strip the `" (deleted)"` suffix or read `/proc/self/maps`, and neither has
+  been written or tested. Nothing in the code says this today beyond `Current()`'s
+  fail-closed comment.
+- **A client that loses its daemon keeps a stale job line it cannot clear.** `m.jobs` is not
+  cleared by `handleDaemonLost`, and the esc dismiss layer is gated on `m.daemonConn != nil`,
+  so a failed or refused job stays rendered with no key able to dismiss it until a daemon
+  comes back. Pre-existing from phase 4 - the retention window was always the only way out -
+  but this branch is what makes it visible, because it adds the key that works everywhere
+  else. The gate is correct as written (there is nowhere to send the frame), so the fix, if
+  one is wanted, is clearing or greying `m.jobs` on daemon loss, which is a behaviour
+  decision rather than a bug fix and was left alone.
 - **A dismiss racing a `vigil dispatch` ack.** The CLI waits up to 15s for its job id to
   appear in a snapshot. Dismissal only touches terminal states (`JobFailed`, `JobRefused`),
   and a job the CLI is still waiting on is queued or running, so today the race is closed by
@@ -111,7 +159,30 @@ running daemon and panels, which needs their authorization and is being handled 
 
 ## Process notes
 
-**Two of three plan defects in this branch were caught by implementers, not by review.**
+**The fourth plan defect shipped, and no per-task review could have caught it.** For the
+whole of this branch's execution, Part B was dead code: `checkBinary` set `restartRequested`,
+`RestartRequested()` read it, `main.restartIfRequested` called that after `p.Run()` returned
+- and nothing ever returned `tea.Quit`, so `p.Run()` never returned. Both tick arms called
+`m.checkBinary(time.Now())` for its side effect and then returned their normal command. The
+design says it plainly ("the model sets a restart flag and returns `tea.Quit`"); the plan's
+briefs did not, and the code followed the briefs.
+
+What made it invisible is worth naming, because it is a test-design failure rather than an
+attention failure. **Every restart test sat on one side or the other of the broken seam.**
+Task 6's tests called `checkBinary` directly and asserted the flag. Task 7's called
+`restartIfRequested` directly with a stub model and asserted the exec. Both halves were
+correct and both were tested. Nothing drove `Update`, so nothing asserted the one thing that
+joins them, and each per-task review saw a task that was internally complete. A whole-branch
+review found it in the only way it could be found: by asking what reads the flag.
+
+The fix adds `TestASelfPollTickQuitsWhenTheBinaryChanged` and
+`TestADaemonFedTickQuitsWhenTheBinaryChanged`, which go through `Update` with a real
+`CollectTickMsg` and `RenderTickMsg` and assert the returned command is `tea.Quit`. The
+lesson generalizes past this branch: **a feature whose halves are tested separately needs one
+test that starts where the runtime starts.**
+
+**Two of three earlier plan defects in this branch were caught by implementers, not by
+review.**
 
 - Task 3's brief built the daemon-routing test for the unknown-type refusal with a nil
   stream (`newJobs(&config.Config{}, nil, nil, ...)`). `submit`'s reason switch checks
