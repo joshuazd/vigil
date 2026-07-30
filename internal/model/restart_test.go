@@ -3,9 +3,12 @@ package model
 import (
 	"errors"
 	"io/fs"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/selfbin"
 )
 
@@ -131,5 +134,63 @@ func TestRestartRequestedIsReadable(t *testing.T) {
 	m.restartRequested = true
 	if !m.RestartRequested() {
 		t.Fatal("RestartRequested does not report the flag")
+	}
+}
+
+func outdatedModel(t *testing.T) Model {
+	t.Helper()
+	m := binModel(t)
+	m.daemonConn = &net.TCPConn{}
+	m.daemonReady = true
+	m.lastSnapshot = time.Now()
+	m.cfg = &config.Config{}
+	return m
+}
+
+func TestDaemonHealthReportsAnOutdatedDaemon(t *testing.T) {
+	m := outdatedModel(t)
+	m.binOnDisk = selfbin.Stamp{Size: 200}
+	m.daemonBin = selfbin.Stamp{Size: 100}
+	if got := m.daemonHealth(); got != "daemon outdated" {
+		t.Fatalf("daemonHealth = %q, want %q", got, "daemon outdated")
+	}
+}
+
+func TestDaemonHealthSaysNothingWhenTheDaemonMatchesDisk(t *testing.T) {
+	m := outdatedModel(t)
+	m.binOnDisk = selfbin.Stamp{Size: 200}
+	m.daemonBin = selfbin.Stamp{Size: 200}
+	if got := m.daemonHealth(); got != "" {
+		t.Fatalf("daemonHealth = %q, want empty", got)
+	}
+}
+
+// A daemon too old to send the field is too old. Absent reads as outdated.
+func TestAnAbsentStampReadsAsOutdated(t *testing.T) {
+	m := outdatedModel(t)
+	m.binOnDisk = selfbin.Stamp{Size: 200}
+	m.daemonBin = selfbin.Stamp{}
+	if got := m.daemonHealth(); got != "daemon outdated" {
+		t.Fatalf("daemonHealth = %q, want %q", got, "daemon outdated")
+	}
+}
+
+// The client's own probe failing must not accuse the daemon.
+func TestAnUnknownOnDiskStampSaysNothing(t *testing.T) {
+	m := outdatedModel(t)
+	m.binOnDisk = selfbin.Stamp{}
+	m.daemonBin = selfbin.Stamp{Size: 100}
+	if got := m.daemonHealth(); got != "" {
+		t.Fatalf("daemonHealth = %q, want empty", got)
+	}
+}
+
+func TestStalenessOutranksOutdatedness(t *testing.T) {
+	m := outdatedModel(t)
+	m.binOnDisk = selfbin.Stamp{Size: 200}
+	m.daemonBin = selfbin.Stamp{Size: 100}
+	m.lastSnapshot = time.Now().Add(-time.Hour)
+	if got := m.daemonHealth(); !strings.HasPrefix(got, "daemon stale") {
+		t.Fatalf("daemonHealth = %q, want the staleness marker to win", got)
 	}
 }

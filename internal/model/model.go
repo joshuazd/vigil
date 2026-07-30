@@ -1175,6 +1175,12 @@ func (m Model) daemonHealth() string {
 	if age := time.Since(m.lastSnapshot); age > m.staleAfter() {
 		return fmt.Sprintf("daemon stale %ds", int(age.Seconds()))
 	}
+	// Lowest precedence: a daemon that is behind is still feeding correct
+	// data, it is just missing whatever the newer image adds. An absent stamp
+	// counts, because a daemon too old to send the field is too old.
+	if !m.binOnDisk.Zero() && m.daemonBin != m.binOnDisk {
+		return "daemon outdated"
+	}
 	return ""
 }
 
