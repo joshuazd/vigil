@@ -7,7 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/model"
 )
 
 func TestParseArgsReturnsTheRemainingArguments(t *testing.T) {
@@ -237,4 +240,76 @@ func TestDispatchRunsAfterTheDependencyCheck(t *testing.T) {
 	if !strings.Contains(stderr.String(), "not found in PATH") {
 		t.Errorf("got %q, want a dependency error", stderr.String())
 	}
+}
+
+// fakeFinalModel stands in for tea.Program's final model without dragging in
+// a real Model, so these tests exercise restartIfRequested's own logic rather
+// than model.Model's.
+type fakeFinalModel struct {
+	restart bool
+}
+
+func (f fakeFinalModel) Init() tea.Cmd                       { return nil }
+func (f fakeFinalModel) Update(tea.Msg) (tea.Model, tea.Cmd) { return f, nil }
+func (f fakeFinalModel) View() string                        { return "" }
+func (f fakeFinalModel) RestartRequested() bool              { return f.restart }
+
+func TestRestartIfRequestedExecsTheSamePathAndArgv(t *testing.T) {
+	original := execSelf
+	t.Cleanup(func() { execSelf = original })
+
+	var gotPath string
+	var gotArgv []string
+	execSelf = func(path string, argv []string, envv []string) error {
+		gotPath = path
+		gotArgv = argv
+		return nil
+	}
+
+	if err := restartIfRequested(fakeFinalModel{restart: true}); err != nil {
+		t.Fatalf("restartIfRequested: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip("no executable path on this platform")
+	}
+	if gotPath != exe {
+		t.Fatalf("exec path = %q, want %q", gotPath, exe)
+	}
+	if len(gotArgv) == 0 || gotArgv[0] != exe {
+		t.Fatalf("argv = %v, want argv[0] to be the executable", gotArgv)
+	}
+}
+
+func TestRestartIfRequestedDoesNothingWithoutTheFlag(t *testing.T) {
+	original := execSelf
+	t.Cleanup(func() { execSelf = original })
+	execSelf = func(string, []string, []string) error {
+		t.Fatal("exec'd without a restart request")
+		return nil
+	}
+	if err := restartIfRequested(fakeFinalModel{restart: false}); err != nil {
+		t.Fatalf("restartIfRequested: %v", err)
+	}
+}
+
+func TestRestartIfRequestedIgnoresANonModel(t *testing.T) {
+	original := execSelf
+	t.Cleanup(func() { execSelf = original })
+	execSelf = func(string, []string, []string) error {
+		t.Fatal("exec'd for a model of the wrong type")
+		return nil
+	}
+	if err := restartIfRequested(nil); err != nil {
+		t.Fatalf("restartIfRequested: %v", err)
+	}
+}
+
+// TestTheRealModelSatisfiesRestartRequester is a compile-time assertion: if
+// model.Model ever stops satisfying restartRequester, this file fails to
+// compile rather than letting restartIfRequested silently stop firing in
+// production while every test above keeps passing against the fake.
+func TestTheRealModelSatisfiesRestartRequester(t *testing.T) {
+	var _ restartRequester = model.Model{}
 }
