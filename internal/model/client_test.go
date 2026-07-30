@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,6 +93,14 @@ func newTestModel() Model {
 		cmd:            cmd,
 		ctx:            context.Background(),
 		collector:      collect.New(cfg, cmd),
+		// cancel and daemonWriteMu are set for the same reason cachePath is
+		// deliberately left empty: what the fixture does decides what a test
+		// written against it can reach. Every quit path calls cancel and
+		// every daemon write takes the mutex, so leaving either nil turns the
+		// next test through those paths into a nil panic rather than a
+		// failure.
+		cancel:        func() {},
+		daemonWriteMu: &sync.Mutex{},
 	}
 }
 

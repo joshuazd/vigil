@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/selfbin"
 )
 
@@ -48,6 +49,13 @@ func binModel(t *testing.T) Model {
 	return m
 }
 
+// checkTwice runs the two checks a changed stamp needs before it can request a
+// restart, an interval apart so the second is not rate-limited away.
+func checkTwice(m *Model, start time.Time) {
+	m.checkBinary(start)
+	m.checkBinary(start.Add(binCheckInterval + time.Second))
+}
+
 func TestAnUnchangedBinaryDoesNotRequestARestart(t *testing.T) {
 	m := binModel(t)
 	m.checkBinary(time.Now())
@@ -59,12 +67,56 @@ func TestAnUnchangedBinaryDoesNotRequestARestart(t *testing.T) {
 func TestAChangedBinaryRequestsARestart(t *testing.T) {
 	m := binModel(t)
 	m.binProber = proberReturning(200, nil)
-	m.checkBinary(time.Now())
+	checkTwice(&m, time.Now())
 	if !m.restartRequested {
 		t.Fatal("no restart requested after the binary changed")
 	}
 	if m.binOnDisk.Size != 200 {
 		t.Fatalf("binOnDisk.Size = %d, want 200", m.binOnDisk.Size)
+	}
+}
+
+// `make build` writes ./vigil in place, so a stat can land mid-write and see a
+// new mtime with a short size. Exec'ing that kills the pane.
+func TestAChangedStampSeenOnceDoesNotRestart(t *testing.T) {
+	m := binModel(t)
+	m.binProber = proberReturning(200, nil)
+	m.checkBinary(time.Now())
+	if m.restartRequested {
+		t.Fatal("restarted on a single observation; a torn read would exec a truncated binary")
+	}
+}
+
+// A file still being written grows between checks, so the pair never matches.
+func TestAStampThatKeepsChangingNeverConfirms(t *testing.T) {
+	m := binModel(t)
+	now := time.Now()
+	m.binProber = proberReturning(200, nil)
+	m.checkBinary(now)
+	m.binProber = proberReturning(300, nil)
+	m.checkBinary(now.Add(binCheckInterval + time.Second))
+	if m.restartRequested {
+		t.Fatal("two different changed stamps confirmed each other")
+	}
+	m.checkBinary(now.Add(2*binCheckInterval + 2*time.Second))
+	if !m.restartRequested {
+		t.Fatal("a stamp that then held steady for two checks never restarted")
+	}
+}
+
+// A startup probe that failed leaves binAtStart zero. Zero is "unknown", not a
+// prior value: comparing a later successful stamp against it would restart a
+// binary that never changed.
+func TestAFailedStartupStampIsAdoptedRatherThanTreatedAsAChange(t *testing.T) {
+	m := binModel(t)
+	m.binAtStart = selfbin.Stamp{}
+	m.binOnDisk = selfbin.Stamp{}
+	checkTwice(&m, time.Now())
+	if m.restartRequested {
+		t.Fatal("a failed startup stamp was read as a changed binary")
+	}
+	if m.binAtStart.Size != 100 {
+		t.Fatalf("binAtStart = %+v, want the first stamp the process could get", m.binAtStart)
 	}
 }
 
@@ -86,10 +138,10 @@ func TestTheCheckIsRateLimited(t *testing.T) {
 	m.checkBinary(now)
 	m.binProber = proberReturning(200, nil)
 	m.checkBinary(now.Add(time.Second))
-	if m.restartRequested {
+	if !m.binPending.Zero() {
 		t.Fatal("the check ran again within the rate limit window")
 	}
-	m.checkBinary(now.Add(binCheckInterval + time.Second))
+	checkTwice(&m, now.Add(binCheckInterval+time.Second))
 	if !m.restartRequested {
 		t.Fatal("the check never ran again after the rate limit window")
 	}
@@ -99,7 +151,7 @@ func TestAFreshlyStartedProcessDoesNotRestart(t *testing.T) {
 	m := binModel(t)
 	m.startedAt = time.Now()
 	m.binProber = proberReturning(200, nil)
-	m.checkBinary(time.Now())
+	checkTwice(&m, time.Now())
 	if m.restartRequested {
 		t.Fatal("a process restarted within the startup floor; a bad stamp would spin")
 	}
@@ -118,7 +170,7 @@ func TestARestartWaitsForAnOpenPrompt(t *testing.T) {
 			m := binModel(t)
 			tc.apply(&m)
 			m.binProber = proberReturning(200, nil)
-			m.checkBinary(time.Now())
+			checkTwice(&m, time.Now())
 			if m.restartRequested {
 				t.Fatalf("restarted with a %s open, losing unsaved intent", tc.name)
 			}
@@ -134,6 +186,49 @@ func TestRestartRequestedIsReadable(t *testing.T) {
 	m.restartRequested = true
 	if !m.RestartRequested() {
 		t.Fatal("RestartRequested does not report the flag")
+	}
+}
+
+// restartingModel is one check away from asking to be restarted: the changed
+// stamp has already been seen once, so the next check confirms it.
+func restartingModel(t *testing.T) Model {
+	t.Helper()
+	m := binModel(t)
+	m.binProber = proberReturning(200, nil)
+	stamp, ok := m.binProber.Current()
+	if !ok {
+		t.Fatal("the stub prober failed")
+	}
+	m.binPending = stamp
+	return m
+}
+
+// The flag is inert unless a tick arm turns it into a quit: main only re-execs
+// after p.Run() returns, and p.Run() does not return without tea.Quit.
+func TestASelfPollTickQuitsWhenTheBinaryChanged(t *testing.T) {
+	m := restartingModel(t)
+
+	next, cmd := m.Update(CollectTickMsg{Epoch: m.epoch})
+
+	if !next.(Model).RestartRequested() {
+		t.Fatal("a collect tick did not request a restart for a changed binary")
+	}
+	if !isQuit(cmd) {
+		t.Fatal("a collect tick requested a restart without quitting; main never gets to exec")
+	}
+}
+
+func TestADaemonFedTickQuitsWhenTheBinaryChanged(t *testing.T) {
+	m := restartingModel(t)
+	m.daemonDecoder = protocol.NewDecoder(strings.NewReader(""))
+
+	next, cmd := m.Update(RenderTickMsg{Epoch: m.epoch})
+
+	if !next.(Model).RestartRequested() {
+		t.Fatal("a render tick did not request a restart for a changed binary")
+	}
+	if !isQuit(cmd) {
+		t.Fatal("a render tick requested a restart without quitting; main never gets to exec")
 	}
 }
 

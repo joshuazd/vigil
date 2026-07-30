@@ -149,6 +149,11 @@ type Model struct {
 	lastBinCheck time.Time
 	startedAt    time.Time
 
+	// binPending is a changed stamp seen once and not yet confirmed by a
+	// second check. `make build` writes ./vigil in place, so a stat can land
+	// mid-write and report a short size; exec'ing that file kills the pane.
+	binPending selfbin.Stamp
+
 	// restartRequested asks the caller to re-exec after the program exits.
 	// The exec cannot happen here: Bubble Tea owns raw mode and the alt
 	// screen, and a process exec'd from inside Update inherits a terminal
@@ -395,7 +400,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.daemonConn != nil {
 			return m, nil
 		}
-		m.checkBinary(time.Now())
+		if m.checkBinary(time.Now()) {
+			m.cancel()
+			return m, tea.Quit
+		}
 		// The reschedule is unconditional and does not depend on startPoll
 		// succeeding. A tick consumed while a poll is already in flight would
 		// otherwise vanish - tea.Tick is one-shot - and kill the loop.
@@ -432,7 +440,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Epoch != m.epoch || m.daemonDecoder == nil {
 			return m, nil
 		}
-		m.checkBinary(time.Now())
+		if m.checkBinary(time.Now()) {
+			m.cancel()
+			return m, tea.Quit
+		}
 		return m, renderTickCmd(1*time.Second, m.epoch)
 
 	case PaneCapturedMsg:
@@ -1129,32 +1140,51 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 // restored the terminal.
 func (m Model) RestartRequested() bool { return m.restartRequested }
 
-func (m *Model) checkBinary(now time.Time) {
+// checkBinary reports whether this process should quit now so its caller can
+// re-exec the newer image. The tick arms turn that into tea.Quit: nothing else
+// makes p.Run() return, and main only execs once it has.
+func (m *Model) checkBinary(now time.Time) bool {
 	if m.restartRequested {
-		return
+		return true
 	}
 	if !m.lastBinCheck.IsZero() && now.Sub(m.lastBinCheck) < binCheckInterval {
-		return
+		return false
 	}
 	m.lastBinCheck = now
 
 	stamp, ok := m.binProber.Current()
 	if !ok {
-		return
+		return false
 	}
 	m.binOnDisk = stamp
+	// A startup probe that failed left binAtStart zero, which is "unknown"
+	// rather than a real prior value: comparing against it would restart a
+	// binary that never changed. The first stamp this process can actually
+	// get is its baseline.
+	if m.binAtStart.Zero() {
+		m.binAtStart = stamp
+	}
 	if stamp == m.binAtStart {
-		return
+		m.binPending = selfbin.Stamp{}
+		return false
+	}
+	// The same changed stamp has to survive two checks a binCheckInterval
+	// apart. A file still being written grows between them, so a torn read is
+	// never what triggers the exec.
+	if stamp != m.binPending {
+		m.binPending = stamp
+		return false
 	}
 	if now.Sub(m.startedAt) < binRestartFloor {
-		return
+		return false
 	}
 	// Unsaved user intent. All three are states the user is actively in and
 	// about to leave, so no indicator is needed for the wait.
 	if m.confirmAction != ConfirmNone || m.dispatchActive || len(m.selected) > 0 {
-		return
+		return false
 	}
 	m.restartRequested = true
+	return true
 }
 
 // daemonHealth describes the state of the data source, for the status bar.

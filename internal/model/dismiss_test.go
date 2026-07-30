@@ -2,7 +2,6 @@ package model
 
 import (
 	"net"
-	"sync"
 	"testing"
 	"time"
 
@@ -12,17 +11,6 @@ import (
 )
 
 func escKey() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyEsc} }
-
-// escModel is newTestModel plus the two things the esc path needs and the
-// shared fixture does not set. cancel is nil in newTestModel, and the quit
-// branch calls it - without this every test here nil-panics rather than
-// failing usefully.
-func escModel() Model {
-	m := newTestModel()
-	m.cancel = func() {}
-	m.daemonWriteMu = &sync.Mutex{}
-	return m
-}
 
 // isQuit reports whether a command is tea.Quit. There is no existing
 // convention for this in the package; this is it. Only call it on a command
@@ -39,7 +27,7 @@ func TestEscDismissesAFailedJobInsteadOfQuitting(t *testing.T) {
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 
-	m := escModel()
+	m := newTestModel()
 	m.daemonConn = client
 	m.jobs = []protocol.Job{{ID: "a", State: protocol.JobFailed}}
 
@@ -83,7 +71,7 @@ func TestEscStillClearsAConfirmPromptBeforeDismissing(t *testing.T) {
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 
-	m := escModel()
+	m := newTestModel()
 	m.daemonConn = client
 	m.confirmAction = ConfirmCleanup
 	m.jobs = []protocol.Job{{ID: "a", State: protocol.JobFailed}}
@@ -103,7 +91,7 @@ func TestEscQuitsWhenThereIsNothingToDismiss(t *testing.T) {
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 
-	m := escModel()
+	m := newTestModel()
 	m.daemonConn = client
 	m.jobs = []protocol.Job{{ID: "a", State: protocol.JobRunning}}
 
@@ -115,7 +103,7 @@ func TestEscQuitsWhenThereIsNothingToDismiss(t *testing.T) {
 }
 
 func TestASelfPollingClientQuitsOnEsc(t *testing.T) {
-	m := escModel()
+	m := newTestModel()
 	m.daemonConn = nil
 	m.jobs = nil
 
