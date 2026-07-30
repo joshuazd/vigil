@@ -16,35 +16,88 @@ type RawSession struct {
 	Created  int64
 }
 
-// ListSessions returns tmux sessions sorted by creation time, deduplicated by name.
+// Pane preference for representing a session's working directory. Lower wins.
+//
+// A session has several panes and only one of them is where the work is. This
+// used to be decided by sorting the raw lines and keeping the first, which made
+// the choice alphabetical by path: a panel pane in ~/portal beat a work pane in
+// ~/sc-198799 because "portal" sorts first. Every git read then came from the
+// wrong directory, so PR lookups keyed on the wrong branch and gh correctly
+// answered "no PR", with no error anywhere to show for it.
+const (
+	panePreferClaude = iota // marked @vigil_claude: placed there for exactly this
+	panePreferActive        // no marker, but the user is looking at it
+	panePreferOther
+	panePreferPanel // a vigil panel is never the session's work
+)
+
+func panePreference(isClaude, isPanel, isActive bool) int {
+	switch {
+	case isClaude:
+		return panePreferClaude
+	case isPanel:
+		return panePreferPanel
+	case isActive:
+		return panePreferActive
+	default:
+		return panePreferOther
+	}
+}
+
+// ListSessions returns tmux sessions sorted by creation time, deduplicated by
+// name, each carrying the path of the pane that best represents its work.
 func ListSessions(ctx context.Context, cmd Commander) ([]RawSession, error) {
 	out, err := cmd.Run(ctx, "", "tmux", "list-panes", "-a",
-		"-F", "#{session_created}|#{session_name}|#{pane_current_path}")
+		"-F", "#{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}")
 	if err != nil {
 		return nil, err
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	sort.Strings(lines)
 
-	seen := make(map[string]bool)
+	index := make(map[string]int)
+	prefs := make(map[string]int)
 	var sessions []RawSession
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 3)
+		// Not a fixed field count: a pane whose path contains a pipe would
+		// otherwise swallow the flags that follow it, and the flags are what
+		// this function now depends on.
+		parts := strings.Split(line, "|")
 		if len(parts) < 3 {
 			continue
 		}
 		name := parts[1]
-		if seen[name] {
+		// Flags are the last three fields; the path is everything between the
+		// name and them, rejoined, so a pipe in a path cannot shift them.
+		flagStart := len(parts) - 3
+		var path string
+		var isActive, isClaude, isPanel bool
+		if flagStart > 2 {
+			path = strings.Join(parts[2:flagStart], "|")
+			isActive = parts[flagStart] == "1"
+			isClaude = parts[flagStart+1] == "1"
+			isPanel = parts[flagStart+2] == "1"
+		} else {
+			path = strings.Join(parts[2:], "|")
+		}
+
+		pref := panePreference(isClaude, isPanel, isActive)
+		if i, seen := index[name]; seen {
+			if pref < prefs[name] {
+				sessions[i].PanePath = path
+				prefs[name] = pref
+			}
 			continue
 		}
-		seen[name] = true
 		created, _ := strconv.ParseInt(parts[0], 10, 64)
+		index[name] = len(sessions)
+		prefs[name] = pref
 		sessions = append(sessions, RawSession{
 			Name:     name,
-			PanePath: parts[2],
+			PanePath: path,
 			Created:  created,
 		})
 	}

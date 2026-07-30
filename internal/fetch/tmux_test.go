@@ -40,6 +40,104 @@ func TestListSessionsDeduplicates(t *testing.T) {
 	}
 }
 
+// The observed bug, with the real shape that produced it. A session's vigil
+// panel sat in the main repository while its work pane sat in the worktree.
+// Choosing a pane by sorted path picked the panel, so every git read - and
+// therefore the branch every PR lookup keyed on - came from the wrong
+// directory. gh then correctly answered "no PR for main", with no error
+// anywhere, and the PR column silently kept its last known value.
+//
+// "portal" sorts before "sc-198799", which is the entire mechanism.
+func TestListSessionsIgnoresAPanelPaneInAnotherDirectory(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", strings.Join([]string{
+		"1000|SC-198799 Fix NoMethodError in|/Users/x/portal|0||1",
+		"1000|SC-198799 Fix NoMethodError in|/Users/x/sc-198799|1|1|",
+		"1000|SC-198799 Fix NoMethodError in|/Users/x/sc-198799|1||",
+	}, "\n"), nil)
+
+	sessions, err := ListSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].PanePath != "/Users/x/sc-198799" {
+		t.Errorf("got pane path %q, want the worktree", sessions[0].PanePath)
+	}
+}
+
+// The claude marker exists so targeting does not depend on pane index, which
+// shifts when a panel is inserted ahead of it. It outranks the active pane for
+// the same reason: the user can move the cursor anywhere.
+func TestListSessionsPrefersTheClaudePaneOverTheActiveOne(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", strings.Join([]string{
+		"1000|alpha|/work/nit|1||",
+		"1000|alpha|/work/claude|0|1|",
+	}, "\n"), nil)
+
+	sessions, err := ListSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessions[0].PanePath != "/work/claude" {
+		t.Errorf("got %q, want the claude pane", sessions[0].PanePath)
+	}
+}
+
+// A panel is never the session's work, so it must lose even when it is the
+// only active pane - which is what happens the moment a user clicks into one.
+func TestListSessionsNeverPrefersAPanelEvenWhenActive(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", strings.Join([]string{
+		"1000|alpha|/aaa-panel|1||1",
+		"1000|alpha|/zzz-work|0||",
+	}, "\n"), nil)
+
+	sessions, err := ListSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessions[0].PanePath != "/zzz-work" {
+		t.Errorf("got %q, want the non-panel pane", sessions[0].PanePath)
+	}
+}
+
+// With no claude marker, the active pane is the best available evidence of
+// where the work is.
+func TestListSessionsFallsBackToTheActivePane(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", strings.Join([]string{
+		"1000|alpha|/aaa-idle|0||",
+		"1000|alpha|/zzz-active|1||",
+	}, "\n"), nil)
+
+	sessions, err := ListSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessions[0].PanePath != "/zzz-active" {
+		t.Errorf("got %q, want the active pane", sessions[0].PanePath)
+	}
+}
+
+// A session that is nothing but a panel still has to report a path rather than
+// an empty one, or it would look like a session with no working directory.
+func TestListSessionsFallsBackToAPanelWhenThatIsAll(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("tmux", "1000|alpha|/only-panel|1||1", nil)
+
+	sessions, err := ListSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].PanePath != "/only-panel" {
+		t.Errorf("got %+v, want the panel path", sessions)
+	}
+}
+
 func TestCurrentSession(t *testing.T) {
 	mock := NewMockCommander()
 	mock.On("tmux", "my-session", nil)
