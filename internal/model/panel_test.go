@@ -12,7 +12,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jzinkduda/vigil/internal/config"
-	"github.com/jzinkduda/vigil/internal/daemon"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/view"
@@ -80,8 +79,7 @@ func TestPanelIgnoresToggleDetail(t *testing.T) {
 }
 
 func TestNewPanelSetsPanelMode(t *testing.T) {
-	daemonSpawner = func() error { return nil }
-	t.Cleanup(func() { daemonSpawner = daemon.Spawn })
+	stubSpawner(t, func() error { return nil })
 
 	dir := shortTempDir(t)
 	t.Setenv("HOME", dir)
@@ -100,8 +98,7 @@ func TestNewPanelSetsPanelMode(t *testing.T) {
 // at once all try this, and the flock is what makes that safe.
 func TestNewPanelSpawnsTheDaemon(t *testing.T) {
 	spawned := 0
-	daemonSpawner = func() error { spawned++; return nil }
-	t.Cleanup(func() { daemonSpawner = daemon.Spawn })
+	stubSpawner(t, func() error { spawned++; return nil })
 
 	dir := shortTempDir(t)
 	t.Setenv("HOME", dir)
@@ -168,8 +165,7 @@ func TestNewConnectedToADaemonDoesNotPrimePollInFlight(t *testing.T) {
 // every panel self-polling forever, without letting a panel fork in a loop.
 func TestPanelRespawnsARateLimitedDaemon(t *testing.T) {
 	spawned := 0
-	daemonSpawner = func() error { spawned++; return nil }
-	t.Cleanup(func() { daemonSpawner = daemon.Spawn })
+	stubSpawner(t, func() error { spawned++; return nil })
 
 	m := panelModel(t)
 	m.epoch = 1

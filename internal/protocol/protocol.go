@@ -25,11 +25,22 @@ const maxRequestLine = 64 << 10
 
 const RequestDispatch = "dispatch"
 
+// Job states. JobFailed means the job was accepted and ran, then exited
+// non-zero: "vigil dispatch" exits 0 for it, the same as JobSucceeded,
+// because the daemon owning the job - not this process seeing it succeed -
+// is the point. JobRefused means the job never ran at all: the daemon
+// rejected the request itself (bad version, bad type, empty input, a
+// duplicate, or a full queue), so "vigil dispatch" exits non-zero only for
+// this state. A renderer should still show JobRefused the way it shows a
+// failure - the user does not care which of the two a session's last
+// dispatch was - but the daemon and the CLI have to tell them apart, because
+// only one of them is worth queueing again.
 const (
 	JobQueued    = "queued"
 	JobRunning   = "running"
 	JobSucceeded = "succeeded"
 	JobFailed    = "failed"
+	JobRefused   = "refused"
 )
 
 var ErrVersionMismatch = errors.New("protocol version mismatch")

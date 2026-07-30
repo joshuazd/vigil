@@ -84,10 +84,11 @@ func newJobs(cfg *config.Config, stream fetch.StreamCommander, cmd fetch.Command
 	}
 }
 
-// submit registers a request. A refusal is registered too, as a failed job
+// submit registers a request. A refusal is registered too, as a refused job
 // naming the reason: the submitting client waits for its id to appear in a
 // snapshot, so a silent drop would be indistinguishable from a daemon that
-// never read the frame.
+// never read the frame. Refused is distinct from failed: a refused job never
+// ran.
 func (j *jobs) submit(req *protocol.Request) {
 	if req == nil || req.ID == "" {
 		return
@@ -115,7 +116,7 @@ func (j *jobs) submit(req *protocol.Request) {
 	now := j.now().Unix()
 	job := &protocol.Job{ID: req.ID, Input: req.Input, State: protocol.JobQueued, Started: now}
 	if reason != "" {
-		job.State = protocol.JobFailed
+		job.State = protocol.JobRefused
 		job.Status = reason
 		job.Ended = now
 	}
@@ -132,8 +133,16 @@ func (j *jobs) submit(req *protocol.Request) {
 	select {
 	case j.pending <- req.ID:
 	default:
-		j.fail(req.ID, "dispatch queue is full")
+		j.refuse(req.ID, "dispatch queue is full")
 	}
+}
+
+// refuse is fail's counterpart for the one refusal registered in two steps: a
+// full queue is discovered only after the job is already inserted as queued,
+// so it is flipped to refused here rather than in submit's reason switch.
+func (j *jobs) refuse(id, reason string) {
+	j.finish(id, protocol.JobRefused, reason)
+	j.logf("dispatch %s refused: %s", id, reason)
 }
 
 func (j *jobs) inFlightInputLocked(input string) bool {
@@ -283,7 +292,7 @@ func expired(job *protocol.Job, now time.Time) bool {
 	switch job.State {
 	case protocol.JobSucceeded:
 		return now.Sub(ended) > succeededRetention
-	case protocol.JobFailed:
+	case protocol.JobFailed, protocol.JobRefused:
 		return now.Sub(ended) > failedRetention
 	}
 	return false

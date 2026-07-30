@@ -23,12 +23,30 @@ import (
 // TestMain keeps the suite from ever starting a real daemon. Both New and
 // NewPanel spawn one when no socket answers, and so does every failed
 // reconnect probe, which between them cover most of this package - while the
-// real spawnDaemon forks a detached `vigil daemon` that would outlive the test
-// binary. A test that wants to observe spawning installs its own stub over
-// this one.
+// real daemon.Spawn forks a detached `vigil daemon` that would outlive the
+// test binary. A test that wants to observe spawning uses stubSpawner rather
+// than assigning daemonSpawner by hand, so nothing can restore the real
+// spawner once the suite is running.
 func TestMain(m *testing.M) {
-	daemonSpawner = func() error { return nil }
+	daemonSpawner = noopSpawner
 	os.Exit(m.Run())
+}
+
+// noopSpawner is the only value daemonSpawner is ever restored to once
+// TestMain has run. A restore that named daemon.Spawn instead - which every
+// call site did before this helper existed - leaves a live spawner for every
+// later test in the package: under go test, os.Executable() is the test
+// binary, so the next test that finds no daemon listening forks the whole
+// suite as a subprocess, which reaches the same test and forks again.
+var noopSpawner = func() error { return nil }
+
+// stubSpawner installs fn as daemonSpawner for the duration of t and restores
+// noopSpawner afterward - never daemon.Spawn. Use this instead of assigning
+// daemonSpawner directly.
+func stubSpawner(t *testing.T, fn func() error) {
+	t.Helper()
+	daemonSpawner = fn
+	t.Cleanup(func() { daemonSpawner = noopSpawner })
 }
 
 func newTestModel() Model {

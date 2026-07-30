@@ -134,7 +134,7 @@ func awaitAck(conn net.Conn, id string, timeout time.Duration) (*protocol.Job, e
 			if job.ID != id {
 				continue
 			}
-			if job.State == protocol.JobFailed {
+			if job.State == protocol.JobRefused {
 				return &job, fmt.Errorf("dispatch refused: %s", job.Status)
 			}
 			return &job, nil

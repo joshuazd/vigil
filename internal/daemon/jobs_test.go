@@ -162,7 +162,7 @@ func TestJobsRunOneAtATime(t *testing.T) {
 	}
 }
 
-func TestADuplicateInputIsRefusedAsAFailedJob(t *testing.T) {
+func TestADuplicateInputIsRefused(t *testing.T) {
 	stream := newBlockingStream()
 	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -173,7 +173,7 @@ func TestADuplicateInputIsRefusedAsAFailedJob(t *testing.T) {
 	waitForJobState(t, j, "a", protocol.JobRunning)
 	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDispatch, ID: "b", Input: "sc-1"})
 
-	dup := waitForJobState(t, j, "b", protocol.JobFailed)
+	dup := waitForJobState(t, j, "b", protocol.JobRefused)
 	if !strings.Contains(dup.Status, "duplicate") {
 		t.Errorf("got %q, want a duplicate reason", dup.Status)
 	}
@@ -222,7 +222,7 @@ func TestConcurrentSubmitsOfTheSameInputYieldExactlyOneWinner(t *testing.T) {
 		switch job.State {
 		case protocol.JobQueued, protocol.JobRunning:
 			runnable++
-		case protocol.JobFailed:
+		case protocol.JobRefused:
 			if strings.Contains(job.Status, "duplicate") {
 				duplicates++
 			}
@@ -232,18 +232,18 @@ func TestConcurrentSubmitsOfTheSameInputYieldExactlyOneWinner(t *testing.T) {
 		t.Errorf("got %d runnable jobs, want exactly 1: %+v", runnable, list)
 	}
 	if duplicates != n-1 {
-		t.Errorf("got %d jobs failed as duplicates, want %d: %+v", duplicates, n-1, list)
+		t.Errorf("got %d jobs refused as duplicates, want %d: %+v", duplicates, n-1, list)
 	}
 }
 
-func TestAnUnknownRequestVersionIsRefusedAsAFailedJob(t *testing.T) {
+func TestAnUnknownRequestVersionIsRefused(t *testing.T) {
 	stream := newBlockingStream()
 	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
 	j.submit(&protocol.Request{Version: 99, Type: protocol.RequestDispatch, ID: "a", Input: "sc-1"})
 
 	got := findJob(j.snapshot(), "a")
-	if got == nil || got.State != protocol.JobFailed {
-		t.Fatalf("got %+v, want a failed job", got)
+	if got == nil || got.State != protocol.JobRefused {
+		t.Fatalf("got %+v, want a refused job", got)
 	}
 	if !strings.Contains(got.Status, "99") {
 		t.Errorf("got %q, want the version named", got.Status)
@@ -253,25 +253,25 @@ func TestAnUnknownRequestVersionIsRefusedAsAFailedJob(t *testing.T) {
 	}
 }
 
-func TestAnUnknownRequestTypeIsRefusedAsAFailedJob(t *testing.T) {
+func TestAnUnknownRequestTypeIsRefused(t *testing.T) {
 	stream := newBlockingStream()
 	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
 	j.submit(&protocol.Request{Version: protocol.Version, Type: "explode", ID: "a", Input: "sc-1"})
 
 	got := findJob(j.snapshot(), "a")
-	if got == nil || got.State != protocol.JobFailed {
-		t.Fatalf("got %+v, want a failed job", got)
+	if got == nil || got.State != protocol.JobRefused {
+		t.Fatalf("got %+v, want a refused job", got)
 	}
 }
 
-func TestEmptyInputIsRefusedAsAFailedJob(t *testing.T) {
+func TestEmptyInputIsRefused(t *testing.T) {
 	stream := newBlockingStream()
 	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
 	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDispatch, ID: "a", Input: ""})
 
 	got := findJob(j.snapshot(), "a")
-	if got == nil || got.State != protocol.JobFailed {
-		t.Fatalf("got %+v, want a failed job", got)
+	if got == nil || got.State != protocol.JobRefused {
+		t.Fatalf("got %+v, want a refused job", got)
 	}
 	if !strings.Contains(got.Status, "empty") {
 		t.Errorf("got %q, want an empty-input reason", got.Status)
@@ -282,10 +282,10 @@ func TestEmptyInputIsRefusedAsAFailedJob(t *testing.T) {
 }
 
 // A full queue is the one refusal registered in two steps: submit inserts the
-// job as queued, then flips it to failed after releasing the lock because the
-// non-blocking send found no room. work is deliberately never started, so
+// job as queued, then flips it to refused after releasing the lock because
+// the non-blocking send found no room. work is deliberately never started, so
 // pending fills up and stays full.
-func TestAFullQueueIsRefusedAsAFailedJob(t *testing.T) {
+func TestAFullQueueIsRefused(t *testing.T) {
 	stream := newBlockingStream()
 	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
 
@@ -299,8 +299,8 @@ func TestAFullQueueIsRefusedAsAFailedJob(t *testing.T) {
 	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDispatch, ID: "overflow", Input: "sc-overflow"})
 
 	got := findJob(j.snapshot(), "overflow")
-	if got == nil || got.State != protocol.JobFailed {
-		t.Fatalf("got %+v, want a failed job", got)
+	if got == nil || got.State != protocol.JobRefused {
+		t.Fatalf("got %+v, want a refused job", got)
 	}
 	if !strings.Contains(got.Status, "queue is full") {
 		t.Errorf("got %q, want a queue-full reason", got.Status)
@@ -362,7 +362,10 @@ func TestStatusLinesAreStrippedOfTheirPrefixAndAnsi(t *testing.T) {
 	}
 }
 
-func TestASucceededJobIsPrunedAndAFailedOneIsRetainedLonger(t *testing.T) {
+// TestASucceededJobIsPrunedAndARefusedOneIsRetainedLonger also pins that
+// refused shares failed's retention, not succeeded's: "bad" here is refused
+// (a bad version), not failed, and the two get the same schedule.
+func TestASucceededJobIsPrunedAndARefusedOneIsRetainedLonger(t *testing.T) {
 	stream := newBlockingStream()
 	close(stream.release)
 	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
@@ -382,12 +385,12 @@ func TestASucceededJobIsPrunedAndAFailedOneIsRetainedLonger(t *testing.T) {
 		t.Error("a succeeded job outlived its retention")
 	}
 	if findJob(list, "bad") == nil {
-		t.Error("a failed job was pruned on the succeeded schedule")
+		t.Error("a refused job was pruned on the succeeded schedule")
 	}
 
 	now = now.Add(failedRetention)
 	if findJob(j.snapshot(), "bad") != nil {
-		t.Error("a failed job outlived its retention")
+		t.Error("a refused job outlived its retention")
 	}
 }
 

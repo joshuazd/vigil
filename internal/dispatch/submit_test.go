@@ -78,6 +78,14 @@ func (d *fakeDaemon) serve(conn net.Conn) {
 		if silent {
 			continue
 		}
+		// A real daemon's first post-connect broadcast is the poll tick that
+		// predates the submit, so it never carries the job. Sending a
+		// job-less snapshot first is what makes awaitAck's loop-until-found
+		// behavior load-bearing rather than incidentally passing because the
+		// job was in the first (and only) frame checked.
+		if err := protocol.Encode(conn, &protocol.Snapshot{Version: protocol.Version}); err != nil {
+			return
+		}
 		for i := 0; i < 5; i++ {
 			if err := protocol.Encode(conn, &protocol.Snapshot{
 				Version: protocol.Version,
@@ -119,14 +127,46 @@ func TestSubmitReturnsTheAckedJob(t *testing.T) {
 	}
 }
 
-// A refusal comes back as a failed job, and Submit must report its reason
+// Submit sends a dispatch request naming the caller's cwd. Both fields are
+// load-bearing and neither is exercised by the ID/Version checks elsewhere:
+// a wrong Type gets every dispatch refused by a real daemon, and a missing
+// Cwd runs every hook in the daemon's own directory instead of the user's
+// repo.
+func TestSubmitSendsTheRequestTypeAndCwd(t *testing.T) {
+	path := socketPath(t)
+	d := startFakeDaemon(t, path, false, func(req *protocol.Request) []protocol.Job {
+		return []protocol.Job{{ID: req.ID, Input: req.Input, State: protocol.JobQueued}}
+	})
+
+	if _, err := Submit(context.Background(), Options{
+		Input: "sc-12345", Cwd: "/Users/x/portal",
+		SocketPath: path, AckTimeout: 3 * time.Second,
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.received) != 1 {
+		t.Fatalf("got %d requests, want 1", len(d.received))
+	}
+	got := d.received[0]
+	if got.Type != protocol.RequestDispatch {
+		t.Errorf("got type %q, want %q", got.Type, protocol.RequestDispatch)
+	}
+	if got.Cwd != "/Users/x/portal" {
+		t.Errorf("got cwd %q, want /Users/x/portal", got.Cwd)
+	}
+}
+
+// A refusal comes back as a refused job, and Submit must report its reason
 // rather than the skew message.
 func TestSubmitReportsARefusalReason(t *testing.T) {
 	path := socketPath(t)
 	startFakeDaemon(t, path, false, func(req *protocol.Request) []protocol.Job {
 		return []protocol.Job{{
 			ID: req.ID, Input: req.Input,
-			State: protocol.JobFailed, Status: "duplicate of an in-flight dispatch",
+			State: protocol.JobRefused, Status: "duplicate of an in-flight dispatch",
 		}}
 	})
 
@@ -141,6 +181,29 @@ func TestSubmitReportsARefusalReason(t *testing.T) {
 	}
 	if errors.Is(err, ErrNoAck) {
 		t.Error("a refusal was reported as a missing ack")
+	}
+}
+
+// A failed job was accepted and ran; only a refused job was rejected. Submit
+// must not conflate the two, or "vigil dispatch" would exit 1 - and print
+// "dispatch refused" - for a job the daemon actually queued and ran.
+func TestSubmitTreatsAFailedJobAsAccepted(t *testing.T) {
+	path := socketPath(t)
+	startFakeDaemon(t, path, false, func(req *protocol.Request) []protocol.Job {
+		return []protocol.Job{{
+			ID: req.ID, Input: req.Input,
+			State: protocol.JobFailed, Status: "no branch for story 1",
+		}}
+	})
+
+	job, err := Submit(context.Background(), Options{
+		Input: "sc-12345", SocketPath: path, AckTimeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v, want a failed-but-accepted job to be reported as success", err)
+	}
+	if job.State != protocol.JobFailed {
+		t.Errorf("got state %q, want %q", job.State, protocol.JobFailed)
 	}
 }
 
