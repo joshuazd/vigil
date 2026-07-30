@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -260,9 +261,11 @@ func TestRestartIfRequestedExecsTheSamePathAndArgv(t *testing.T) {
 
 	var gotPath string
 	var gotArgv []string
+	var gotEnv []string
 	execSelf = func(path string, argv []string, envv []string) error {
 		gotPath = path
 		gotArgv = argv
+		gotEnv = envv
 		return nil
 	}
 
@@ -279,6 +282,12 @@ func TestRestartIfRequestedExecsTheSamePathAndArgv(t *testing.T) {
 	}
 	if len(gotArgv) == 0 || gotArgv[0] != exe {
 		t.Fatalf("argv = %v, want argv[0] to be the executable", gotArgv)
+	}
+	if !reflect.DeepEqual(gotArgv[1:], os.Args[1:]) {
+		t.Fatalf("argv[1:] = %v, want %v", gotArgv[1:], os.Args[1:])
+	}
+	if len(gotEnv) != len(os.Environ()) {
+		t.Fatalf("envv has %d entries, want %d (os.Environ() passed through)", len(gotEnv), len(os.Environ()))
 	}
 }
 
