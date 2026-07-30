@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/jzinkduda/vigil/internal/protocol"
 )
 
@@ -17,6 +19,33 @@ func TestRenderJobLineShowsInputAndStatus(t *testing.T) {
 	}
 	if !strings.Contains(got, "classifying story for model routing") {
 		t.Errorf("got %q, want the status", got)
+	}
+}
+
+// Every width assertion in this file measures with visibleLen, which counts
+// runes. That is only a truthful ruler while every glyph on the line is one
+// terminal cell wide, so this compares it against one that knows better.
+// lipgloss.Width is what the terminal will actually do; U+26A1, the marker
+// this shipped with, is 2 there and 1 to visibleLen, so the line wrapped and
+// the panel rendered a row it did not have - the exact failure the width
+// tests exist to prevent, invisible to them because they used the same wrong
+// ruler as the code.
+//
+// Every state gets its own marker, so every state is swept.
+func TestTheJobLineUsesSingleCellGlyphsOnly(t *testing.T) {
+	states := []string{
+		protocol.JobQueued, protocol.JobRunning,
+		protocol.JobSucceeded, protocol.JobFailed, protocol.JobRefused,
+	}
+	for _, state := range states {
+		got := RenderJobLine([]protocol.Job{
+			{ID: "a", Input: "sc-1", State: state, Status: "working"},
+			{ID: "b", Input: "sc-2", State: protocol.JobQueued},
+		}, 80)
+		if want, mine := lipgloss.Width(got), visibleLen(got); want != mine {
+			t.Errorf("state %s: the terminal renders %d cells, visibleLen counts %d: %q",
+				state, want, mine, got)
+		}
 	}
 }
 

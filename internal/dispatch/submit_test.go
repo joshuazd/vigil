@@ -225,6 +225,63 @@ func TestSubmitAgainstASilentDaemonSaysItMayBeOld(t *testing.T) {
 	}
 }
 
+// The other side of the message: a daemon that is broadcasting snapshots is
+// demonstrably reading and writing the protocol, so version skew is the one
+// diagnosis it cannot be. Reporting skew here sent the user to reinstall over
+// a job that was accepted and running - and dispatch-from-chrome raised a
+// failure notification for it.
+func TestSubmitAgainstALiveDaemonThatNeverPublishesDoesNotBlameTheVersion(t *testing.T) {
+	path := socketPath(t)
+	startFakeDaemon(t, path, false, func(*protocol.Request) []protocol.Job {
+		return []protocol.Job{{ID: "someone-elses", Input: "sc-9", State: protocol.JobRunning}}
+	})
+
+	_, err := Submit(context.Background(), Options{
+		Input: "sc-12345", SocketPath: path, AckTimeout: 300 * time.Millisecond,
+	})
+	if !errors.Is(err, ErrNoAck) {
+		t.Fatalf("got %v, want ErrNoAck", err)
+	}
+	if strings.Contains(err.Error(), "older vigil") {
+		t.Errorf("got %q, want no version-skew claim from a daemon that is broadcasting", err.Error())
+	}
+	if !strings.Contains(err.Error(), "alive") {
+		t.Errorf("got %q, want the message to say the daemon is alive", err.Error())
+	}
+}
+
+// A connection that dies before any snapshot arrives is a crash, not an old
+// daemon and not a slow one.
+func TestSubmitAgainstADaemonThatHangsUpSaysSo(t *testing.T) {
+	path := socketPath(t)
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		// The request is read before the hang-up. Closing on accept races the
+		// submitting write instead, which fails with a broken pipe long
+		// before awaitAck is reached, and tests a different path entirely.
+		_, _ = protocol.NewRequestDecoder(conn).Next()
+		_ = conn.Close()
+	}()
+
+	_, err = Submit(context.Background(), Options{
+		Input: "sc-12345", SocketPath: path, AckTimeout: 3 * time.Second,
+	})
+	if !errors.Is(err, ErrNoAck) {
+		t.Fatalf("got %v, want ErrNoAck", err)
+	}
+	if strings.Contains(err.Error(), "older vigil") {
+		t.Errorf("got %q, want a closed connection reported as one", err.Error())
+	}
+}
+
 func TestSubmitSpawnsADaemonWhenNoneAnswers(t *testing.T) {
 	path := socketPath(t)
 	spawned := make(chan struct{})

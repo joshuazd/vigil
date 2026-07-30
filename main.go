@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -79,7 +78,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "vigil: %v (using defaults)\n", err)
 	}
+	warnAboutAnUnmigratedDispatchHook(cfg, stderr)
 	cmd := &fetch.ExecCommander{}
+
+	// internal/model does not import internal/daemon, so this is the only
+	// place the real spawner is named. See model.SetDaemonSpawner.
+	model.SetDaemonSpawner(daemon.Spawn)
 
 	switch command {
 	case "daemon":
@@ -96,6 +100,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// warnAboutAnUnmigratedDispatchHook names the one config change phase 4
+// requires of an existing user, because neither failure it prevents explains
+// itself.
+//
+// The dispatch hook now runs inside vigild, which has no tty. `--detached`
+// tells the workflow scripts to skip the teleport, which is the entire point
+// of dispatching; DISPATCH_IN_POPUP (now DISPATCH_INLINE) leaves the hook on
+// the branch that runs `tmux display-popup -E` from a client-less process,
+// which cannot draw. The README carries the hook to migrate to.
+func warnAboutAnUnmigratedDispatchHook(cfg *config.Config, stderr io.Writer) {
+	hook := cfg.GetHook("dispatch")
+	for _, stale := range []string{"--detached", "DISPATCH_IN_POPUP"} {
+		if !strings.Contains(hook, stale) {
+			continue
+		}
+		_, _ = fmt.Fprintf(stderr,
+			"vigil: the dispatch hook still passes %s; it now runs inside vigild, "+
+				"which has no terminal. See the dispatch section of the README: the hook "+
+				"should be DISPATCH_INLINE=1 dispatch --non-interactive {input}\n", stale)
+		return
+	}
 }
 
 // runConfigGet answers before the dependency check on purpose: reading a
@@ -176,7 +203,7 @@ func runDispatch(args []string, cfg *config.Config, stdout io.Writer) error {
 		Cwd:        cwd,
 		SocketPath: protocol.SocketPath(),
 		Spawn:      daemon.Spawn,
-		AckTimeout: 5 * time.Second,
+		AckTimeout: dispatch.DefaultAckTimeout,
 	})
 	if err != nil {
 		return err

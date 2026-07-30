@@ -592,3 +592,177 @@ func TestRunWaitsForAJobGoroutineToUnwind(t *testing.T) {
 		t.Fatal("Run never returned after the job finished")
 	}
 }
+
+// A submission has to become visible without waiting for a tick. The daemon
+// binds its socket before its first poll, so a cold-spawned one accepts the
+// submission at once but cannot publish it until git and gh have run across
+// every session - and the CLI, which waits to see its id in a snapshot, gave
+// up first and told the user the daemon might be running an older vigil for a
+// job that was already running.
+//
+// The interval here is ten seconds and the read deadline is two, so the frame
+// this reads cannot be a tick.
+func TestASubmissionIsPublishedWithoutWaitingForATick(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stream := newBlockingStream()
+	srv := testServer(t)
+	srv.Interval = 10 * time.Second
+	srv.Log = log.New(io.Discard, "", 0)
+	srv.requests = make(chan *protocol.Request, queueDepth)
+	srv.jobs = newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), srv.logf)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run(ctx) }()
+	t.Cleanup(func() {
+		close(stream.release)
+		cancel()
+		<-runDone
+	})
+
+	// The connect-time send only happens once there is a snapshot to send, so
+	// waiting for it is what makes "the next frame is the submission" true.
+	waitForCondition(t, 3*time.Second, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return srv.latest != nil
+	})
+	conn := dialWhenReady(t, srv.SocketPath)
+	defer func() { _ = conn.Close() }()
+	dec := protocol.NewDecoder(conn)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := dec.Next(); err != nil {
+		t.Fatalf("connect-time snapshot: %v", err)
+	}
+
+	if err := protocol.EncodeRequest(conn, &protocol.Request{
+		Version: protocol.Version, Type: protocol.RequestDispatch,
+		ID: "job-1", Input: "sc-12345",
+	}); err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	snap, err := dec.Next()
+	if err != nil {
+		t.Fatalf("no snapshot followed the submission within 2s of a 10s interval: %v", err)
+	}
+	if findJob(snap.Jobs, "job-1") == nil {
+		t.Errorf("the published snapshot carries no job: %+v", snap.Jobs)
+	}
+	// The other half of the rule: an off-tick publication must carry the last
+	// real sessions. A frame with nil Sessions blanks the client's table,
+	// which is worse than a late job line.
+	if len(snap.Sessions) == 0 {
+		t.Error("the published snapshot has no sessions; a client would blank its table")
+	}
+}
+
+// The pruning was hoisted above poll's error return during Task 6; the
+// publication was not. While collection fails nothing is broadcast at all, so
+// no panel shows a job line and every vigil dispatch times out
+// unacknowledged - during exactly the outage a user is most likely to be
+// dispatching their way out of.
+func TestJobsAreStillPublishedWhileCollectionIsFailing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cmd := &flakyCommander{}
+	stream := newBlockingStream()
+	srv := &Server{
+		Collector:  collect.New(testConfig(), cmd),
+		Interval:   20 * time.Millisecond,
+		SocketPath: filepath.Join(shortTempDir(t), "test.sock"),
+		Log:        log.New(io.Discard, "", 0),
+		requests:   make(chan *protocol.Request, queueDepth),
+	}
+	srv.jobs = newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), srv.logf)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-runDone
+	})
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return srv.latest != nil
+	})
+	conn := dialWhenReady(t, srv.SocketPath)
+	defer func() { _ = conn.Close() }()
+	dec := protocol.NewDecoder(conn)
+
+	if err := protocol.EncodeRequest(conn, &protocol.Request{
+		Version: protocol.Version, Type: protocol.RequestDispatch,
+		ID: "job-1", Input: "sc-1",
+	}); err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	waitForJobState(t, srv.jobs, "job-1", protocol.JobRunning)
+
+	// Everything from here is a tick, and every tick's collection fails.
+	cmd.setFail(true)
+	before := cmd.callCount()
+	waitForCondition(t, 3*time.Second, func() bool { return cmd.callCount() > before+1 })
+
+	// The job finishes only after collection has already broken, so a
+	// snapshot carrying JobSucceeded can only have come from a failing poll.
+	// Merely counting frames would not do: the ones broadcast while the
+	// collector was healthy are still sitting in the socket buffer.
+	close(stream.release)
+	waitForJobState(t, srv.jobs, "job-1", protocol.JobSucceeded)
+
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		snap, err := dec.Next()
+		if err != nil {
+			t.Fatalf("no snapshot carried the finished job while collection was failing: %v", err)
+		}
+		job := findJob(snap.Jobs, "job-1")
+		if job == nil || job.State != protocol.JobSucceeded {
+			continue
+		}
+		if len(snap.Sessions) == 0 {
+			t.Error("the snapshot has no sessions; a client would blank its table")
+		}
+		return
+	}
+}
+
+// plainCommander implements Commander and nothing else: no RunStream. This is
+// the daemon's one configuration that cannot run a dispatch at all.
+type plainCommander struct{}
+
+func (plainCommander) Run(context.Context, string, string, ...string) (string, error) {
+	return "", nil
+}
+
+// A daemon that cannot stream must refuse submissions rather than read them
+// off the wire and drop them. A silent drop is indistinguishable, from the
+// client, from a daemon that never read the frame - which is the single
+// outcome the refusal mechanism exists to eliminate.
+func TestADaemonThatCannotStreamRefusesRatherThanDropping(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := New(testJobsConfig(), plainCommander{})
+	// logf reads s.Log at call time, so this still silences the refusal that
+	// New's own logger would otherwise write to the suite's stderr.
+	srv.Log = log.New(io.Discard, "", 0)
+	if srv.jobs == nil {
+		t.Fatal("no job table, so a submission has nowhere to be refused")
+	}
+
+	srv.jobs.submit(&protocol.Request{
+		Version: protocol.Version, Type: protocol.RequestDispatch,
+		ID: "job-1", Input: "sc-1",
+	})
+
+	switch got := findJob(srv.jobs.snapshot(), "job-1"); {
+	case got == nil:
+		t.Fatal("the submission was dropped with nothing registered")
+	case got.State != protocol.JobRefused:
+		t.Errorf("got state %q, want %q", got.State, protocol.JobRefused)
+	case !strings.Contains(got.Status, "stream"):
+		t.Errorf("got reason %q, want it to name the missing streaming support", got.Status)
+	}
+}

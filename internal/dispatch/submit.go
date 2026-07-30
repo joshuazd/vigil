@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -29,6 +30,19 @@ const dialTimeout = 300 * time.Millisecond
 // spawnSettle bounds how long Submit waits for a freshly spawned daemon to
 // bind its socket before giving up.
 const spawnSettle = 3 * time.Second
+
+// DefaultAckTimeout bounds the wait for the submitted job to appear in a
+// snapshot.
+//
+// 15s, not the 5s this shipped with. A daemon binds its socket before its
+// first poll, so a cold spawn accepts the submission immediately but cannot
+// service it until that poll returns - git across every session plus a gh
+// call per branch, each under ExecCommander's own 10s ceiling. The daemon now
+// publishes as soon as it accepts a submission, so the common path acks in
+// milliseconds and this bound is only ever reached by a genuinely stuck
+// daemon; a cold one that is merely slow used to spend that time telling the
+// user it might be running an older vigil.
+const DefaultAckTimeout = 15 * time.Second
 
 type Options struct {
 	Input      string
@@ -120,15 +134,17 @@ func connect(ctx context.Context, opts Options) (net.Conn, error) {
 // in every panel rather than only here.
 func awaitAck(conn net.Conn, id string, timeout time.Duration) (*protocol.Job, error) {
 	if timeout <= 0 {
-		timeout = 5 * time.Second
+		timeout = DefaultAckTimeout
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	dec := protocol.NewDecoder(conn)
+	seen := 0
 	for {
 		snap, err := dec.Next()
 		if err != nil {
-			return nil, fmt.Errorf("%w; it may be running an older vigil", ErrNoAck)
+			return nil, ackFailure(err, seen, timeout)
 		}
+		seen++
 		for i := range snap.Jobs {
 			job := snap.Jobs[i]
 			if job.ID != id {
@@ -139,6 +155,34 @@ func awaitAck(conn net.Conn, id string, timeout time.Duration) (*protocol.Job, e
 			}
 			return &job, nil
 		}
+	}
+}
+
+// ackFailure names the diagnosis instead of guessing skew every time. The
+// four cases are genuinely different repairs, and only one of them is "make
+// install and restart the daemon":
+//
+//   - snapshots arrived, then the wait expired: the daemon is alive, reading
+//     and broadcasting, so it speaks the protocol. Whatever went wrong is on
+//     its side of the submission and is in its log.
+//   - snapshots arrived, then the stream ended: the daemon exited or crashed
+//     mid-job.
+//   - nothing arrived and the wait expired: the only case an older vigil
+//     explains, since one that never reads request frames also never
+//     publishes a job. A daemon still in its first poll looks identical from
+//     here, so both are offered.
+//   - nothing arrived and the stream ended: the connection failed outright.
+func ackFailure(err error, seen int, timeout time.Duration) error {
+	expired := errors.Is(err, os.ErrDeadlineExceeded)
+	switch {
+	case seen > 0 && expired:
+		return fmt.Errorf("%w within %s; the daemon is alive and broadcasting but never published the job - check its log", ErrNoAck, timeout)
+	case seen > 0:
+		return fmt.Errorf("%w: the daemon stopped sending after %d snapshots (%v)", ErrNoAck, seen, err)
+	case expired:
+		return fmt.Errorf("%w within %s; it sent no snapshot at all, so it is either still starting up or running an older vigil", ErrNoAck, timeout)
+	default:
+		return fmt.Errorf("%w: the connection failed before any snapshot arrived (%v)", ErrNoAck, err)
 	}
 }
 

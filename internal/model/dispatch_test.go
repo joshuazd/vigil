@@ -13,6 +13,7 @@ import (
 
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/view"
 )
 
 // TestASnapshotsJobsReachTheModel exercises the daemon path
@@ -39,15 +40,27 @@ func TestASnapshotsJobsReachTheModel(t *testing.T) {
 	}
 }
 
+// The input is deliberately nothing like a session name. panelModel's fixture
+// holds "SC-1 alpha", so a job whose input was "sc-1" was matched by a
+// substring search that only case sensitivity kept off the table row - one
+// strings.ToLower anywhere in the render path and this test would have passed
+// with the job line deleted. The assertion is now the marker and the input
+// together, which no table row can produce.
 func TestThePanelShowsTheJobLineToo(t *testing.T) {
 	m := panelModel(t)
 	m.daemonDecoder = liveDecoder()
 	updated, _ := m.Update(SnapshotMsg{
 		Epoch: m.epoch,
-		Jobs:  []protocol.Job{{ID: "a", Input: "sc-1", State: protocol.JobRunning}},
+		Jobs:  []protocol.Job{{ID: "a", Input: "zz-98765", State: protocol.JobRunning}},
 	})
-	if !strings.Contains(updated.(Model).View(), "sc-1") {
-		t.Error("the panel does not show the job line")
+	rendered := updated.(Model).View()
+	if !strings.Contains(rendered, view.JobRunningMarker+" zz-98765") {
+		t.Errorf("the panel does not show the job line: %q", rendered)
+	}
+	for _, s := range m.sessions {
+		if strings.Contains(s.Name, "zz-98765") {
+			t.Fatalf("the fixture session %q can satisfy the assertion above", s.Name)
+		}
 	}
 }
 
@@ -56,7 +69,7 @@ func TestNoJobsMeansNoJobLine(t *testing.T) {
 	m.daemonDecoder = liveDecoder()
 	m.width, m.height = 100, 30
 	updated, _ := m.Update(SnapshotMsg{Epoch: m.epoch})
-	if strings.Contains(updated.(Model).View(), "⚡") {
+	if strings.Contains(updated.(Model).View(), view.JobRunningMarker) {
 		t.Error("the view shows a job line with no jobs")
 	}
 }

@@ -96,6 +96,12 @@ func (j *jobs) submit(req *protocol.Request) {
 
 	reason := ""
 	switch {
+	case j.stream == nil:
+		// A Commander that cannot stream cannot run a hook line by line, so
+		// this daemon can never run the job. Refused, not dropped: the client
+		// is waiting for this id to appear in a snapshot and has no other way
+		// to learn the difference.
+		reason = "this daemon cannot run dispatch jobs: its commander does not stream"
 	case req.Version != protocol.Version:
 		reason = fmt.Sprintf("unsupported request version %d, this daemon speaks %d", req.Version, protocol.Version)
 	case req.Type != protocol.RequestDispatch:

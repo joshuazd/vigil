@@ -2,12 +2,12 @@ package model
 
 import (
 	"context"
+	"errors"
 	"net"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jzinkduda/vigil/internal/daemon"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
@@ -143,6 +143,30 @@ func listenDaemonCmd(
 	}
 }
 
-// daemonSpawner is the indirection tests replace; production always uses
-// daemon.Spawn.
-var daemonSpawner = daemon.Spawn
+// daemonSpawner starts a detached daemon process. Written only through
+// SetDaemonSpawner and read only through spawnDaemon.
+//
+// The seam is closed rather than conventional. Under `go test`,
+// os.Executable() is the test binary, so a test that reached the real spawner
+// forked the whole suite as a subprocess - which reached the same code and
+// forked again. That was live-reproduced as 800 processes, and a comment
+// asking tests not to do it is thin cover for that. This package no longer
+// imports internal/daemon at all, so the real spawner is not nameable from
+// here or from any test in this package; main wires it in at startup. A test
+// installs its own stub, which is the point, but it cannot install the one
+// that forks without adding an import that would be conspicuous in review.
+var daemonSpawner func() error
+
+// SetDaemonSpawner installs the process spawner. Called once from main,
+// before the program starts.
+func SetDaemonSpawner(fn func() error) { daemonSpawner = fn }
+
+// spawnDaemon is every caller's entry point. Unset means no daemon can be
+// started - the state every test runs in, and a state a caller is told about
+// rather than left to wonder at.
+func spawnDaemon() error {
+	if daemonSpawner == nil {
+		return errors.New("no daemon spawner is configured")
+	}
+	return daemonSpawner()
+}

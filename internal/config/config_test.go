@@ -389,12 +389,23 @@ func TestRunHookStreamUnconfigured(t *testing.T) {
 	}
 }
 
+// The real commander, and the same two assertions the fake-driven job test
+// makes: the error is a deadline (not "signal: killed", which is what
+// cmd.Wait reports and what failFromOutput used to look for and never find),
+// and the deadline actually bounds wall clock. The hook backgrounds a
+// grandchild that inherits the output pipe, because that is the shape of the
+// real dispatch chain and the shape that used to run to completion.
 func TestRunHookStreamHonoursTheTimeout(t *testing.T) {
-	cfg := &Config{Hooks: map[string]any{"dispatch": "sleep 5"}}
+	cfg := &Config{Hooks: map[string]any{"dispatch": "sleep 30 & echo started; wait"}}
+	start := time.Now()
 	err := cfg.RunHookStream(context.Background(), &fetch.ExecCommander{}, "dispatch",
-		nil, "", nil, 50*time.Millisecond, func(string) {})
-	if err == nil {
-		t.Fatal("got nil, want a timeout error")
+		nil, "", nil, 100*time.Millisecond, func(string) {})
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v, want a context.DeadlineExceeded", err)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("returned after %v, want the 100ms timeout to bound it", elapsed)
 	}
 }
 

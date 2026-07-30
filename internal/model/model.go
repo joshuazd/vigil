@@ -259,7 +259,7 @@ func (m *Model) spawnDaemonOnce() {
 		return
 	}
 	m.lastSpawn = time.Now()
-	if err := daemonSpawner(); err != nil {
+	if err := spawnDaemon(); err != nil {
 		m.addNotification("could not start daemon: "+err.Error(), "warning")
 	}
 }
@@ -1242,8 +1242,8 @@ func (m Model) dispatchCmd(input string) tea.Cmd {
 			Input:      input,
 			Cwd:        dispatchCwd(ctx, cmd, gitRoot),
 			SocketPath: protocol.SocketPath(),
-			Spawn:      daemonSpawner,
-			AckTimeout: 5 * time.Second,
+			Spawn:      spawnDaemon,
+			AckTimeout: dispatch.DefaultAckTimeout,
 		}); err != nil {
 			return ActionResultMsg{Action: "dispatch", OK: false, Message: err.Error()}
 		}

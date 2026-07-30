@@ -3,11 +3,13 @@ package fetch
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -53,12 +55,31 @@ func (c *ExecCommander) Run(ctx context.Context, dir string, name string, args .
 	return strings.TrimRight(string(out), "\n\r"), err
 }
 
+// streamWaitDelay bounds how long Wait may block after cancellation. Both
+// output streams are an io.PipeWriter, so os/exec copies through a goroutine
+// that ends only when every descendant holding the inherited fd closes it.
+// The process group kill below is what normally releases it; this is the
+// backstop for a descendant that escaped the group (its own setsid), and
+// without a non-zero delay Wait has no bound at all.
+const streamWaitDelay = 2 * time.Second
+
 func (c *ExecCommander) RunStream(ctx context.Context, dir string, env []string, name string, args []string, onLine func(string)) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}
+
+	// The child leads its own process group, and cancellation signals the
+	// group rather than the one process. exec.CommandContext kills only the
+	// direct sh, and a hook that backgrounds work - which the dispatch chain
+	// does - leaves grandchildren holding the output pipe, so a 50ms deadline
+	// measured 30s of wall clock before this. dispatch_timeout bounded
+	// nothing, jobs are serialized behind one another, and Run waits on the
+	// job goroutine, so the daemon could not be shut down either.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.WaitDelay = streamWaitDelay
 
 	pr, pw := io.Pipe()
 	// One pipe for both streams: hooks run under `sh -c 'exec 2>&1; ...'`
@@ -90,6 +111,27 @@ func (c *ExecCommander) RunStream(ctx context.Context, dir string, env []string,
 	<-scanned
 	_ = pr.Close()
 	return waitErr
+}
+
+// killProcessGroup signals the child's whole process group, which Setpgid
+// above made the child the leader of.
+//
+// The pid guard is load-bearing rather than defensive noise: kill(-1) means
+// "every process this user can signal", and vigild runs as that user, so a
+// daemon cancelling a hook would kill itself. Only a pid above 1 is ever
+// negated. ESRCH means the group is already gone, which is success here.
+func killProcessGroup(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return os.ErrProcessDone
+	}
+	pid := cmd.Process.Pid
+	if pid <= 1 {
+		return cmd.Process.Kill()
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return cmd.Process.Kill()
+	}
+	return nil
 }
 
 // MockCommander records calls and returns preset responses.

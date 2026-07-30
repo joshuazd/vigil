@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -215,7 +216,17 @@ func (c *Config) RunHookStream(
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	return sc.RunStream(ctx, cwd, env, argv[0], argv[1:], onLine)
+	err = sc.RunStream(ctx, cwd, env, argv[0], argv[1:], onLine)
+	// The deadline is authoritative; the child's exit status is not. A killed
+	// hook reports "signal: killed", which is indistinguishable from any other
+	// signal, so a caller that branched on the exit error could never tell a
+	// timeout from a crash - and reported the job's last stale progress line
+	// as the reason. This asks the context that imposed the deadline whether
+	// it actually expired.
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("hook %s: %w", name, context.DeadlineExceeded)
+	}
+	return err
 }
 
 // shellQuote wraps a string in single quotes for safe shell usage.
