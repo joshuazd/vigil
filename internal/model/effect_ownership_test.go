@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/daemon"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
@@ -178,7 +179,7 @@ func TestADaemonFedClientRunsNoEffects(t *testing.T) {
 func TestNewSpawnsTheDaemon(t *testing.T) {
 	spawned := 0
 	daemonSpawner = func() error { spawned++; return nil }
-	t.Cleanup(func() { daemonSpawner = spawnDaemon })
+	t.Cleanup(func() { daemonSpawner = daemon.Spawn })
 
 	dir := shortTempDir(t)
 	t.Setenv("HOME", dir)
@@ -200,7 +201,7 @@ func TestNewSpawnsTheDaemon(t *testing.T) {
 func TestADashboardRespawnsARateLimitedDaemon(t *testing.T) {
 	spawned := 0
 	daemonSpawner = func() error { spawned++; return nil }
-	t.Cleanup(func() { daemonSpawner = spawnDaemon })
+	t.Cleanup(func() { daemonSpawner = daemon.Spawn })
 
 	m := newTestModel()
 	m.epoch = 1

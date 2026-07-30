@@ -3,14 +3,11 @@ package model
 import (
 	"context"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/jzinkduda/vigil/internal/daemon"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
@@ -147,43 +144,5 @@ func listenDaemonCmd(
 }
 
 // daemonSpawner is the indirection tests replace; production always uses
-// spawnDaemon.
-var daemonSpawner = spawnDaemon
-
-// spawnDaemon starts `vigil daemon` detached from this process, so it outlives
-// the pane that started it. Its output goes to a log file beside the socket:
-// the daemon is silent when healthy, and when it is not, that log is the only
-// place the reason survives.
-func spawnDaemon() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	logPath := filepath.Join(filepath.Dir(protocol.SocketPath()), "vigild.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		return err
-	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = logFile.Close() }()
-
-	cmd := exec.Command(exe, "daemon")
-	// Not the panel's cwd: that is a git worktree, and git-worktree-done
-	// removes those routinely, leaving a long-lived daemon holding a deleted
-	// directory.
-	cmd.Dir = "/"
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	// Setsid detaches it from this pane's process group, so closing the pane
-	// or the tmux session does not take the daemon with it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	// Reap it if it exits, rather than leaving a zombie for the life of a
-	// long-running panel.
-	go func() { _ = cmd.Wait() }()
-	return nil
-}
+// daemon.Spawn.
+var daemonSpawner = daemon.Spawn

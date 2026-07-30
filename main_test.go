@@ -38,6 +38,7 @@ func TestParseArgs(t *testing.T) {
 		{"long version", []string{"--version"}, "version"},
 		{"short version", []string{"-v"}, "version"},
 		{"panel flag", []string{"--panel"}, "panel"},
+		{"dispatch subcommand", []string{"dispatch", "sc-1"}, "dispatch"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -143,5 +144,32 @@ func TestConfigGetHonoursTheEnvironment(t *testing.T) {
 	}
 	if strings.TrimSpace(stdout.String()) != "false" {
 		t.Errorf("got stdout %q, want false", stdout.String())
+	}
+}
+
+func TestDispatchParsesAsItsOwnCommand(t *testing.T) {
+	command, rest, err := parseArgs([]string{"dispatch", "--cwd", "/tmp", "sc-1"})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if command != "dispatch" {
+		t.Errorf("got %q, want dispatch", command)
+	}
+	if len(rest) != 3 || rest[2] != "sc-1" {
+		t.Errorf("got rest %q", rest)
+	}
+}
+
+// Unlike `config get`, dispatch runs after the dependency check: it needs all
+// three binaries, and a queued job is worse than an early error.
+func TestDispatchRunsAfterTheDependencyCheck(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"dispatch", "sc-1"}, &stdout, &stderr); code != 1 {
+		t.Errorf("got exit %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "not found in PATH") {
+		t.Errorf("got %q, want a dependency error", stderr.String())
 	}
 }

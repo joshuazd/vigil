@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/daemon"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/view"
@@ -80,7 +81,7 @@ func TestPanelIgnoresToggleDetail(t *testing.T) {
 
 func TestNewPanelSetsPanelMode(t *testing.T) {
 	daemonSpawner = func() error { return nil }
-	t.Cleanup(func() { daemonSpawner = spawnDaemon })
+	t.Cleanup(func() { daemonSpawner = daemon.Spawn })
 
 	dir := shortTempDir(t)
 	t.Setenv("HOME", dir)
@@ -100,7 +101,7 @@ func TestNewPanelSetsPanelMode(t *testing.T) {
 func TestNewPanelSpawnsTheDaemon(t *testing.T) {
 	spawned := 0
 	daemonSpawner = func() error { spawned++; return nil }
-	t.Cleanup(func() { daemonSpawner = spawnDaemon })
+	t.Cleanup(func() { daemonSpawner = daemon.Spawn })
 
 	dir := shortTempDir(t)
 	t.Setenv("HOME", dir)
@@ -168,7 +169,7 @@ func TestNewConnectedToADaemonDoesNotPrimePollInFlight(t *testing.T) {
 func TestPanelRespawnsARateLimitedDaemon(t *testing.T) {
 	spawned := 0
 	daemonSpawner = func() error { spawned++; return nil }
-	t.Cleanup(func() { daemonSpawner = spawnDaemon })
+	t.Cleanup(func() { daemonSpawner = daemon.Spawn })
 
 	m := panelModel(t)
 	m.epoch = 1
