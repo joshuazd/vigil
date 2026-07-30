@@ -22,6 +22,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/dispatch"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/selfbin"
 	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/transition"
 	"github.com/jzinkduda/vigil/internal/view"
@@ -112,6 +113,9 @@ type Model struct {
 	// lastSnapshot is when the most recent daemon snapshot was applied. A
 	// daemon that is connected but silent is invisible without it.
 	lastSnapshot time.Time
+
+	// daemonBin is the last stamp a daemon published for its own image.
+	daemonBin selfbin.Stamp
 
 	// panelMode renders the compact per-session panel instead of the full
 	// dashboard. Set by NewPanel.
@@ -940,6 +944,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 			m.applySnapshot(msg.Sessions)
 		}
 		m.jobs = msg.Jobs
+		m.daemonBin = msg.DaemonBin
 		m.checkStateTransitions()
 		var cmds []tea.Cmd
 		if m.detailOpen {
@@ -968,6 +973,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	m.lastSnapshot = time.Now()
 	m.applySnapshot(msg.Sessions)
 	m.jobs = msg.Jobs
+	m.daemonBin = msg.DaemonBin
 
 	m.checkStateTransitions()
 	var cmds []tea.Cmd

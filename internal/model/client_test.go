@@ -17,6 +17,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/selfbin"
 	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/transition"
 )
@@ -619,5 +620,18 @@ func TestAnnotateClientFlagsMarksTheLastSession(t *testing.T) {
 	}
 	if sessions[0].IsLast {
 		t.Error("alpha is current, not last")
+	}
+}
+
+func TestASnapshotCarriesTheDaemonBinaryStampIntoTheModel(t *testing.T) {
+	m := newTestModel()
+	m.daemonConn = nil
+	m.daemonDecoder = &protocol.Decoder{}
+	want := selfbin.Stamp{Size: 77, ModNano: 5}
+
+	next, _ := m.handleSnapshot(SnapshotMsg{Sessions: fixtureSessions(), DaemonBin: want})
+
+	if got := next.(Model).daemonBin; got != want {
+		t.Fatalf("daemonBin = %+v, want %+v", got, want)
 	}
 }

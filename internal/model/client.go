@@ -139,7 +139,7 @@ func listenDaemonCmd(
 			return DaemonLostMsg{Epoch: epoch}
 		}
 		annotateClientFlags(ctx, cmd, snap.Sessions, fallbackCurrent)
-		return SnapshotMsg{Sessions: snap.Sessions, Jobs: snap.Jobs, Epoch: epoch}
+		return SnapshotMsg{Sessions: snap.Sessions, Jobs: snap.Jobs, DaemonBin: snap.DaemonBin, Epoch: epoch}
 	}
 }
 
