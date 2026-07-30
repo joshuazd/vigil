@@ -106,7 +106,14 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 		inFlightEffects: make(map[string]struct{}),
 		requests:        make(chan *protocol.Request, queueDepth),
 	}
-	srv.BinStamp, _ = selfbin.Prober{}.Current()
+	// Publishing a zero stamp is the correct fail-safe - every client then
+	// reads this daemon as outdated - but silently accusing itself is not
+	// diagnosable, so say it once here.
+	stamp, ok := selfbin.Prober{}.Current()
+	if !ok {
+		logger.Printf("cannot stamp own binary; clients will report this daemon as outdated")
+	}
+	srv.BinStamp = stamp
 	// The job table exists even when the commander cannot stream. It refuses
 	// every submission in that case, which is the point: a nil table left the
 	// request read off the wire and dropped with nothing registered, and a

@@ -79,9 +79,12 @@ type Snapshot struct {
 	// that expects it sees nil against a daemon that does not send it.
 	Jobs []Job `json:"jobs,omitempty"`
 	// DaemonBin is the stamp the daemon took of its own image at startup.
-	// Additive for the same reason Jobs is: an old daemon omits it and a new
-	// client reads the zero Stamp, which it correctly reports as outdated.
-	DaemonBin selfbin.Stamp `json:"daemon_bin,omitempty"`
+	// Additive for the same reason Jobs is, but the key is always written:
+	// encoding/json never treats a struct as empty, so omitempty would be a
+	// no-op here. An old client ignores the unknown key; a new client reads
+	// the zero Stamp against an old daemon, which it correctly reports as
+	// outdated.
+	DaemonBin selfbin.Stamp `json:"daemon_bin"`
 }
 
 func Encode(w io.Writer, snap *Snapshot) error {
