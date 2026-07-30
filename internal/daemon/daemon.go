@@ -163,16 +163,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case conn := <-incoming:
 			s.addClient(ctx, conn)
 		case req := <-s.requests:
-			if s.jobs != nil {
-				s.jobs.submit(req)
-				// Immediately, not on the next tick. The submitting CLI waits
-				// to see its id in a snapshot, and on a cold daemon the next
-				// tick is behind a first poll that runs git and gh across
-				// every session - so a job that was already running was
-				// reported to the user as a daemon too old to have accepted
-				// it.
-				s.publishJobs(s.jobs.snapshot())
-			}
+			s.handleRequest(req)
 		case <-ticker.C:
 			s.poll(ctx)
 		}
@@ -337,6 +328,27 @@ func (s *Server) publishJobs(jobs []protocol.Job) {
 	s.mu.Unlock()
 
 	s.broadcast(&updated)
+}
+
+// handleRequest routes one client frame. The default arm stays submit rather
+// than becoming a refusal: submit's reason switch already produces the
+// unsupported-type refusal, and that behaviour must not move.
+func (s *Server) handleRequest(req *protocol.Request) {
+	if s.jobs == nil || req == nil {
+		return
+	}
+	switch req.Type {
+	case protocol.RequestDismiss:
+		if !s.jobs.dismissTerminal() {
+			return
+		}
+	default:
+		s.jobs.submit(req)
+	}
+	// Immediately, not on the next tick. The submitting CLI waits to see its
+	// id in a snapshot, and on a cold daemon the next tick is behind a first
+	// poll that runs git and gh across every session.
+	s.publishJobs(s.jobs.snapshot())
 }
 
 // logf guards s.Log so a zero-valued Server built directly (e.g. in a test)

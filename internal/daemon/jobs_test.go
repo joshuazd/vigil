@@ -436,6 +436,64 @@ func TestNoAttachedClientMeansAnEmptyVigilClient(t *testing.T) {
 	}
 }
 
+func TestDismissTerminalRemovesOnlyFailedAndRefusedJobs(t *testing.T) {
+	j := newJobs(&config.Config{}, nil, nil, func(string, ...any) {})
+	j.byID = map[string]*protocol.Job{
+		"f": {ID: "f", State: protocol.JobFailed},
+		"r": {ID: "r", State: protocol.JobRefused},
+		"q": {ID: "q", State: protocol.JobQueued},
+		"n": {ID: "n", State: protocol.JobRunning},
+		"s": {ID: "s", State: protocol.JobSucceeded},
+	}
+	j.order = []string{"f", "r", "q", "n", "s"}
+	j.cwds = map[string]string{"f": "/tmp/f", "q": "/tmp/q"}
+
+	if !j.dismissTerminal() {
+		t.Fatal("dismissTerminal reported no change with two terminal jobs present")
+	}
+
+	got := map[string]bool{}
+	for _, job := range j.snapshot() {
+		got[job.ID] = true
+	}
+	for _, id := range []string{"q", "n", "s"} {
+		if !got[id] {
+			t.Errorf("job %q was removed; only failed and refused may be", id)
+		}
+	}
+	for _, id := range []string{"f", "r"} {
+		if got[id] {
+			t.Errorf("job %q survived dismissal", id)
+		}
+	}
+	if _, ok := j.cwds["f"]; ok {
+		t.Error("the dismissed job's cwd was left behind")
+	}
+	if _, ok := j.cwds["q"]; !ok {
+		t.Error("a surviving job lost its cwd")
+	}
+}
+
+func TestDismissTerminalReportsNoChangeWhenThereIsNothingToDismiss(t *testing.T) {
+	j := newJobs(&config.Config{}, nil, nil, func(string, ...any) {})
+	j.byID = map[string]*protocol.Job{"n": {ID: "n", State: protocol.JobRunning}}
+	j.order = []string{"n"}
+	if j.dismissTerminal() {
+		t.Fatal("dismissTerminal reported a change with only a running job present")
+	}
+}
+
+// An old daemon receiving a dismiss frame takes submit's empty-ID path and
+// registers nothing. This is the whole reason the frame carries no ID, and it
+// is pinned here rather than in a comment.
+func TestSubmitDropsAnEmptyIDRequestWithoutRegisteringAnything(t *testing.T) {
+	j := newJobs(&config.Config{}, nil, nil, func(string, ...any) {})
+	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDismiss})
+	if got := j.snapshot(); len(got) != 0 {
+		t.Fatalf("snapshot has %d jobs, want 0: %+v", len(got), got)
+	}
+}
+
 type recordingStream struct {
 	mu       sync.Mutex
 	dir      string

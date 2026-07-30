@@ -151,6 +151,31 @@ func (j *jobs) refuse(id, reason string) {
 	j.logf("dispatch %s refused: %s", id, reason)
 }
 
+// dismissTerminal drops every job the user has already been told about and
+// can do nothing more with. Queued and running jobs stay: removing those is
+// cancellation, which owns a process group and a half-made worktree and is a
+// different feature. Succeeded jobs stay because they expire in ten seconds
+// anyway.
+func (j *jobs) dismissTerminal() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	kept := make([]string, 0, len(j.order))
+	removed := false
+	for _, id := range j.order {
+		job, ok := j.byID[id]
+		if ok && (job.State == protocol.JobFailed || job.State == protocol.JobRefused) {
+			delete(j.byID, id)
+			delete(j.cwds, id)
+			removed = true
+			continue
+		}
+		kept = append(kept, id)
+	}
+	j.order = kept
+	return removed
+}
+
 func (j *jobs) inFlightInputLocked(input string) bool {
 	for _, existing := range j.byID {
 		if existing.Input != input {
