@@ -951,9 +951,13 @@ func TestASubmittedJobIsQueuedThenRunsThenSucceeds(t *testing.T) {
 
 	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDispatch, ID: "a", Input: "sc-1"})
 
+	// The stored Status is stripped, not raw: setStatus is fed through
+	// statusLine, so the ">>> " prefix is gone by the time it reaches the job
+	// table. Stripping once in the daemon is deliberate - Status is broadcast
+	// to every client, and the alternative is every client re-stripping it.
 	running := waitForJobState(t, j, "a", protocol.JobRunning)
-	if running.Status != ">>> fetching story" {
-		t.Errorf("got status %q, want the streamed line", running.Status)
+	if running.Status != "fetching story" {
+		t.Errorf("got status %q, want the streamed line stripped of its prefix", running.Status)
 	}
 	close(stream.release)
 	done := waitForJobState(t, j, "a", protocol.JobSucceeded)
