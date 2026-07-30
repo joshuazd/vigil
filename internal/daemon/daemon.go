@@ -17,6 +17,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/selfbin"
 	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/transition"
 )
@@ -31,6 +32,13 @@ type Server struct {
 	SocketPath string
 	CachePath  string
 	Log        *log.Logger
+
+	// BinStamp identifies the image this daemon is running. Published in every
+	// snapshot so a client - which stats the same path for its own restart
+	// check - can tell the user the daemon is behind. The daemon never acts on
+	// it: restarting itself would drop every client connection, so every panel
+	// would bounce through daemon-lost on every install.
+	BinStamp selfbin.Stamp
 
 	// Detector and Effects fire state-transition side effects once per event.
 	// Clients render their own toasts from their own detectors; only this
@@ -98,6 +106,7 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 		inFlightEffects: make(map[string]struct{}),
 		requests:        make(chan *protocol.Request, queueDepth),
 	}
+	srv.BinStamp, _ = selfbin.Prober{}.Current()
 	// The job table exists even when the commander cannot stream. It refuses
 	// every submission in that case, which is the point: a nil table left the
 	// request read off the wire and dropped with nothing registered, and a
@@ -245,6 +254,7 @@ func (s *Server) poll(ctx context.Context) {
 		Timestamp: time.Now().Unix(),
 		Sessions:  sessions,
 		Jobs:      jobList,
+		DaemonBin: s.BinStamp,
 	}
 
 	s.mu.Lock()

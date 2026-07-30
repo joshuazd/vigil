@@ -18,6 +18,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/selfbin"
 )
 
 // maxSockPath is the largest usable length for a unix socket path
@@ -797,5 +798,30 @@ func TestRunStillRefusesAnUnknownRequestType(t *testing.T) {
 	}
 	if !strings.Contains(got[0].Status, "nonsense") {
 		t.Fatalf("refusal reason %q does not name the type", got[0].Status)
+	}
+}
+
+func TestPollPublishesTheDaemonBinaryStamp(t *testing.T) {
+	want := selfbin.Stamp{Size: 4242, ModNano: 99}
+	s := testServer(t)
+	s.BinStamp = want
+
+	s.poll(context.Background())
+
+	s.mu.Lock()
+	latest := s.latest
+	s.mu.Unlock()
+	if latest == nil {
+		t.Fatal("poll published no snapshot")
+	}
+	if latest.DaemonBin != want {
+		t.Fatalf("DaemonBin = %+v, want %+v", latest.DaemonBin, want)
+	}
+}
+
+func TestNewStampsTheRunningBinary(t *testing.T) {
+	s := New(&config.Config{}, fetch.NewMockCommander())
+	if s.BinStamp.Zero() {
+		t.Fatal("New left BinStamp zero; a client reads that as an outdated daemon")
 	}
 }
