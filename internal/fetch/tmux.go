@@ -95,6 +95,34 @@ func MostRecentSession(ctx context.Context, cmd Commander, exclude string) strin
 	return ""
 }
 
+// MostRecentClient returns the name of the tmux client that was active most
+// recently, or "" if there is none or tmux cannot be reached. The daemon has no
+// tty of its own, so this is how a job learns which client to size a window
+// against and switch at the end.
+func MostRecentClient(ctx context.Context, cmd Commander) string {
+	out, err := cmd.Run(ctx, "", "tmux", "list-clients", "-F", "#{client_activity}|#{client_name}")
+	if err != nil {
+		return ""
+	}
+	best := ""
+	bestActivity := int64(-1)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 || parts[1] == "" {
+			continue
+		}
+		activity, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		if activity > bestActivity {
+			bestActivity = activity
+			best = parts[1]
+		}
+	}
+	return best
+}
+
 // AttachedSessions reports which sessions have a client attached.
 // session_attached is a client count, not a boolean, so anything other than
 // "0" counts as attached - that is also the fail-closed reading for a
