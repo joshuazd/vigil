@@ -102,15 +102,51 @@ right size remain unobserved.
       `dispatch queued: verify-shutdown`, the job ran, and its failure was reported with the
       real reason from the hook.
 
-The developer's tmux server, sessions and daemon were left alone throughout; every check ran
-under its own `TMUX_TMPDIR`, and cleanup killed only PIDs the harness itself started.
+Then a **real PR was dispatched from the menu bar**, which found two things the isolated
+checks could not.
 
-**Not yet verified, and the reason it matters:** the plan's Task 11 exists because **the bats
-tmux stub returns a constant `pane_width` and cannot observe real geometry**, a blind spot
-that hid phase 3's 175-column defect through seven per-task reviews. The isolated check above
-covers the sizing arithmetic. What it does not cover is a real dispatch: the teleport landing
-in the new session's `claude` window, the job line updating in a live panel, and
-`tmux show-environment` confirming `VIGIL_CLIENT` did not leak into the new session.
+- [x] **A real dispatch works end to end.** Session created, worktree cut, Claude launched,
+      and the teleport landed in the new session's `claude` window.
+- [x] **The job line renders in a live panel**, confirmed by `capture-pane` across all eight
+      panel panes.
+
+The developer's tmux server, sessions and daemon were left alone throughout the isolated
+checks; each ran under its own `TMUX_TMPDIR`, and cleanup killed only PIDs the harness
+started.
+
+**Still not verified:** `tmux show-environment` in a dispatched session, to confirm
+`VIGIL_CLIENT` did not leak into it. A stale `VIGIL_CLIENT` inherited by a work session's
+shell would make a later manual `shortcut-implement` switch the wrong client.
+
+### The first real dispatch failed, and the tests could not have caught it
+
+`dispatch-bar` runs `dispatch-from-chrome` with the GUI environment, whose PATH is
+`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` - read out of the running
+process with `ps eww`, not assumed. `tmux` is in `/opt/homebrew/bin` and resolves; **`vigil`
+is in `~/.local/bin`, where `make install` puts it, and does not.** So `vigil dispatch` exited
+127 and the user saw only the generic "Dispatch failed".
+
+The popup this replaced never needed `vigil` on `PATH`: it invoked `${SCRIPT_DIR}/dispatch` by
+absolute path inside a login shell. Introducing a bare `vigil` call was the regression.
+
+**The bats suite was structurally incapable of catching it**, because its setup puts a `vigil`
+stub on `PATH` - the one environment in which the bug cannot occur. Writing the regression
+test surfaced a second instance of the same shape: bats prepends its stub directory to the
+*inherited* `PATH`, which carries `~/.local/bin`, so a test that removed its stub silently
+exercised the real binary against the real daemon. That file now owns its `PATH` outright.
+
+Fixed as `3225047` in `~/dotfiles`: `resolve_vigil` tries `${VIGIL_BIN}` (matching
+`lib/tmux.sh`'s panel gate), then `command -v`, then `~/.local/bin`, and names vigil when it
+cannot be found instead of hiding behind the generic message.
+
+### The second real dispatch worked but showed nothing
+
+No job line appeared. Nothing was broken: **the panels were long-lived `vigil --panel`
+processes still running the pre-phase-4 binary.** `Snapshot.Jobs` is additive precisely so an
+old client ignores it, so the failure mode was silence. Only the panel created *by* the
+dispatch was new enough to render.
+
+Resolved for now by respawning the panel panes. See the landmine below; it will recur.
 
 The plan's Task 11 exists precisely because **the bats tmux stub returns a constant
 `pane_width` and cannot observe real geometry**. That blind spot hid phase 3's 175-column
@@ -154,6 +190,23 @@ a second reviewer that re-measured independently rather than trusting the first.
 per-task reviews could not have found it: each hand-off was locally correct, and the defect
 only exists in the composition of a streaming commander, a serialized queue and a shutdown
 that waits.
+
+## Deferred, with the user's decision on each
+
+Both of these were hit on the first day of real use, and the user chose to carry them rather
+than fix them now. Neither is speculative.
+
+- **A `make install` leaves every running panel on the old binary**, and the failure mode is
+  silence rather than an error, because `Snapshot.Jobs` is additive by design. The remedy is
+  to respawn each pane marked `@vigil_panel`:
+  `tmux respawn-pane -k -t <pane> "$HOME/.local/bin/vigil --panel"`. The real fix is a panel
+  that notices its binary is newer than itself and re-execs. **Phase 5 makes this worse**: it
+  adds more daemon-to-client data, so a stale panel will silently miss more.
+- **A failed or refused job line cannot be dismissed and is retained 10 minutes.** The design
+  said "no dismiss key - phase 5 adds request types anyway, and one can be added then if the
+  retention window turns out to be wrong". It turned out to be wrong within four minutes of
+  the first failure line existing, and the only way to clear it was restarting the daemon,
+  which drops the in-memory job table. Wants a dismiss key or a much shorter window.
 
 ## Landmines
 
