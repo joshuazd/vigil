@@ -215,6 +215,9 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 
 	insideTmux := os.Getenv("TMUX") != ""
 
+	// A failed probe leaves the zero Stamp, which means "unknown" everywhere
+	// it is read: checkBinary adopts the first stamp it can get as the
+	// baseline and daemonHealth stays quiet until then.
 	startStamp, _ := selfbin.Prober{}.Current()
 
 	m := Model{
