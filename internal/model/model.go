@@ -19,6 +19,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/cache"
 	"github.com/jzinkduda/vigil/internal/collect"
 	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/dispatch"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
@@ -67,6 +68,10 @@ type Model struct {
 	// Dispatch
 	dispatchActive bool
 	dispatchInput  textinput.Model
+
+	// jobs is the daemon's dispatch activity, rendered as one line. Empty
+	// while self-polling, because a client owns no jobs.
+	jobs []protocol.Job
 
 	// Modes
 	//
@@ -459,6 +464,8 @@ func (m Model) View() string {
 	staleThreshold := m.cfg.GetSettingInt("stale_threshold")
 	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight, notif)
 
+	jobLine := view.RenderJobLine(m.jobs, m.width)
+
 	// Detail panel
 	var detail string
 	if m.detailOpen {
@@ -483,6 +490,9 @@ func (m Model) View() string {
 
 	// Compose — pin footer to bottom by padding with blank lines
 	parts := []string{statusBar, table}
+	if jobLine != "" {
+		parts = append(parts, jobLine)
+	}
 	if detail != "" {
 		parts = append(parts, detail)
 	}
@@ -511,6 +521,11 @@ func (m Model) View() string {
 // pane is for, and the detail panel's pane captures would run once per panel
 // per tick.
 func (m Model) panelView() string {
+	jobLine := view.RenderJobLine(m.jobs, m.width)
+	rows := max(1, m.height-1)
+	if jobLine != "" {
+		rows = max(1, m.height-2)
+	}
 	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth())
 	table := view.RenderTable(
 		m.visibleSessions(),
@@ -518,10 +533,13 @@ func (m Model) panelView() string {
 		m.selected,
 		m.cfg.GetSettingInt("stale_threshold"),
 		m.width,
-		max(1, m.height-1),
+		rows,
 		m.activeNotification(),
 	)
-	return lipgloss.JoinVertical(lipgloss.Left, statusBar, table)
+	if jobLine == "" {
+		return lipgloss.JoinVertical(lipgloss.Left, statusBar, table)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, statusBar, table, jobLine)
 }
 
 // activeNotification returns the newest unexpired notification, styled, or
@@ -922,6 +940,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		if msg.Sessions != nil {
 			m.applySnapshot(msg.Sessions)
 		}
+		m.jobs = msg.Jobs
 		m.checkStateTransitions()
 		var cmds []tea.Cmd
 		if m.detailOpen {
@@ -949,6 +968,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	}
 	m.lastSnapshot = time.Now()
 	m.applySnapshot(msg.Sessions)
+	m.jobs = msg.Jobs
 
 	m.checkStateTransitions()
 	var cmds []tea.Cmd
@@ -1208,13 +1228,35 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 }
 
 func (m Model) dispatchCmd(input string) tea.Cmd {
+	cwd := m.dispatchCwd()
 	return func() tea.Msg {
-		out, err := action.Dispatch(context.Background(), m.cfg, m.cmd, input)
-		if err != nil {
-			return ActionResultMsg{Action: "dispatch", Session: "", OK: false, Message: out}
+		if _, err := dispatch.Submit(context.Background(), dispatch.Options{
+			Input:      input,
+			Cwd:        cwd,
+			SocketPath: protocol.SocketPath(),
+			Spawn:      daemonSpawner,
+			AckTimeout: 5 * time.Second,
+		}); err != nil {
+			return ActionResultMsg{Action: "dispatch", OK: false, Message: err.Error()}
 		}
-		return ActionResultMsg{Action: "dispatch", Session: "", OK: true, Message: out}
+		return ActionResultMsg{Action: "dispatch", OK: true, Message: "dispatch queued"}
 	}
+}
+
+// dispatchCwd is the repository a new worktree should be cut from. A panel's
+// own cwd is usually a linked worktree, so resolve the main one from the
+// selected session and fall back to this process's cwd.
+func (m Model) dispatchCwd() string {
+	if s := m.selectedSession(); s != nil && s.Git.GitRoot != "" {
+		if main := fetch.MainWorktree(m.ctx, m.cmd, s.Git.GitRoot); main != "" {
+			return main
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 // --- Batch commands ---
@@ -1476,6 +1518,9 @@ func (m Model) tableHeight() int {
 	}
 	if m.dispatchActive {
 		used += 3
+	}
+	if len(m.jobs) > 0 {
+		used++
 	}
 	h := m.height - used
 	if h < 1 {

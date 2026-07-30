@@ -143,6 +143,24 @@ func rebaseAge(ctx context.Context, cmd Commander, gitRoot, branch string) *int 
 	return &age
 }
 
+// MainWorktree returns the main working tree of gitRoot's repository, or "" if
+// git cannot answer. A panel's cwd is usually a linked worktree, and a new
+// worktree has to be cut from the main one; `worktree list --porcelain` puts
+// the main tree first and has done so for far longer than --path-format has
+// existed.
+func MainWorktree(ctx context.Context, cmd Commander, gitRoot string) string {
+	out, err := cmd.Run(ctx, gitRoot, "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "worktree "); ok {
+			return rest
+		}
+	}
+	return ""
+}
+
 func unpushedCount(ctx context.Context, cmd Commander, gitRoot, branch string) int {
 	// Check remote ref exists
 	_, err := cmd.Run(ctx, gitRoot, "git", "rev-parse", "--verify", "origin/"+branch)

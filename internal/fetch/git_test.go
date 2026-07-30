@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -79,4 +80,20 @@ func TestDetectDefaultBranch(t *testing.T) {
 
 	// Clean up
 	defaultBranchCache.Delete("/repo")
+}
+
+func TestMainWorktreeIsTheFirstWorktreeListed(t *testing.T) {
+	m := NewMockCommander()
+	m.On("git", "worktree /Users/x/portal\nHEAD abc\nbranch refs/heads/main\n\nworktree /Users/x/sc-1\nHEAD def\n", nil)
+	if got := MainWorktree(context.Background(), m, "/Users/x/sc-1"); got != "/Users/x/portal" {
+		t.Errorf("got %q, want /Users/x/portal", got)
+	}
+}
+
+func TestMainWorktreeIsEmptyWhenGitFails(t *testing.T) {
+	m := NewMockCommander()
+	m.On("git", "", errors.New("not a repository"))
+	if got := MainWorktree(context.Background(), m, "/tmp"); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
 }
