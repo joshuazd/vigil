@@ -155,14 +155,14 @@ func TestEffectsDoNotScaleWithClients(t *testing.T) {
 		Effects:   effects,
 	}
 
+	ctx := context.Background()
 	for i := 0; i < 3; i++ {
 		conn := newBlockingConn()
 		close(conn.release)
 		t.Cleanup(func() { _ = conn.Close() })
-		s.addClient(conn)
+		s.addClient(ctx, conn)
 	}
 
-	ctx := context.Background()
 	s.poll(ctx)
 	s.poll(ctx)
 	s.pendingEffects.Wait()

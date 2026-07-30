@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -158,7 +159,7 @@ func TestQueueKeepsOnlyTheNewestSnapshot(t *testing.T) {
 func TestPollDoesNotWaitForASlowClient(t *testing.T) {
 	s := testServer(t)
 	conn := newBlockingConn()
-	s.addClient(conn)
+	s.addClient(context.Background(), conn)
 	t.Cleanup(func() { close(conn.release); s.closeClients() })
 
 	polled := make(chan struct{})
@@ -216,7 +217,7 @@ func TestBroadcastPrunesFailedClients(t *testing.T) {
 	s := testServer(t)
 	conn := newBlockingConn()
 	conn.failing = true
-	s.addClient(conn)
+	s.addClient(context.Background(), conn)
 	close(conn.release)
 
 	// s.latest is nil (poll never ran), so addClient queued nothing; drive a
@@ -245,7 +246,7 @@ func TestRunWaitsForWriters(t *testing.T) {
 	s := testServer(t)
 	conn := newBlockingConn()
 	close(conn.release)
-	s.addClient(conn)
+	s.addClient(context.Background(), conn)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -263,5 +264,100 @@ func TestRunWaitsForWriters(t *testing.T) {
 	}
 	if !conn.isClosed() {
 		t.Error("Run returned before its writer goroutine closed the connection")
+	}
+}
+
+// The writer stays the sole closer of the connection. A reader that hits EOF
+// must not close it out from under a writer mid-Encode.
+//
+// A real unix socket, not net.Pipe. net.Pipe has no half-close, so closing the
+// peer there ends both directions at once and the writer fails regardless of
+// what the reader did - which makes the test structurally unable to observe the
+// defect it is written for. CloseWrite gives the reader an EOF while the
+// writer's direction stays healthy, and that is the only state in which a
+// reader-side Close is distinguishable from correct behavior.
+func TestAReaderAtEOFDoesNotKillItsWriter(t *testing.T) {
+	path := filepath.Join(shortTempDir(t), "rw.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if conn, err := listener.Accept(); err == nil {
+			accepted <- conn
+		}
+	}()
+
+	peer, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = peer.Close() }()
+
+	var server net.Conn
+	select {
+	case server = <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the listener never accepted")
+	}
+
+	c := newClient(server)
+	go c.writeLoop(func(string, ...any) {})
+
+	requests := make(chan *protocol.Request, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		c.readLoop(ctx, requests)
+	}()
+
+	// A request, then a half-close of the peer's write side, which is what
+	// gives the reader an EOF while the writer is still healthy.
+	if err := protocol.EncodeRequest(peer, &protocol.Request{
+		Version: protocol.Version, Type: protocol.RequestDispatch, ID: "a", Input: "sc-1",
+	}); err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	select {
+	case got := <-requests:
+		if got.ID != "a" {
+			t.Errorf("got %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reader never delivered the request")
+	}
+
+	// Half-close: the reader sees EOF while the writer's direction is untouched.
+	if err := peer.(*net.UnixConn).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+	select {
+	case <-readerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reader did not exit on EOF")
+	}
+
+	// This is the assertion the mutation kills. If readLoop closed the
+	// connection on its way out, this Encode fails and nothing arrives.
+	c.queue(&protocol.Snapshot{Version: protocol.Version, Timestamp: 1})
+	_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+	snap, err := protocol.NewDecoder(peer).Next()
+	if err != nil {
+		t.Fatalf("the writer could not deliver after the reader hit EOF: %v", err)
+	}
+	if snap.Timestamp != 1 {
+		t.Errorf("got %+v, want the queued snapshot", snap)
+	}
+
+	c.stop()
+	select {
+	case <-c.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the writer did not exit")
 	}
 }

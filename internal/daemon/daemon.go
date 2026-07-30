@@ -67,6 +67,14 @@ type Server struct {
 	// pollFailing is only read and written from poll, which Run only ever
 	// calls from its own goroutine, so it needs no mutex.
 	pollFailing bool
+
+	// jobs is the dispatch queue. Nil disables submission, which is what a
+	// Server literal in a test gets unless it builds one.
+	jobs *jobs
+
+	// requests carries client submissions to Run's goroutine, which owns the
+	// job table's only writer besides a running job.
+	requests chan *protocol.Request
 }
 
 func New(cfg *config.Config, cmd fetch.Commander) *Server {
@@ -75,7 +83,7 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 		interval = defaultInterval
 	}
 	logger := log.New(os.Stderr, "vigil: ", log.LstdFlags)
-	return &Server{
+	srv := &Server{
 		Collector:  collect.New(cfg, cmd),
 		Interval:   interval,
 		SocketPath: protocol.SocketPath(),
@@ -88,7 +96,12 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 			Logf: logger.Printf,
 		},
 		inFlightEffects: make(map[string]struct{}),
+		requests:        make(chan *protocol.Request, queueDepth),
 	}
+	if stream, ok := cmd.(fetch.StreamCommander); ok {
+		srv.jobs = newJobs(cfg, stream, cmd, logger.Printf)
+	}
+	return srv
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -121,6 +134,14 @@ func (s *Server) Run(ctx context.Context) error {
 		s.accept(ctx, listener, incoming)
 	}()
 
+	if s.jobs != nil {
+		s.pendingEffects.Add(1)
+		go func() {
+			defer s.pendingEffects.Done()
+			s.jobs.work(ctx)
+		}()
+	}
+
 	ticker := time.NewTicker(s.Interval)
 	defer ticker.Stop()
 
@@ -135,7 +156,11 @@ func (s *Server) Run(ctx context.Context) error {
 			s.pendingEffects.Wait()
 			return nil
 		case conn := <-incoming:
-			s.addClient(conn)
+			s.addClient(ctx, conn)
+		case req := <-s.requests:
+			if s.jobs != nil {
+				s.jobs.submit(req)
+			}
 		case <-ticker.C:
 			s.poll(ctx)
 		}
@@ -266,7 +291,7 @@ func (s *Server) logf(format string, args ...any) {
 // is one. A client that connects before the first successful poll gets
 // nothing until the next one, and falls back to self-polling if that takes
 // too long.
-func (s *Server) addClient(conn net.Conn) {
+func (s *Server) addClient(ctx context.Context, conn net.Conn) {
 	c := newClient(conn)
 	s.clients = append(s.clients, c)
 	s.writers.Add(1)
@@ -274,6 +299,9 @@ func (s *Server) addClient(conn net.Conn) {
 		defer s.writers.Done()
 		c.writeLoop(s.logf)
 	}()
+	if s.requests != nil {
+		go c.readLoop(ctx, s.requests)
+	}
 
 	s.mu.Lock()
 	latest := s.latest

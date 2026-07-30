@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -395,6 +396,20 @@ func waitForSocket(t *testing.T, path string) {
 	t.Fatalf("socket %s never became available", path)
 }
 
+// dialWhenReady waits for the socket to accept connections (reusing
+// waitForSocket's polling rather than inventing a second one) and returns a
+// live connection for the caller to use, unlike waitForSocket itself, which
+// only probes readiness and closes immediately.
+func dialWhenReady(t *testing.T, path string) net.Conn {
+	t.Helper()
+	waitForSocket(t, path)
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	return conn
+}
+
 func writeStaleSocketFile(path string) error {
 	l, err := net.Listen("unix", path)
 	if err != nil {
@@ -406,4 +421,61 @@ func writeStaleSocketFile(path string) error {
 	ul := l.(*net.UnixListener)
 	ul.SetUnlinkOnClose(false)
 	return ul.Close()
+}
+
+// testConfig is a bare config for tests that only need a Collector to run
+// without erroring - it carries no hooks or settings, so it must not be used
+// where dispatch behavior (hooks, dispatch_timeout) matters; testJobsConfig
+// is for that.
+func testConfig() *config.Config {
+	return &config.Config{}
+}
+
+// Task 5's deliverable is that a request reaches the job queue, so this asserts
+// against the queue directly rather than over the wire. The end-to-end version -
+// the job appearing in a broadcast Snapshot - belongs to Task 6, which is what
+// populates Snapshot.Jobs; asserting it here would make this task's acceptance
+// depend on the next task's deliverable.
+func TestASubmittedRequestReachesTheJobQueue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sockDir := shortTempDir(t)
+	stream := newBlockingStream()
+	srv := &Server{
+		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
+		Interval:   10 * time.Millisecond,
+		SocketPath: filepath.Join(sockDir, "vigild.sock"),
+		Log:        log.New(io.Discard, "", 0),
+		requests:   make(chan *protocol.Request, queueDepth),
+	}
+	srv.jobs = newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), srv.logf)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run(ctx) }()
+
+	conn := dialWhenReady(t, srv.SocketPath)
+	defer func() { _ = conn.Close() }()
+
+	if err := protocol.EncodeRequest(conn, &protocol.Request{
+		Version: protocol.Version, Type: protocol.RequestDispatch,
+		ID: "job-1", Input: "sc-12345",
+	}); err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if findJob(srv.jobs.snapshot(), "job-1") != nil {
+			close(stream.release)
+			cancel()
+			<-runDone
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	close(stream.release)
+	cancel()
+	<-runDone
+	t.Fatal("the request never reached the job queue")
 }
