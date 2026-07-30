@@ -813,6 +813,7 @@ func TestPollPublishesTheDaemonBinaryStamp(t *testing.T) {
 	s.mu.Unlock()
 	if latest == nil {
 		t.Fatal("poll published no snapshot")
+		return
 	}
 	if latest.DaemonBin != want {
 		t.Fatalf("DaemonBin = %+v, want %+v", latest.DaemonBin, want)

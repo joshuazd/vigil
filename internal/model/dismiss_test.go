@@ -66,6 +66,7 @@ func TestEscDismissesAFailedJobInsteadOfQuitting(t *testing.T) {
 	case req := <-done:
 		if req == nil {
 			t.Fatal("no readable request frame reached the daemon")
+			return
 		}
 		if req.Type != protocol.RequestDismiss {
 			t.Fatalf("Type = %q, want %q", req.Type, protocol.RequestDismiss)
