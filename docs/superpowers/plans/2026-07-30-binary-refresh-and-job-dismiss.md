@@ -1128,7 +1128,7 @@ Make `restartIfRequested` return nil unconditionally. `TestRestartIfRequestedExe
 - [ ] **Step 6: Commit**
 
 ```bash
-git add main.go main_test.go internal/model/model.go
+git add main.go main_test.go
 git commit -m "feat: re-exec a client whose binary was replaced on disk"
 ```
 
