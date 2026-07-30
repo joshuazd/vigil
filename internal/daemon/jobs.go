@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -201,8 +202,18 @@ func (j *jobs) setStatus(id, status string) {
 }
 
 // failFromOutput prefers the job's last output line as the reason: a script
-// that explained itself has already said something better than "exit 1".
+// that explained itself has already said something better than "exit 1". A
+// context deadline is the one case where that preference is wrong: the job
+// did not explain its own failure, dispatch_timeout killed it mid-line, so
+// the last line the user sees is stale progress rather than a reason - the
+// timeout itself is reported instead.
 func (j *jobs) failFromOutput(id string, err error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		timeout := j.cfg.GetSettingDuration("dispatch_timeout")
+		j.fail(id, fmt.Sprintf("timed out after %ds", int(timeout.Seconds())))
+		return
+	}
+
 	j.mu.Lock()
 	last := ""
 	if job, ok := j.byID[id]; ok {

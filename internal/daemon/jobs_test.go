@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -103,6 +105,25 @@ func waitForJobState(t *testing.T, j *jobs, id, want string) protocol.Job {
 	return protocol.Job{}
 }
 
+// run flips State to Running and streams the first status line in two
+// separate critical sections (the second reached only after
+// fetch.MostRecentClient and RunHookStream's setup), so a snapshot taken the
+// instant State changes can still see an empty Status. Polling on State alone
+// caught that gap under -race with enough concurrent load elsewhere in the
+// package to widen the window; this waits for both.
+func waitForJobStatus(t *testing.T, j *jobs, id, state, status string) protocol.Job {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := findJob(j.snapshot(), id); got != nil && got.State == state && got.Status == status {
+			return *got
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("job %s never reached %s with status %q; snapshot: %+v", id, state, status, j.snapshot())
+	return protocol.Job{}
+}
+
 func TestASubmittedJobIsQueuedThenRunsThenSucceeds(t *testing.T) {
 	stream := newBlockingStream(">>> fetching story")
 	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
@@ -112,10 +133,7 @@ func TestASubmittedJobIsQueuedThenRunsThenSucceeds(t *testing.T) {
 
 	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDispatch, ID: "a", Input: "sc-1"})
 
-	running := waitForJobState(t, j, "a", protocol.JobRunning)
-	if running.Status != "fetching story" {
-		t.Errorf("got status %q, want the streamed line stripped of its prefix", running.Status)
-	}
+	waitForJobStatus(t, j, "a", protocol.JobRunning, "fetching story")
 	close(stream.release)
 	done := waitForJobState(t, j, "a", protocol.JobSucceeded)
 	if done.Ended == 0 {
@@ -160,8 +178,61 @@ func TestADuplicateInputIsRefusedAsAFailedJob(t *testing.T) {
 		t.Errorf("got %q, want a duplicate reason", dup.Status)
 	}
 	close(stream.release)
+	// Wait for "a" to actually finish before reading counts: State flips to
+	// Running before RunStream is called, so checking counts right after the
+	// close (rather than after a's terminal state) can read the run as not
+	// yet started.
+	waitForJobState(t, j, "a", protocol.JobSucceeded)
 	if runs, _ := stream.counts(); runs != 1 {
 		t.Errorf("ran %d times, want 1: the duplicate must not execute", runs)
+	}
+}
+
+// The named hazard: submit's duplicate scan and its insert must be one
+// critical section, not two. Every other test in this file calls submit from
+// a single goroutine, so this is the only one that can catch a refactor that
+// splits them - work is deliberately never started, so a win is "queued",
+// not "running".
+func TestConcurrentSubmitsOfTheSameInputYieldExactlyOneWinner(t *testing.T) {
+	stream := newBlockingStream()
+	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
+
+	const n = 20
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			j.submit(&protocol.Request{
+				Version: protocol.Version, Type: protocol.RequestDispatch,
+				ID: fmt.Sprintf("job-%d", i), Input: "sc-1",
+			})
+		}()
+	}
+	wg.Wait()
+
+	list := j.snapshot()
+	if len(list) != n {
+		t.Fatalf("got %d jobs, want %d", len(list), n)
+	}
+	runnable := 0
+	duplicates := 0
+	for _, job := range list {
+		switch job.State {
+		case protocol.JobQueued, protocol.JobRunning:
+			runnable++
+		case protocol.JobFailed:
+			if strings.Contains(job.Status, "duplicate") {
+				duplicates++
+			}
+		}
+	}
+	if runnable != 1 {
+		t.Errorf("got %d runnable jobs, want exactly 1: %+v", runnable, list)
+	}
+	if duplicates != n-1 {
+		t.Errorf("got %d jobs failed as duplicates, want %d: %+v", duplicates, n-1, list)
 	}
 }
 
@@ -193,9 +264,54 @@ func TestAnUnknownRequestTypeIsRefusedAsAFailedJob(t *testing.T) {
 	}
 }
 
+func TestEmptyInputIsRefusedAsAFailedJob(t *testing.T) {
+	stream := newBlockingStream()
+	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
+	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDispatch, ID: "a", Input: ""})
+
+	got := findJob(j.snapshot(), "a")
+	if got == nil || got.State != protocol.JobFailed {
+		t.Fatalf("got %+v, want a failed job", got)
+	}
+	if !strings.Contains(got.Status, "empty") {
+		t.Errorf("got %q, want an empty-input reason", got.Status)
+	}
+	if runs, _ := stream.counts(); runs != 0 {
+		t.Errorf("ran %d times, want 0", runs)
+	}
+}
+
+// A full queue is the one refusal registered in two steps: submit inserts the
+// job as queued, then flips it to failed after releasing the lock because the
+// non-blocking send found no room. work is deliberately never started, so
+// pending fills up and stays full.
+func TestAFullQueueIsRefusedAsAFailedJob(t *testing.T) {
+	stream := newBlockingStream()
+	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
+
+	for i := 0; i < queueDepth; i++ {
+		j.submit(&protocol.Request{
+			Version: protocol.Version, Type: protocol.RequestDispatch,
+			ID: fmt.Sprintf("filler-%d", i), Input: fmt.Sprintf("sc-%d", i),
+		})
+	}
+
+	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDispatch, ID: "overflow", Input: "sc-overflow"})
+
+	got := findJob(j.snapshot(), "overflow")
+	if got == nil || got.State != protocol.JobFailed {
+		t.Fatalf("got %+v, want a failed job", got)
+	}
+	if !strings.Contains(got.Status, "queue is full") {
+		t.Errorf("got %q, want a queue-full reason", got.Status)
+	}
+}
+
+// A plain exit error, not a context deadline: that distinction is what
+// TestATimedOutJobReportsTheTimeoutNotTheLastLine pins on the other side.
 func TestAFailingJobKeepsItsLastOutputLineAsTheReason(t *testing.T) {
 	stream := newBlockingStream(">>> fetching", "!!! no branch for story 1")
-	stream.err = context.DeadlineExceeded
+	stream.err = errors.New("exit status 1")
 	close(stream.release)
 	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -206,6 +322,26 @@ func TestAFailingJobKeepsItsLastOutputLineAsTheReason(t *testing.T) {
 	got := waitForJobState(t, j, "a", protocol.JobFailed)
 	if !strings.Contains(got.Status, "no branch for story 1") {
 		t.Errorf("got %q, want the last output line", got.Status)
+	}
+}
+
+// A context deadline is not a plain exit error: dispatch_timeout killed the
+// job, so the reason is the timeout, not whatever the job last printed
+// before it was cut off. Without this, a hang and a timeout look identical
+// in the status bar.
+func TestATimedOutJobReportsTheTimeoutNotTheLastLine(t *testing.T) {
+	stream := newBlockingStream(">>> cloning repository")
+	stream.err = context.DeadlineExceeded
+	close(stream.release)
+	j := newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), func(string, ...any) {})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go j.work(ctx)
+
+	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDispatch, ID: "a", Input: "sc-1"})
+	got := waitForJobState(t, j, "a", protocol.JobFailed)
+	if got.Status != "timed out after 300s" {
+		t.Errorf("got %q, want the timeout reason", got.Status)
 	}
 }
 
