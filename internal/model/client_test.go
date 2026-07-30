@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"go/build"
 	"net"
 	"os"
 	"path/filepath"
@@ -22,13 +23,60 @@ import (
 
 // TestMain keeps the suite from ever starting a real daemon. Both New and
 // NewPanel spawn one when no socket answers, and so does every failed
-// reconnect probe, which between them cover most of this package - while the
-// real spawnDaemon forks a detached `vigil daemon` that would outlive the test
-// binary. A test that wants to observe spawning installs its own stub over
-// this one.
+// reconnect probe, which between them cover most of this package.
+//
+// The real spawner is no longer reachable from this package: it lives in
+// internal/daemon, which internal/model does not import, and main installs it
+// through SetDaemonSpawner. This installs a no-op instead so that spawning is
+// silent rather than an error toast.
 func TestMain(m *testing.M) {
-	daemonSpawner = func() error { return nil }
+	SetDaemonSpawner(noopSpawner)
 	os.Exit(m.Run())
+}
+
+// noopSpawner is the only value the spawner is ever restored to.
+var noopSpawner = func() error { return nil }
+
+// stubSpawner installs fn for the duration of t and restores noopSpawner
+// afterward. Use this rather than calling SetDaemonSpawner directly, so no
+// test can leak a spawner into the ones that follow it.
+func stubSpawner(t *testing.T, fn func() error) {
+	t.Helper()
+	SetDaemonSpawner(fn)
+	t.Cleanup(func() { SetDaemonSpawner(noopSpawner) })
+}
+
+// TestThisPackageCannotNameTheRealSpawner turns the fork bomb guard from a
+// convention into a structural fact. daemon.Spawn forks a detached
+// `vigil daemon`, and under go test os.Executable() is the test binary, so a
+// test that installed the real spawner forked the whole suite, which reached
+// the same code and forked again - live-reproduced as 800 processes. main
+// installs it through SetDaemonSpawner; neither this package nor its tests
+// import internal/daemon, so the real spawner cannot be named here at all.
+func TestThisPackageCannotNameTheRealSpawner(t *testing.T) {
+	pkg, err := build.ImportDir(".", 0)
+	if err != nil {
+		t.Fatalf("ImportDir: %v", err)
+	}
+	const forbidden = "github.com/jzinkduda/vigil/internal/daemon"
+	for _, imports := range [][]string{pkg.Imports, pkg.TestImports, pkg.XTestImports} {
+		for _, imp := range imports {
+			if imp == forbidden {
+				t.Errorf("internal/model imports %s again, so a test can install the forking spawner by hand", forbidden)
+			}
+		}
+	}
+}
+
+// An unconfigured spawner is reported, not silently ignored: a build that
+// forgot to call SetDaemonSpawner would otherwise never start a daemon and
+// never say why, and no daemon means no notify hook and no auto_cleanup.
+func TestAnUnsetSpawnerIsAnErrorRatherThanASilentNoOp(t *testing.T) {
+	SetDaemonSpawner(nil)
+	t.Cleanup(func() { SetDaemonSpawner(noopSpawner) })
+	if err := spawnDaemon(); err == nil {
+		t.Error("spawnDaemon returned nil with no spawner configured")
+	}
 }
 
 func newTestModel() Model {

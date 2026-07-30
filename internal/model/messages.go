@@ -77,6 +77,10 @@ type SnapshotMsg struct {
 	Sessions []*session.Session
 	Epoch    int
 	Local    bool
+
+	// Jobs is the daemon's dispatch activity. Always nil on the self-polling
+	// path: a client runs no jobs, so it knows of none.
+	Jobs []protocol.Job
 }
 
 // DaemonLostMsg reports that the daemon stream ended, so the TUI should

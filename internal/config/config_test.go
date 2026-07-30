@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -326,5 +327,111 @@ func TestIsSettingDistinguishesAnEmptyDefaultFromAnUnknownKey(t *testing.T) {
 	}
 	if IsSetting("no_such_setting") {
 		t.Error("IsSetting accepted an unknown key")
+	}
+}
+
+func TestRunHookStreamExpandsAndStreams(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{
+		"dispatch": "printf '>>> fetching %s\\n>>> done\\n' {input}",
+	}}
+	var got []string
+	err := cfg.RunHookStream(context.Background(), &fetch.ExecCommander{}, "dispatch",
+		map[string]string{"input": "sc-12345"}, "", nil, 5*time.Second,
+		func(line string) { got = append(got, line) })
+	if err != nil {
+		t.Fatalf("RunHookStream: %v", err)
+	}
+	want := []string{">>> fetching sc-12345", ">>> done"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// stderr is load-bearing: warn and error in lib/output.sh write there, and a
+// failure reason arriving on stderr must reach the status line.
+func TestRunHookStreamMergesStderr(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{
+		"dispatch": "printf '!!! broke\\n' >&2",
+	}}
+	var got []string
+	err := cfg.RunHookStream(context.Background(), &fetch.ExecCommander{}, "dispatch",
+		nil, "", nil, 5*time.Second, func(line string) { got = append(got, line) })
+	if err != nil {
+		t.Fatalf("RunHookStream: %v", err)
+	}
+	if len(got) != 1 || got[0] != "!!! broke" {
+		t.Errorf("got %q, want [\"!!! broke\"]", got)
+	}
+}
+
+func TestRunHookStreamPassesEnv(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{
+		"dispatch": `printf '%s\n' "$VIGIL_CLIENT"`,
+	}}
+	var got []string
+	err := cfg.RunHookStream(context.Background(), &fetch.ExecCommander{}, "dispatch",
+		nil, "", []string{"VIGIL_CLIENT=/dev/ttys009"}, 5*time.Second,
+		func(line string) { got = append(got, line) })
+	if err != nil {
+		t.Fatalf("RunHookStream: %v", err)
+	}
+	if len(got) != 1 || got[0] != "/dev/ttys009" {
+		t.Errorf("got %q, want the client", got)
+	}
+}
+
+func TestRunHookStreamUnconfigured(t *testing.T) {
+	cfg := &Config{}
+	err := cfg.RunHookStream(context.Background(), &fetch.ExecCommander{}, "dispatch",
+		nil, "", nil, time.Second, func(string) {})
+	if !errors.As(err, new(*HookNotConfigured)) {
+		t.Errorf("got %v, want HookNotConfigured", err)
+	}
+}
+
+// The real commander, and the same two assertions the fake-driven job test
+// makes: the error is a deadline (not "signal: killed", which is what
+// cmd.Wait reports and what failFromOutput used to look for and never find),
+// and the deadline actually bounds wall clock. The hook backgrounds a
+// grandchild that inherits the output pipe, because that is the shape of the
+// real dispatch chain and the shape that used to run to completion.
+func TestRunHookStreamHonoursTheTimeout(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{"dispatch": "sleep 30 & echo started; wait"}}
+	start := time.Now()
+	err := cfg.RunHookStream(context.Background(), &fetch.ExecCommander{}, "dispatch",
+		nil, "", nil, 100*time.Millisecond, func(string) {})
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v, want a context.DeadlineExceeded", err)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("returned after %v, want the 100ms timeout to bound it", elapsed)
+	}
+}
+
+func TestDispatchTimeoutDefaultsTo300s(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &Config{}
+	if got := cfg.GetSettingDuration("dispatch_timeout"); got != 300*time.Second {
+		t.Errorf("got %v, want 5m0s", got)
+	}
+	if !IsSetting("dispatch_timeout") {
+		t.Error("dispatch_timeout is not a known setting")
+	}
+}
+
+// RunHook and RunHookStream share hookArgv. This pins that the sharing did not
+// change RunHook's contract: its output is trimmed and stderr is merged.
+func TestRunHookStillTrimsAndMergesAfterTheRefactor(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{
+		"notify": "printf 'out\\n'; printf 'err\\n' >&2",
+	}}
+	out, err := cfg.RunHook(context.Background(), &fetch.ExecCommander{}, "notify",
+		nil, "", 5*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	if out != "out\nerr" {
+		t.Errorf("got %q, want \"out\\nerr\"", out)
 	}
 }

@@ -83,6 +83,7 @@ capture_window = ""           # Window name for detail panel (empty = first wind
 stale_threshold = 86400       # Rebase age warning threshold (seconds, default 24h)
 notifications_enabled = true  # Toast + hook on session state changes
 auto_cleanup = false          # Auto-cleanup sessions when PR merges
+dispatch_timeout = 300        # Seconds before a running dispatch job is killed
 
 [hooks]
 cleanup = "tmux kill-session -t {session} && git worktree remove {path}"
@@ -107,11 +108,37 @@ The built-in cleanup kills the tmux session, then removes the git worktree if th
 
 The default merge uses `--squash --delete-branch`. Override `[hooks] merge` for a different strategy. Set any hook to `""` to disable it.
 
+Hook bodies must not contain `${VAR}`. A braced shell expansion collides with the `{placeholder}` syntax: `${VAR}` is read as the placeholder `{VAR}`, which is not a known variable, and the hook fails with `unknown placeholder in hook template` before `sh` ever sees it. Use `$VAR` instead. This applies to every hook, not just `dispatch`.
+
+### Dispatch
+
+`d` in the TUI, or `vigil dispatch <url-or-id>` from a shell, submits a job to `vigild`, which runs the `dispatch` hook and streams its output into a job line every panel shows. `vigil dispatch` starts a daemon if none is running, and exits as soon as the daemon acknowledges the job: exit 0 means accepted, not finished. The job outlives the submitting process, which is the point - the shell that submitted it is usually about to be replaced by the session the job creates.
+
+The hook runs **inside the daemon**, which has no terminal:
+
+```toml
+[settings]
+dispatch_timeout = 300        # Seconds before a running dispatch is killed
+
+[hooks]
+dispatch = "DISPATCH_INLINE=1 dispatch --non-interactive {input}"
+```
+
+What that means for the hook you write:
+
+- **No popup, no tty.** A hook that opens `tmux display-popup -E` has no client to draw on and will hang until `dispatch_timeout` kills it. Run the work inline instead. If you use the `dispatch` script from `~/dotfiles`, `DISPATCH_INLINE=1` is what selects that branch, and the older `DISPATCH_IN_POPUP` is gone.
+- **Do not pass `--detached`.** The teleport at the end of a dispatch is the feature; `--detached` skips it, leaving the new session created but unswitched.
+- **`VIGIL_CLIENT` is exported into the hook.** It names the most recently active tmux client, resolved per job rather than per submission, and is how a client-less daemon can still pick a switch target, a window size, and a panel orientation. It is empty when no client is attached, and a hook must treat that as "nobody is watching" rather than an error.
+- **`dispatch_timeout` (default 300s, `VIGIL_DISPATCH_TIMEOUT`) bounds the job.** On expiry the hook's whole process group is killed, backgrounded grandchildren included, and the job reports the timeout rather than its last output line.
+- **Jobs run one at a time.** Two concurrent `git worktree add` calls in one repository contend on the index lock, so submissions queue; a duplicate of an in-flight input is refused rather than queued.
+
+If your `dispatch` hook still passes `--detached` or still names `DISPATCH_IN_POPUP`, vigil prints a warning at startup naming this section.
+
 ### Environment variable overrides
 
 Environment variables override TOML settings for quick testing:
 
-`VIGIL_TMUX_INTERVAL`, `VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`, `VIGIL_AUTO_CLEANUP`
+`VIGIL_TMUX_INTERVAL`, `VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`, `VIGIL_AUTO_CLEANUP`, `VIGIL_AUTO_FOCUS`, `VIGIL_PANEL_AUTO`, `VIGIL_DISPATCH_TIMEOUT`
 
 ## Development
 

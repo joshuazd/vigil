@@ -177,8 +177,7 @@ func TestADaemonFedClientRunsNoEffects(t *testing.T) {
 // notify hook fire again. Both modes spawn now.
 func TestNewSpawnsTheDaemon(t *testing.T) {
 	spawned := 0
-	daemonSpawner = func() error { spawned++; return nil }
-	t.Cleanup(func() { daemonSpawner = spawnDaemon })
+	stubSpawner(t, func() error { spawned++; return nil })
 
 	dir := shortTempDir(t)
 	t.Setenv("HOME", dir)
@@ -199,8 +198,7 @@ func TestNewSpawnsTheDaemon(t *testing.T) {
 // self-poll silently forever with no hooks. The cooldown still applies to it.
 func TestADashboardRespawnsARateLimitedDaemon(t *testing.T) {
 	spawned := 0
-	daemonSpawner = func() error { spawned++; return nil }
-	t.Cleanup(func() { daemonSpawner = spawnDaemon })
+	stubSpawner(t, func() error { spawned++; return nil })
 
 	m := newTestModel()
 	m.epoch = 1

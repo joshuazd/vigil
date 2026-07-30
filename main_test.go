@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jzinkduda/vigil/internal/config"
 )
 
 func TestParseArgsReturnsTheRemainingArguments(t *testing.T) {
@@ -38,6 +42,7 @@ func TestParseArgs(t *testing.T) {
 		{"long version", []string{"--version"}, "version"},
 		{"short version", []string{"-v"}, "version"},
 		{"panel flag", []string{"--panel"}, "panel"},
+		{"dispatch subcommand", []string{"dispatch", "sc-1"}, "dispatch"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -143,5 +148,93 @@ func TestConfigGetHonoursTheEnvironment(t *testing.T) {
 	}
 	if strings.TrimSpace(stdout.String()) != "false" {
 		t.Errorf("got stdout %q, want false", stdout.String())
+	}
+}
+
+func TestDispatchParsesAsItsOwnCommand(t *testing.T) {
+	command, rest, err := parseArgs([]string{"dispatch", "--cwd", "/tmp", "sc-1"})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if command != "dispatch" {
+		t.Errorf("got %q, want dispatch", command)
+	}
+	if len(rest) != 3 || rest[2] != "sc-1" {
+		t.Errorf("got rest %q", rest)
+	}
+}
+
+// The hook the design specifies is DISPATCH_INLINE=1 dispatch
+// --non-interactive {input}. A hook that still passes --detached skips the
+// teleport that is the whole point of a dispatch, and one still keyed on
+// DISPATCH_IN_POPUP runs tmux display-popup -E from a daemon with no client,
+// which cannot draw. Neither says anything on the way past, so vigil does.
+func TestAnUnmigratedDispatchHookIsWarnedAbout(t *testing.T) {
+	for _, hook := range []string{
+		"dispatch --detached --non-interactive {input}",
+		"DISPATCH_IN_POPUP=1 dispatch --non-interactive {input}",
+	} {
+		cfg := &config.Config{Hooks: map[string]any{"dispatch": hook}}
+		var stderr bytes.Buffer
+		warnAboutAnUnmigratedDispatchHook(cfg, &stderr)
+		if !strings.Contains(stderr.String(), "DISPATCH_INLINE=1 dispatch --non-interactive {input}") {
+			t.Errorf("hook %q got %q, want the migrated hook named", hook, stderr.String())
+		}
+	}
+}
+
+func TestAMigratedDispatchHookIsNotWarnedAbout(t *testing.T) {
+	cfg := &config.Config{Hooks: map[string]any{
+		"dispatch": "DISPATCH_INLINE=1 dispatch --non-interactive {input}",
+	}}
+	var stderr bytes.Buffer
+	warnAboutAnUnmigratedDispatchHook(cfg, &stderr)
+	if stderr.String() != "" {
+		t.Errorf("got %q, want silence", stderr.String())
+	}
+}
+
+// The warning is only useful if run actually emits it, which the unit tests
+// above cannot show. Fake binaries satisfy the dependency check so the run
+// reaches the config; `dispatch` with no input then fails its own usage check
+// before anything is submitted or spawned.
+func TestRunEmitsTheHookWarningBeforeItDoesAnything(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".config", "vigil"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".config", "vigil", "config.toml"),
+		[]byte("[hooks]\ndispatch = \"dispatch --detached --non-interactive {input}\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	bin := t.TempDir()
+	for _, dep := range []string{"tmux", "git", "gh"} {
+		if err := os.WriteFile(filepath.Join(bin, dep), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	t.Setenv("PATH", bin)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"dispatch"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("got exit %d and stderr %q, want 1 from the usage error", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--detached") {
+		t.Errorf("got %q, want the unmigrated hook warning", stderr.String())
+	}
+}
+
+// Unlike `config get`, dispatch runs after the dependency check: it needs all
+// three binaries, and a queued job is worse than an early error.
+func TestDispatchRunsAfterTheDependencyCheck(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"dispatch", "sc-1"}, &stdout, &stderr); code != 1 {
+		t.Errorf("got exit %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "not found in PATH") {
+		t.Errorf("got %q, want a dependency error", stderr.String())
 	}
 }

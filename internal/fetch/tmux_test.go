@@ -356,3 +356,44 @@ func TestBellFlags(t *testing.T) {
 		t.Error("session1 should not have bell")
 	}
 }
+
+func TestMostRecentClientPicksTheHighestActivity(t *testing.T) {
+	m := NewMockCommander()
+	m.On("tmux", "1200|/dev/ttys002\n1900|/dev/ttys009\n1500|/dev/ttys004\n", nil)
+	if got := MostRecentClient(context.Background(), m); got != "/dev/ttys009" {
+		t.Errorf("got %q, want /dev/ttys009", got)
+	}
+}
+
+func TestMostRecentClientIsEmptyWithNoClients(t *testing.T) {
+	m := NewMockCommander()
+	m.On("tmux", "", nil)
+	if got := MostRecentClient(context.Background(), m); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestMostRecentClientIsEmptyWhenTmuxFails(t *testing.T) {
+	m := NewMockCommander()
+	m.On("tmux", "", errors.New("no server running"))
+	if got := MostRecentClient(context.Background(), m); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// Pipe-separated, not whitespace-separated. The phase 3 handoff records a
+// verification run misled by awk splitting on a session name's spaces; a client
+// name is a tty today but the format string must not be the thing that breaks
+// if that ever stops being true.
+func TestMostRecentClientUsesPipeSeparatedFormat(t *testing.T) {
+	m := NewMockCommander()
+	m.On("tmux", "1|/dev/ttys002\n", nil)
+	MostRecentClient(context.Background(), m)
+	if len(m.Calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(m.Calls))
+	}
+	joined := strings.Join(m.Calls[0].Args, " ")
+	if !strings.Contains(joined, "|") {
+		t.Errorf("format has no pipe separator: %q", joined)
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/cache"
 	"github.com/jzinkduda/vigil/internal/collect"
 	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/dispatch"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
@@ -67,6 +68,10 @@ type Model struct {
 	// Dispatch
 	dispatchActive bool
 	dispatchInput  textinput.Model
+
+	// jobs is the daemon's dispatch activity, rendered as one line. Empty
+	// while self-polling, because a client owns no jobs.
+	jobs []protocol.Job
 
 	// Modes
 	//
@@ -254,7 +259,7 @@ func (m *Model) spawnDaemonOnce() {
 		return
 	}
 	m.lastSpawn = time.Now()
-	if err := daemonSpawner(); err != nil {
+	if err := spawnDaemon(); err != nil {
 		m.addNotification("could not start daemon: "+err.Error(), "warning")
 	}
 }
@@ -455,7 +460,8 @@ func (m Model) View() string {
 
 	// Table
 	visible := m.visibleSessions()
-	tableHeight := m.tableHeight()
+	jobLine := view.RenderJobLine(m.jobs, m.width)
+	tableHeight := m.tableHeight(jobLine != "")
 	staleThreshold := m.cfg.GetSettingInt("stale_threshold")
 	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight, notif)
 
@@ -483,6 +489,9 @@ func (m Model) View() string {
 
 	// Compose — pin footer to bottom by padding with blank lines
 	parts := []string{statusBar, table}
+	if jobLine != "" {
+		parts = append(parts, jobLine)
+	}
 	if detail != "" {
 		parts = append(parts, detail)
 	}
@@ -511,6 +520,11 @@ func (m Model) View() string {
 // pane is for, and the detail panel's pane captures would run once per panel
 // per tick.
 func (m Model) panelView() string {
+	jobLine := view.RenderJobLine(m.jobs, m.width)
+	rows := max(1, m.height-1)
+	if jobLine != "" {
+		rows = max(1, m.height-2)
+	}
 	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth())
 	table := view.RenderTable(
 		m.visibleSessions(),
@@ -518,10 +532,13 @@ func (m Model) panelView() string {
 		m.selected,
 		m.cfg.GetSettingInt("stale_threshold"),
 		m.width,
-		max(1, m.height-1),
+		rows,
 		m.activeNotification(),
 	)
-	return lipgloss.JoinVertical(lipgloss.Left, statusBar, table)
+	if jobLine == "" {
+		return lipgloss.JoinVertical(lipgloss.Left, statusBar, table)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, statusBar, table, jobLine)
 }
 
 // activeNotification returns the newest unexpired notification, styled, or
@@ -922,6 +939,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		if msg.Sessions != nil {
 			m.applySnapshot(msg.Sessions)
 		}
+		m.jobs = msg.Jobs
 		m.checkStateTransitions()
 		var cmds []tea.Cmd
 		if m.detailOpen {
@@ -949,6 +967,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	}
 	m.lastSnapshot = time.Now()
 	m.applySnapshot(msg.Sessions)
+	m.jobs = msg.Jobs
 
 	m.checkStateTransitions()
 	var cmds []tea.Cmd
@@ -1208,13 +1227,45 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 }
 
 func (m Model) dispatchCmd(input string) tea.Cmd {
-	return func() tea.Msg {
-		out, err := action.Dispatch(context.Background(), m.cfg, m.cmd, input)
-		if err != nil {
-			return ActionResultMsg{Action: "dispatch", Session: "", OK: false, Message: out}
-		}
-		return ActionResultMsg{Action: "dispatch", Session: "", OK: true, Message: out}
+	// Only a plain string is captured here. Resolving it into a cwd runs
+	// fetch.MainWorktree - a git subprocess under ExecCommander's 10s default
+	// timeout - and that has to happen inside the returned tea.Cmd, off the
+	// Bubble Tea update goroutine, or a slow or lock-contended git freezes
+	// the whole TUI on a single "d" press.
+	var gitRoot string
+	if s := m.selectedSession(); s != nil {
+		gitRoot = s.Git.GitRoot
 	}
+	ctx, cmd := m.ctx, m.cmd
+	return func() tea.Msg {
+		if _, err := dispatch.Submit(context.Background(), dispatch.Options{
+			Input:      input,
+			Cwd:        dispatchCwd(ctx, cmd, gitRoot),
+			SocketPath: protocol.SocketPath(),
+			Spawn:      spawnDaemon,
+			AckTimeout: dispatch.DefaultAckTimeout,
+		}); err != nil {
+			return ActionResultMsg{Action: "dispatch", OK: false, Message: err.Error()}
+		}
+		return ActionResultMsg{Action: "dispatch", OK: true, Message: "dispatch queued"}
+	}
+}
+
+// dispatchCwd is the repository a new worktree should be cut from. gitRoot is
+// the selected session's git root, usually a linked worktree, so it is
+// resolved to the repository's actual main tree; empty gitRoot or a git that
+// cannot answer falls back to this process's cwd.
+func dispatchCwd(ctx context.Context, cmd fetch.Commander, gitRoot string) string {
+	if gitRoot != "" {
+		if main := fetch.MainWorktree(ctx, cmd, gitRoot); main != "" {
+			return main
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 // --- Batch commands ---
@@ -1468,7 +1519,12 @@ func (m *Model) cycleSort(dir int) {
 	session.SortSessions(m.sessions, m.sortMode)
 }
 
-func (m Model) tableHeight() int {
+// tableHeight is the dashboard's table height. hasJobLine must be whatever
+// the caller is about to render RenderJobLine's result as: gating this on
+// len(m.jobs) > 0 instead let a job in a state pickJob does not recognize
+// reserve a row that RenderJobLine then renders nothing into, leaving a
+// permanent blank line above the footer.
+func (m Model) tableHeight(hasJobLine bool) int {
 	// Status bar (1) + footer (1) + detail (if open)
 	used := 2
 	if m.detailOpen {
@@ -1476,6 +1532,9 @@ func (m Model) tableHeight() int {
 	}
 	if m.dispatchActive {
 		used += 3
+	}
+	if hasJobLine {
+		used++
 	}
 	h := m.height - used
 	if h < 1 {

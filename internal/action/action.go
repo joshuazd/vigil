@@ -119,30 +119,6 @@ func isWorktree(path string) bool {
 	return !info.IsDir() // worktrees have a .git file, not directory
 }
 
-// Dispatch routes input via the dispatch hook.
-func Dispatch(ctx context.Context, cfg *config.Config, cmd fetch.Commander, input string) (string, error) {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		err := fmt.Errorf("dispatch input must not be empty")
-		return FailureMessage("dispatch", "", err), err
-	}
-	if len(input) > 500 {
-		err := fmt.Errorf("dispatch input too long")
-		return FailureMessage("dispatch", "", err), err
-	}
-	for _, c := range input {
-		if c < ' ' && c != '\t' && c != '\n' {
-			err := fmt.Errorf("dispatch input contains control characters")
-			return FailureMessage("dispatch", "", err), err
-		}
-	}
-	out, err := cfg.RunHook(ctx, cmd, "dispatch", map[string]string{"input": input}, "", 15_000_000_000)
-	if err != nil {
-		return FailureMessage("dispatch", out, err), err
-	}
-	return SuccessMessage("dispatch"), nil
-}
-
 // RebaseAndPush fetches, checks for conflicts, rebases, and force-pushes.
 // Uses per-step timeouts since network operations can exceed the default 10s.
 func RebaseAndPush(ctx context.Context, cmd fetch.Commander, gitRoot string) (string, error) {

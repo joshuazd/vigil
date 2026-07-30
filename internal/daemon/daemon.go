@@ -67,6 +67,14 @@ type Server struct {
 	// pollFailing is only read and written from poll, which Run only ever
 	// calls from its own goroutine, so it needs no mutex.
 	pollFailing bool
+
+	// jobs is the dispatch queue. Nil disables submission, which is what a
+	// Server literal in a test gets unless it builds one.
+	jobs *jobs
+
+	// requests carries client submissions to Run's goroutine, which owns the
+	// job table's only writer besides a running job.
+	requests chan *protocol.Request
 }
 
 func New(cfg *config.Config, cmd fetch.Commander) *Server {
@@ -75,7 +83,7 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 		interval = defaultInterval
 	}
 	logger := log.New(os.Stderr, "vigil: ", log.LstdFlags)
-	return &Server{
+	srv := &Server{
 		Collector:  collect.New(cfg, cmd),
 		Interval:   interval,
 		SocketPath: protocol.SocketPath(),
@@ -88,7 +96,17 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 			Logf: logger.Printf,
 		},
 		inFlightEffects: make(map[string]struct{}),
+		requests:        make(chan *protocol.Request, queueDepth),
 	}
+	// The job table exists even when the commander cannot stream. It refuses
+	// every submission in that case, which is the point: a nil table left the
+	// request read off the wire and dropped with nothing registered, and a
+	// silent drop is the one outcome the whole refusal mechanism exists to
+	// eliminate - it is indistinguishable, from the client, from a daemon
+	// that never read the frame.
+	stream, _ := cmd.(fetch.StreamCommander)
+	srv.jobs = newJobs(cfg, stream, cmd, logger.Printf)
+	return srv
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -121,6 +139,14 @@ func (s *Server) Run(ctx context.Context) error {
 		s.accept(ctx, listener, incoming)
 	}()
 
+	if s.jobs != nil {
+		s.pendingEffects.Add(1)
+		go func() {
+			defer s.pendingEffects.Done()
+			s.jobs.work(ctx)
+		}()
+	}
+
 	ticker := time.NewTicker(s.Interval)
 	defer ticker.Stop()
 
@@ -135,7 +161,18 @@ func (s *Server) Run(ctx context.Context) error {
 			s.pendingEffects.Wait()
 			return nil
 		case conn := <-incoming:
-			s.addClient(conn)
+			s.addClient(ctx, conn)
+		case req := <-s.requests:
+			if s.jobs != nil {
+				s.jobs.submit(req)
+				// Immediately, not on the next tick. The submitting CLI waits
+				// to see its id in a snapshot, and on a cold daemon the next
+				// tick is behind a first poll that runs git and gh across
+				// every session - so a job that was already running was
+				// reported to the user as a daemon too old to have accepted
+				// it.
+				s.publishJobs(s.jobs.snapshot())
+			}
 		case <-ticker.C:
 			s.poll(ctx)
 		}
@@ -186,12 +223,26 @@ func (s *Server) accept(ctx context.Context, listener net.Listener, incoming cha
 }
 
 func (s *Server) poll(ctx context.Context) {
+	// Taken before the collector's error return: snapshot() prunes expired
+	// jobs as a side effect, and that pruning must not stall for as long as
+	// collection is failing.
+	var jobList []protocol.Job
+	if s.jobs != nil {
+		jobList = s.jobs.snapshot()
+	}
+
 	sessions, err := s.Collector.Snapshot(ctx)
 	if err != nil {
 		if !s.pollFailing {
 			s.pollFailing = true
 			s.logf("poll failed: %v", err)
 		}
+		// Publication belongs above this return for the same reason the
+		// pruning does. A failing collector says nothing about the jobs: with
+		// no snapshot going out, no panel shows a job line and every
+		// vigil dispatch times out unacknowledged for as long as collection
+		// is broken.
+		s.publishJobs(jobList)
 		return
 	}
 	if s.pollFailing {
@@ -202,6 +253,7 @@ func (s *Server) poll(ctx context.Context) {
 		Version:   protocol.Version,
 		Timestamp: time.Now().Unix(),
 		Sessions:  sessions,
+		Jobs:      jobList,
 	}
 
 	s.mu.Lock()
@@ -254,6 +306,39 @@ func (s *Server) poll(ctx context.Context) {
 	}
 }
 
+// publishJobs re-broadcasts the latest snapshot with jobs attached, off the
+// tick. Called when a submission is accepted and when a poll fails, the two
+// moments a job's state changes without a snapshot of its own.
+//
+// It never invents a snapshot. A frame with nil Sessions would blank every
+// client's table, which is a far worse outcome than a job line arriving one
+// tick late, so before the first successful poll this does nothing at all and
+// the submitting client waits.
+//
+// The timestamp is deliberately carried over rather than refreshed: it is
+// what the status bar's "daemon stale Ns" reads, and these sessions are
+// exactly as old as they were. Refreshing it would make a failing collector
+// look healthy.
+//
+// Run's goroutine is the only caller, which is what makes touching clients
+// (through broadcast) safe.
+func (s *Server) publishJobs(jobs []protocol.Job) {
+	s.mu.Lock()
+	latest := s.latest
+	s.mu.Unlock()
+	if latest == nil {
+		return
+	}
+	updated := *latest
+	updated.Jobs = jobs
+
+	s.mu.Lock()
+	s.latest = &updated
+	s.mu.Unlock()
+
+	s.broadcast(&updated)
+}
+
 // logf guards s.Log so a zero-valued Server built directly (e.g. in a test)
 // does not nil-panic when logging.
 func (s *Server) logf(format string, args ...any) {
@@ -266,7 +351,7 @@ func (s *Server) logf(format string, args ...any) {
 // is one. A client that connects before the first successful poll gets
 // nothing until the next one, and falls back to self-polling if that takes
 // too long.
-func (s *Server) addClient(conn net.Conn) {
+func (s *Server) addClient(ctx context.Context, conn net.Conn) {
 	c := newClient(conn)
 	s.clients = append(s.clients, c)
 	s.writers.Add(1)
@@ -274,6 +359,9 @@ func (s *Server) addClient(conn net.Conn) {
 		defer s.writers.Done()
 		c.writeLoop(s.logf)
 	}()
+	if s.requests != nil {
+		go c.readLoop(ctx, s.requests, s.logf)
+	}
 
 	s.mu.Lock()
 	latest := s.latest

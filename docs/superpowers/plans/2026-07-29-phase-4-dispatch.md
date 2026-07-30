@@ -533,9 +533,13 @@ func TestRunHookStreamMergesStderr(t *testing.T) {
 	}
 }
 
+// Note the hook body uses "$VIGIL_CLIENT", not "${VIGIL_CLIENT}". ExpandHook
+// treats every {...} as a template placeholder, so a braced shell expansion in
+// a hook body fails with "unknown placeholder" before it ever reaches sh. That
+// is a pre-existing property of hook templates, worth knowing when writing one.
 func TestRunHookStreamPassesEnv(t *testing.T) {
 	cfg := &Config{Hooks: map[string]any{
-		"dispatch": `printf '%s\n' "${VIGIL_CLIENT}"`,
+		"dispatch": `printf '%s\n' "$VIGIL_CLIENT"`,
 	}}
 	var got []string
 	err := cfg.RunHookStream(context.Background(), &fetch.ExecCommander{}, "dispatch",
@@ -690,12 +694,21 @@ func (c *Config) RunHookStream(
 Run: `go test ./internal/config/ -race -v`
 Expected: PASS, including every pre-existing test — `RunHook`'s contract must be unchanged.
 
-- [ ] **Step 6: Verify the shared-argv test is not vacuous**
+- [ ] **Step 6: Verify the sharing is real**
 
-In `hookArgv`, change `"exec 2>&1; "` to `""`.
+Two mutations, because they prove different things.
+
+**Mutation A — the stderr merge.** In `hookArgv`, change `"exec 2>&1; "` to `""`.
 Run: `go test ./internal/config/ -run 'StillTrimsAndMerges|RunHookStreamMergesStderr' -v`
-Expected: both FAIL — the stderr line is missing from each.
+Expected: `TestRunHookStillTrimsAndMergesAfterTheRefactor` FAILs. `TestRunHookStreamMergesStderr` **still passes**, and that is correct rather than a defect: `ExecCommander.RunStream` assigns the same pipe to both `Stdout` and `Stderr`, so the streaming path merges at the pipe regardless of what the shell does. The `exec 2>&1` is redundant for the streaming path and load-bearing for the buffered one; keeping one construction for both is what stops them drifting.
 Restore and confirm PASS.
+
+**Mutation B — the shared argv.** In `hookArgv`, delete the `if template == ""` branch that returns `&HookNotConfigured{}`.
+Run: `go test ./internal/config/`
+Expected: **both** `TestRunHookNoTemplateSkipsCommander` (the buffered path) and `TestRunHookStreamUnconfigured` (the streaming path) FAIL with `got <nil>, want *HookNotConfigured`. This is the mutation that proves both runners go through `hookArgv`: only `hookArgv` produces `HookNotConfigured`, and `TestRunHookStreamExpandsAndStreams` likewise can only pass if `RunHookStream` reaches `ExpandHook` through it. Verified against the real code, not predicted.
+Restore and confirm PASS.
+
+(`internal/action`'s `TestDispatch_NoHookConfigured` also fails under this mutation, and panics doing so. Ignore it: Task 8 deletes `action.Dispatch` and that test with it.)
 
 - [ ] **Step 7: Commit**
 
@@ -841,14 +854,17 @@ import (
 // blockingStream is a StreamCommander whose run does not return until released.
 // Used to observe a job mid-flight.
 type blockingStream struct {
-	mu       sync.Mutex
-	started  chan struct{}
-	release  chan struct{}
-	lines    []string
-	err      error
-	runs     int
-	maxAtOnce int
-	inFlight int
+	mu sync.Mutex
+	// ignoreContext makes a run outlive cancellation. Only the
+	// goroutine-unwind test sets it; a real job dies with the daemon.
+	ignoreContext bool
+	started       chan struct{}
+	release       chan struct{}
+	lines         []string
+	err           error
+	runs          int
+	maxAtOnce     int
+	inFlight      int
 }
 
 func newBlockingStream(lines ...string) *blockingStream {
@@ -868,16 +884,21 @@ func (b *blockingStream) RunStream(ctx context.Context, dir string, env []string
 	}
 	lines := append([]string(nil), b.lines...)
 	err := b.err
+	ignoreContext := b.ignoreContext
 	b.mu.Unlock()
 
 	b.started <- struct{}{}
 	for _, line := range lines {
 		onLine(line)
 	}
-	select {
-	case <-b.release:
-	case <-ctx.Done():
-		err = ctx.Err()
+	if ignoreContext {
+		<-b.release
+	} else {
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
 	}
 
 	b.mu.Lock()
@@ -930,9 +951,13 @@ func TestASubmittedJobIsQueuedThenRunsThenSucceeds(t *testing.T) {
 
 	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDispatch, ID: "a", Input: "sc-1"})
 
+	// The stored Status is stripped, not raw: setStatus is fed through
+	// statusLine, so the ">>> " prefix is gone by the time it reaches the job
+	// table. Stripping once in the daemon is deliberate - Status is broadcast
+	// to every client, and the alternative is every client re-stripping it.
 	running := waitForJobState(t, j, "a", protocol.JobRunning)
-	if running.Status != ">>> fetching story" {
-		t.Errorf("got status %q, want the streamed line", running.Status)
+	if running.Status != "fetching story" {
+		t.Errorf("got status %q, want the streamed line stripped of its prefix", running.Status)
 	}
 	close(stream.release)
 	done := waitForJobState(t, j, "a", protocol.JobSucceeded)
@@ -1493,14 +1518,43 @@ Append to `internal/daemon/client_test.go`:
 ```go
 // The writer stays the sole closer of the connection. A reader that hits EOF
 // must not close it out from under a writer mid-Encode.
+//
+// A real unix socket, not net.Pipe. net.Pipe has no half-close, so closing the
+// peer there ends both directions at once and the writer fails regardless of
+// what the reader did - which makes the test structurally unable to observe the
+// defect it is written for. CloseWrite gives the reader an EOF while the
+// writer's direction stays healthy, and that is the only state in which a
+// reader-side Close is distinguishable from correct behavior.
 func TestAReaderAtEOFDoesNotKillItsWriter(t *testing.T) {
-	server, peer := net.Pipe()
-	c := newClient(server)
+	path := filepath.Join(shortTempDir(t), "rw.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
 
-	logged := make(chan string, 4)
-	go c.writeLoop(func(format string, args ...any) {
-		logged <- fmt.Sprintf(format, args...)
-	})
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if conn, err := listener.Accept(); err == nil {
+			accepted <- conn
+		}
+	}()
+
+	peer, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = peer.Close() }()
+
+	var server net.Conn
+	select {
+	case server = <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the listener never accepted")
+	}
+
+	c := newClient(server)
+	go c.writeLoop(func(string, ...any) {})
 
 	requests := make(chan *protocol.Request, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1527,16 +1581,28 @@ func TestAReaderAtEOFDoesNotKillItsWriter(t *testing.T) {
 		t.Fatal("the reader never delivered the request")
 	}
 
-	// net.Pipe has no half-close, so drive the reader to EOF by closing the
-	// peer, then assert the writer reports the failure itself rather than
-	// panicking on a connection someone else closed.
-	_ = peer.Close()
+	// Half-close: the reader sees EOF while the writer's direction is untouched.
+	if err := peer.(*net.UnixConn).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
 	select {
 	case <-readerDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the reader did not exit on EOF")
 	}
-	c.queue(&protocol.Snapshot{Version: protocol.Version})
+
+	// This is the assertion the mutation kills. If readLoop closed the
+	// connection on its way out, this Encode fails and nothing arrives.
+	c.queue(&protocol.Snapshot{Version: protocol.Version, Timestamp: 1})
+	_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+	snap, err := protocol.NewDecoder(peer).Next()
+	if err != nil {
+		t.Fatalf("the writer could not deliver after the reader hit EOF: %v", err)
+	}
+	if snap.Timestamp != 1 {
+		t.Errorf("got %+v, want the queued snapshot", snap)
+	}
+
 	c.stop()
 	select {
 	case <-c.done:
@@ -1549,15 +1615,21 @@ func TestAReaderAtEOFDoesNotKillItsWriter(t *testing.T) {
 Append to `internal/daemon/daemon_test.go`:
 
 ```go
-func TestASubmittedRequestBecomesAJobInTheNextSnapshot(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+// Task 5's deliverable is that a request reaches the job queue, so this asserts
+// against the queue directly rather than over the wire. The end-to-end version -
+// the job appearing in a broadcast Snapshot - belongs to Task 6, which is what
+// populates Snapshot.Jobs; asserting it here would make this task's acceptance
+// depend on the next task's deliverable.
+func TestASubmittedRequestReachesTheJobQueue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sockDir := shortTempDir(t)
 	stream := newBlockingStream()
 	srv := &Server{
 		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
 		Interval:   10 * time.Millisecond,
-		SocketPath: filepath.Join(dir, "vigild.sock"),
+		SocketPath: filepath.Join(sockDir, "vigild.sock"),
 		Log:        log.New(io.Discard, "", 0),
+		requests:   make(chan *protocol.Request, queueDepth),
 	}
 	srv.jobs = newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), srv.logf)
 
@@ -1576,32 +1648,33 @@ func TestASubmittedRequestBecomesAJobInTheNextSnapshot(t *testing.T) {
 		t.Fatalf("EncodeRequest: %v", err)
 	}
 
-	dec := protocol.NewDecoder(conn)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		snap, err := dec.Next()
-		if err != nil {
-			continue
-		}
-		if findJob(snap.Jobs, "job-1") != nil {
+		if findJob(srv.jobs.snapshot(), "job-1") != nil {
+			close(stream.release)
 			cancel()
 			<-runDone
 			return
 		}
+		time.Sleep(2 * time.Millisecond)
 	}
+	close(stream.release)
 	cancel()
 	<-runDone
-	t.Fatal("the job never appeared in a snapshot")
+	t.Fatal("the request never reached the job queue")
 }
 ```
 
-If `testConfig` and `dialWhenReady` helpers do not already exist in `daemon_test.go`, read the file and reuse whatever it already uses to build a `Server` and wait for its socket. Do not add a second way to do the same thing.
+Three details this test depends on, all learned the hard way:
+
+- **`shortTempDir`, not `t.TempDir()`, for the socket path.** `daemon_test.go:30` has that helper because macOS caps a unix socket path at 104 bytes (`sun_path`) and `t.TempDir()` blows past it.
+- **The `Server` literal must set `requests`.** Without it, `addClient` never starts a reader and the request is never read at all.
+- `testConfig` and `dialWhenReady` are real helpers in `daemon_test.go`. Reuse them; do not add a second way to build a server or wait for its socket.
 
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `go test ./internal/daemon/ -run 'ReaderAtEOF|SubmittedRequest' -v`
-Expected: FAIL — `c.readLoop undefined`, `srv.jobs undefined`.
+Expected: FAIL to build — `c.readLoop undefined`, `srv.jobs undefined`, `srv.requests undefined`.
 
 - [ ] **Step 3: Add the reader**
 
@@ -1700,9 +1773,11 @@ Expected: PASS, including every pre-existing daemon test.
 - [ ] **Step 6: Verify the sole-closer rule is load-bearing**
 
 In `readLoop`, add `defer func() { _ = c.conn.Close() }()` at the top.
-Run: `go test ./internal/daemon/ -race -count=5`
-Expected: FAIL or a race report on the write path, because two goroutines now close and use the same connection.
+Run: `go test ./internal/daemon/ -race -count=5 -run ReaderAtEOF`
+Expected: FAIL at "the writer could not deliver after the reader hit EOF" — the reader closed the connection, so the writer's `Encode` has nothing to write to.
 Remove it and confirm PASS.
+
+This mutation is the whole point of the task, so if it does **not** fail, do not move on: it means the test is not exercising the overlap and the coverage is the finding. An earlier draft of this test used `net.Pipe`, which has no half-close, and could not fail under this mutation for that reason.
 
 - [ ] **Step 7: Commit**
 
@@ -1740,13 +1815,17 @@ The load-bearing one: polling must not stall while a job runs. Append to `intern
 // executed there would freeze every panel's snapshot stream for the length of
 // a dispatch - 60s or more for a real one.
 func TestPollingContinuesWhileAJobIsRunning(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	// Two directories, not one. HOME can be a t.TempDir, but the socket path
+	// cannot: macOS caps sun_path at 104 bytes and t.TempDir() exceeds it, so a
+	// shared directory makes this fail for the wrong reason - the socket is
+	// never available, rather than Jobs never being populated.
+	t.Setenv("HOME", t.TempDir())
+	sockDir := shortTempDir(t)
 	stream := newBlockingStream()
 	srv := &Server{
 		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
 		Interval:   10 * time.Millisecond,
-		SocketPath: filepath.Join(dir, "vigild.sock"),
+		SocketPath: filepath.Join(sockDir, "vigild.sock"),
 		Log:        log.New(io.Discard, "", 0),
 		requests:   make(chan *protocol.Request, queueDepth),
 	}
@@ -1802,16 +1881,25 @@ func TestPollingContinuesWhileAJobIsRunning(t *testing.T) {
 	}
 }
 
-// Run must not return while a job is still executing, the same way it already
-// waits on pendingEffects.
-func TestRunWaitsForAnInFlightJob(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+// Run must not return while a job goroutine is still unwinding, the same way
+// it already waits on pendingEffects.
+//
+// Note what this does NOT assert. Cancelling the daemon's context kills the
+// job: RunStream uses exec.CommandContext with that same context, and the spec
+// is explicit that "the job dies with the daemon". So this uses a stream that
+// ignores cancellation, because the invariant under test is goroutine hygiene -
+// Run does not return while a goroutine that writes the job table is still
+// live - not job survival, which is not a property this design claims.
+func TestRunWaitsForAJobGoroutineToUnwind(t *testing.T) {
+	// Separate directories, for the sun_path reason above.
+	t.Setenv("HOME", t.TempDir())
+	sockDir := shortTempDir(t)
 	stream := newBlockingStream()
+	stream.ignoreContext = true
 	srv := &Server{
 		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
 		Interval:   10 * time.Millisecond,
-		SocketPath: filepath.Join(dir, "vigild.sock"),
+		SocketPath: filepath.Join(sockDir, "vigild.sock"),
 		Log:        log.New(io.Discard, "", 0),
 		requests:   make(chan *protocol.Request, queueDepth),
 	}
@@ -1870,7 +1958,9 @@ In `poll`, build the snapshot with jobs:
 
 `s.jobs.snapshot()` already returns a copy taken under the job mutex, which is what makes this safe to marshal while a job goroutine writes `Status`.
 
-The `work` goroutine registered in Task 5 is already tracked by `pendingEffects`, so `Run`'s existing `s.pendingEffects.Wait()` covers `TestRunWaitsForAnInFlightJob` — but `work` returns on `ctx.Done()` without waiting for the job it is inside. Fix by making `run` complete before `work` observes cancellation: `work`'s `j.run(ctx, id)` is synchronous, so `work` cannot return mid-job. Confirm by reading `work`; if the select can be taken while `run` is executing, it cannot, because `run` is called from the same goroutine.
+The `work` goroutine registered in Task 5 is already tracked by `pendingEffects`, so `Run`'s existing `s.pendingEffects.Wait()` is what `TestRunWaitsForAJobGoroutineToUnwind` exercises. `work` calls `j.run(ctx, id)` synchronously on its own goroutine, so it cannot take its `ctx.Done()` branch while a job is executing — the wait therefore covers an in-flight job's goroutine. Confirm that by reading `work` rather than assuming it.
+
+What the wait does **not** do is keep the job alive: `RunStream` uses `exec.CommandContext` with the same context, so cancelling the daemon kills the child. That is the spec's stated behavior ("the job dies with the daemon"), not a defect, which is why the test uses a stream that ignores cancellation to isolate the goroutine-hygiene question from the job-survival one.
 
 - [ ] **Step 4: Run to verify they pass**
 
@@ -2279,6 +2369,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/jzinkduda/vigil/internal/protocol"
@@ -2310,7 +2401,7 @@ type Options struct {
 // Validate rejects input before it reaches the daemon, so a malformed
 // submission never becomes a job at all.
 func Validate(input string) error {
-	trimmed := trimSpace(input)
+	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
 		return errors.New("dispatch input must not be empty")
 	}
@@ -2329,7 +2420,7 @@ func Submit(ctx context.Context, opts Options) (*protocol.Job, error) {
 	if err := Validate(opts.Input); err != nil {
 		return nil, err
 	}
-	input := trimSpace(opts.Input)
+	input := strings.TrimSpace(opts.Input)
 
 	id, err := newID()
 	if err != nil {
@@ -2419,7 +2510,7 @@ func newID() (string, error) {
 }
 ```
 
-Add a `trimSpace` helper or use `strings.TrimSpace` directly and import `"strings"`. Use `strings.TrimSpace`; the placeholder above exists only to keep the import list explicit.
+Note `Validate` trims before measuring length, so a 500-character input padded with spaces is accepted rather than refused on its padding.
 
 - [ ] **Step 6: Run to verify they pass**
 
@@ -2435,14 +2526,7 @@ In `parseArgs`, add before `default`:
 		return "dispatch", args[1:], nil
 ```
 
-In `run`, add to the second switch:
-
-```go
-	case "dispatch":
-		return runDispatch(rest, stdout, stderr)
-```
-
-Note this sits **after** the `tmux`/`git`/`gh` `LookPath` check and after `config.Load`, unlike `config get`: a dispatch genuinely needs all three, and a missing dependency is worth reporting before a job is queued. `run`'s current shape returns an `error` from the mode switch; `runDispatch` returns an int, so put its case in the same switch as `config` (the early one) only if you also move the dependency check — do not. Instead add it to the later switch and adapt:
+The `dispatch` case goes in the **later** switch — the one that assigns `err`, after the `tmux`/`git`/`gh` `LookPath` check and after `config.Load`. That placement is the point: unlike `config get`, a dispatch genuinely needs all three binaries, and a missing dependency is worth reporting before a job is queued rather than after.
 
 ```go
 	switch command {
@@ -2653,6 +2737,22 @@ func TestRenderJobLinePrefersAFailureOverAQueuedJob(t *testing.T) {
 		t.Errorf("got %q, want the failure reason", got)
 	}
 }
+
+// JobRefused was added during Task 7: an accepted job that fails at runtime and
+// a submission the daemon never accepted are different things, and conflating
+// them made `vigil dispatch` exit non-zero for work it had actually started.
+// The distinction is real on the wire, but it is not a distinction a glance at a
+// panel needs - both are "this did not happen, here is why" - so it renders the
+// same as a failure and outranks a queued job the same way.
+func TestRenderJobLineTreatsARefusalLikeAFailure(t *testing.T) {
+	got := RenderJobLine([]protocol.Job{
+		{ID: "a", Input: "sc-1", State: protocol.JobRefused, Status: "duplicate of an in-flight dispatch"},
+		{ID: "b", Input: "sc-2", State: protocol.JobQueued},
+	}, 80)
+	if !strings.Contains(got, "duplicate of an in-flight dispatch") {
+		t.Errorf("got %q, want the refusal reason", got)
+	}
+}
 ```
 
 Use whatever width helper the package already has (`lipgloss.Width`, or the existing `TruncateVisible`'s companion) rather than inventing `lipglossWidth` — read `internal/view/layout.go:139` and `internal/view/table.go` first and reuse.
@@ -2702,7 +2802,7 @@ func RenderJobLine(jobs []protocol.Job, width int) string {
 
 	marker, colour := "⚡", BrightCyan
 	switch lead.State {
-	case protocol.JobFailed:
+	case protocol.JobFailed, protocol.JobRefused:
 		marker, colour = "✗", BrightRed
 	case protocol.JobSucceeded:
 		marker, colour = "✓", BrightGreen
@@ -2720,7 +2820,9 @@ func RenderJobLine(jobs []protocol.Job, width int) string {
 }
 
 func pickJob(jobs []protocol.Job) *protocol.Job {
-	for _, state := range []string{protocol.JobFailed, protocol.JobRunning, protocol.JobSucceeded, protocol.JobQueued} {
+	// Refused ranks with failed: both are "this did not happen", and both are
+	// the only states the user has to act on.
+	for _, state := range []string{protocol.JobRefused, protocol.JobFailed, protocol.JobRunning, protocol.JobSucceeded, protocol.JobQueued} {
 		for i := range jobs {
 			if jobs[i].State == state {
 				return &jobs[i]

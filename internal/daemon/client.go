@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -14,10 +15,13 @@ import (
 // reconnects.
 const writeTimeout = 5 * time.Second
 
-// client owns one connection's writes. Exactly one goroutine (writeLoop) ever
-// writes to the connection, and the queue holds at most one pending snapshot,
-// so a client that reads slowly gets the newest state rather than a backlog
-// and can never stall the poll loop that queues for it.
+// client owns one connection's writes and, since dispatch, reads. Exactly one
+// goroutine (writeLoop) ever writes to the connection or closes it, and the
+// queue holds at most one pending snapshot, so a client that reads slowly
+// gets the newest state rather than a backlog and can never stall the poll
+// loop that queues for it. A second goroutine (readLoop) reads Request frames
+// from the same connection but never closes it, so a reader at EOF cannot
+// pull the socket out from under a writer mid-Encode.
 type client struct {
 	conn net.Conn
 	ch   chan *protocol.Snapshot
@@ -66,6 +70,37 @@ func (c *client) gone() bool {
 
 // stop ends the writer once it has drained whatever is already queued.
 func (c *client) stop() { close(c.ch) }
+
+// readLoop consumes Request frames from this client until the connection ends.
+// It never closes the connection: writeLoop is the sole closer, so a reader at
+// EOF cannot pull the socket out from under a writer mid-Encode.
+//
+// A malformed frame does not end the loop: the line was already off the wire,
+// so the connection is still good, and silently dropping the client's ability
+// to dispatch - while it keeps receiving snapshots and looks perfectly healthy
+// - is the same failure shape jobs.submit's own refusal-registers-a-reason
+// comment exists to avoid. Only a bare decode error (the transport itself is
+// gone) ends the loop.
+func (c *client) readLoop(ctx context.Context, requests chan<- *protocol.Request, logf func(string, ...any)) {
+	dec := protocol.NewRequestDecoder(c.conn)
+	for {
+		req, err := dec.Next()
+		if err != nil {
+			if errors.Is(err, protocol.ErrMalformedRequest) {
+				logf("dropping malformed request frame: %v", err)
+				continue
+			}
+			return
+		}
+		select {
+		case requests <- req:
+		case <-ctx.Done():
+			return
+		case <-c.done:
+			return
+		}
+	}
+}
 
 func (c *client) writeLoop(logf func(string, ...any)) {
 	defer close(c.done)

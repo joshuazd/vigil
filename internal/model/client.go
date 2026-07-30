@@ -2,11 +2,8 @@ package model
 
 import (
 	"context"
+	"errors"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -142,48 +139,34 @@ func listenDaemonCmd(
 			return DaemonLostMsg{Epoch: epoch}
 		}
 		annotateClientFlags(ctx, cmd, snap.Sessions, fallbackCurrent)
-		return SnapshotMsg{Sessions: snap.Sessions, Epoch: epoch}
+		return SnapshotMsg{Sessions: snap.Sessions, Jobs: snap.Jobs, Epoch: epoch}
 	}
 }
 
-// daemonSpawner is the indirection tests replace; production always uses
-// spawnDaemon.
-var daemonSpawner = spawnDaemon
+// daemonSpawner starts a detached daemon process. Written only through
+// SetDaemonSpawner and read only through spawnDaemon.
+//
+// The seam is closed rather than conventional. Under `go test`,
+// os.Executable() is the test binary, so a test that reached the real spawner
+// forked the whole suite as a subprocess - which reached the same code and
+// forked again. That was live-reproduced as 800 processes, and a comment
+// asking tests not to do it is thin cover for that. This package no longer
+// imports internal/daemon at all, so the real spawner is not nameable from
+// here or from any test in this package; main wires it in at startup. A test
+// installs its own stub, which is the point, but it cannot install the one
+// that forks without adding an import that would be conspicuous in review.
+var daemonSpawner func() error
 
-// spawnDaemon starts `vigil daemon` detached from this process, so it outlives
-// the pane that started it. Its output goes to a log file beside the socket:
-// the daemon is silent when healthy, and when it is not, that log is the only
-// place the reason survives.
+// SetDaemonSpawner installs the process spawner. Called once from main,
+// before the program starts.
+func SetDaemonSpawner(fn func() error) { daemonSpawner = fn }
+
+// spawnDaemon is every caller's entry point. Unset means no daemon can be
+// started - the state every test runs in, and a state a caller is told about
+// rather than left to wonder at.
 func spawnDaemon() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
+	if daemonSpawner == nil {
+		return errors.New("no daemon spawner is configured")
 	}
-	logPath := filepath.Join(filepath.Dir(protocol.SocketPath()), "vigild.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		return err
-	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = logFile.Close() }()
-
-	cmd := exec.Command(exe, "daemon")
-	// Not the panel's cwd: that is a git worktree, and git-worktree-done
-	// removes those routinely, leaving a long-lived daemon holding a deleted
-	// directory.
-	cmd.Dir = "/"
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	// Setsid detaches it from this pane's process group, so closing the pane
-	// or the tmux session does not take the daemon with it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	// Reap it if it exits, rather than leaving a zombie for the life of a
-	// long-running panel.
-	go func() { _ = cmd.Wait() }()
-	return nil
+	return daemonSpawner()
 }

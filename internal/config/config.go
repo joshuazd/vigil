@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +42,7 @@ var settingDefaults = map[string]settingDef{
 	"auto_cleanup":          {"VIGIL_AUTO_CLEANUP", "false"},
 	"auto_focus":            {"VIGIL_AUTO_FOCUS", "true"},
 	"panel_auto":            {"VIGIL_PANEL_AUTO", "true"},
+	"dispatch_timeout":      {"VIGIL_DISPATCH_TIMEOUT", "300"},
 }
 
 var hookDefaults = map[string]string{
@@ -155,13 +157,26 @@ func ExpandHook(template string, vars map[string]string) (string, error) {
 	return result, nil
 }
 
-// RunHook expands and executes a hook command. Returns stdout.
-func (c *Config) RunHook(ctx context.Context, cmd fetch.Commander, name string, vars map[string]string, cwd string, timeout time.Duration) (string, error) {
+// hookArgv builds the argv both hook runners use. Shared so the two cannot
+// drift on quoting or on the stderr merge, which MergePR depends on: it
+// searches hook output for "merged", and gh writes that to stderr. `exec 2>&1;`
+// redirects the whole script regardless of its structure, unlike appending
+// " 2>&1" to the command, which would only redirect its last clause.
+func (c *Config) hookArgv(name string, vars map[string]string) ([]string, error) {
 	template := c.GetHook(name)
 	if template == "" {
-		return "", &HookNotConfigured{Name: name}
+		return nil, &HookNotConfigured{Name: name}
 	}
 	cmdStr, err := ExpandHook(template, vars)
+	if err != nil {
+		return nil, err
+	}
+	return []string{"sh", "-c", "exec 2>&1; " + cmdStr}, nil
+}
+
+// RunHook expands and executes a hook command. Returns stdout.
+func (c *Config) RunHook(ctx context.Context, cmd fetch.Commander, name string, vars map[string]string, cwd string, timeout time.Duration) (string, error) {
+	argv, err := c.hookArgv(name, vars)
 	if err != nil {
 		return "", err
 	}
@@ -170,16 +185,48 @@ func (c *Config) RunHook(ctx context.Context, cmd fetch.Commander, name string, 
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	// stderr is load-bearing here: MergePR searches this output for "merged"
-	// to recover from `gh pr merge --delete-branch` exiting 1 after a
-	// successful merge, and gh writes that text to stderr. `exec 2>&1;`
-	// redirects the whole script regardless of its structure (unlike
-	// appending " 2>&1" to cmdStr, which would only redirect its last clause).
-	out, err := cmd.Run(ctx, cwd, "sh", "-c", "exec 2>&1; "+cmdStr)
+	out, err := cmd.Run(ctx, cwd, argv[0], argv[1:]...)
 	if err != nil {
 		return strings.TrimSpace(out), fmt.Errorf("hook %s failed: %w (output: %s)", name, err, strings.TrimSpace(out))
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// RunHookStream runs a hook and delivers its output a line at a time. Used by
+// the daemon's job runner, where a dispatch takes long enough that its last
+// line is the only progress a user gets.
+//
+// onLine is called from RunStream's scanner goroutine, not this one.
+func (c *Config) RunHookStream(
+	ctx context.Context,
+	sc fetch.StreamCommander,
+	name string,
+	vars map[string]string,
+	cwd string,
+	env []string,
+	timeout time.Duration,
+	onLine func(string),
+) error {
+	argv, err := c.hookArgv(name, vars)
+	if err != nil {
+		return err
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	err = sc.RunStream(ctx, cwd, env, argv[0], argv[1:], onLine)
+	// The deadline is authoritative; the child's exit status is not. A killed
+	// hook reports "signal: killed", which is indistinguishable from any other
+	// signal, so a caller that branched on the exit error could never tell a
+	// timeout from a crash - and reported the job's last stale progress line
+	// as the reason. This asks the context that imposed the deadline whether
+	// it actually expired.
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("hook %s: %w", name, context.DeadlineExceeded)
+	}
+	return err
 }
 
 // shellQuote wraps a string in single quotes for safe shell usage.
