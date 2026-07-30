@@ -1518,14 +1518,43 @@ Append to `internal/daemon/client_test.go`:
 ```go
 // The writer stays the sole closer of the connection. A reader that hits EOF
 // must not close it out from under a writer mid-Encode.
+//
+// A real unix socket, not net.Pipe. net.Pipe has no half-close, so closing the
+// peer there ends both directions at once and the writer fails regardless of
+// what the reader did - which makes the test structurally unable to observe the
+// defect it is written for. CloseWrite gives the reader an EOF while the
+// writer's direction stays healthy, and that is the only state in which a
+// reader-side Close is distinguishable from correct behavior.
 func TestAReaderAtEOFDoesNotKillItsWriter(t *testing.T) {
-	server, peer := net.Pipe()
-	c := newClient(server)
+	path := filepath.Join(shortTempDir(t), "rw.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
 
-	logged := make(chan string, 4)
-	go c.writeLoop(func(format string, args ...any) {
-		logged <- fmt.Sprintf(format, args...)
-	})
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if conn, err := listener.Accept(); err == nil {
+			accepted <- conn
+		}
+	}()
+
+	peer, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = peer.Close() }()
+
+	var server net.Conn
+	select {
+	case server = <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the listener never accepted")
+	}
+
+	c := newClient(server)
+	go c.writeLoop(func(string, ...any) {})
 
 	requests := make(chan *protocol.Request, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1552,16 +1581,28 @@ func TestAReaderAtEOFDoesNotKillItsWriter(t *testing.T) {
 		t.Fatal("the reader never delivered the request")
 	}
 
-	// net.Pipe has no half-close, so drive the reader to EOF by closing the
-	// peer, then assert the writer reports the failure itself rather than
-	// panicking on a connection someone else closed.
-	_ = peer.Close()
+	// Half-close: the reader sees EOF while the writer's direction is untouched.
+	if err := peer.(*net.UnixConn).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
 	select {
 	case <-readerDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the reader did not exit on EOF")
 	}
-	c.queue(&protocol.Snapshot{Version: protocol.Version})
+
+	// This is the assertion the mutation kills. If readLoop closed the
+	// connection on its way out, this Encode fails and nothing arrives.
+	c.queue(&protocol.Snapshot{Version: protocol.Version, Timestamp: 1})
+	_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+	snap, err := protocol.NewDecoder(peer).Next()
+	if err != nil {
+		t.Fatalf("the writer could not deliver after the reader hit EOF: %v", err)
+	}
+	if snap.Timestamp != 1 {
+		t.Errorf("got %+v, want the queued snapshot", snap)
+	}
+
 	c.stop()
 	select {
 	case <-c.done:
@@ -1574,15 +1615,21 @@ func TestAReaderAtEOFDoesNotKillItsWriter(t *testing.T) {
 Append to `internal/daemon/daemon_test.go`:
 
 ```go
-func TestASubmittedRequestBecomesAJobInTheNextSnapshot(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+// Task 5's deliverable is that a request reaches the job queue, so this asserts
+// against the queue directly rather than over the wire. The end-to-end version -
+// the job appearing in a broadcast Snapshot - belongs to Task 6, which is what
+// populates Snapshot.Jobs; asserting it here would make this task's acceptance
+// depend on the next task's deliverable.
+func TestASubmittedRequestReachesTheJobQueue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sockDir := shortTempDir(t)
 	stream := newBlockingStream()
 	srv := &Server{
 		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
 		Interval:   10 * time.Millisecond,
-		SocketPath: filepath.Join(dir, "vigild.sock"),
+		SocketPath: filepath.Join(sockDir, "vigild.sock"),
 		Log:        log.New(io.Discard, "", 0),
+		requests:   make(chan *protocol.Request, queueDepth),
 	}
 	srv.jobs = newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), srv.logf)
 
@@ -1601,32 +1648,33 @@ func TestASubmittedRequestBecomesAJobInTheNextSnapshot(t *testing.T) {
 		t.Fatalf("EncodeRequest: %v", err)
 	}
 
-	dec := protocol.NewDecoder(conn)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		snap, err := dec.Next()
-		if err != nil {
-			continue
-		}
-		if findJob(snap.Jobs, "job-1") != nil {
+		if findJob(srv.jobs.snapshot(), "job-1") != nil {
+			close(stream.release)
 			cancel()
 			<-runDone
 			return
 		}
+		time.Sleep(2 * time.Millisecond)
 	}
+	close(stream.release)
 	cancel()
 	<-runDone
-	t.Fatal("the job never appeared in a snapshot")
+	t.Fatal("the request never reached the job queue")
 }
 ```
 
-If `testConfig` and `dialWhenReady` helpers do not already exist in `daemon_test.go`, read the file and reuse whatever it already uses to build a `Server` and wait for its socket. Do not add a second way to do the same thing.
+Three details this test depends on, all learned the hard way:
+
+- **`shortTempDir`, not `t.TempDir()`, for the socket path.** `daemon_test.go:30` has that helper because macOS caps a unix socket path at 104 bytes (`sun_path`) and `t.TempDir()` blows past it.
+- **The `Server` literal must set `requests`.** Without it, `addClient` never starts a reader and the request is never read at all.
+- `testConfig` and `dialWhenReady` are real helpers in `daemon_test.go`. Reuse them; do not add a second way to build a server or wait for its socket.
 
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `go test ./internal/daemon/ -run 'ReaderAtEOF|SubmittedRequest' -v`
-Expected: FAIL — `c.readLoop undefined`, `srv.jobs undefined`.
+Expected: FAIL to build — `c.readLoop undefined`, `srv.jobs undefined`, `srv.requests undefined`.
 
 - [ ] **Step 3: Add the reader**
 
@@ -1725,9 +1773,11 @@ Expected: PASS, including every pre-existing daemon test.
 - [ ] **Step 6: Verify the sole-closer rule is load-bearing**
 
 In `readLoop`, add `defer func() { _ = c.conn.Close() }()` at the top.
-Run: `go test ./internal/daemon/ -race -count=5`
-Expected: FAIL or a race report on the write path, because two goroutines now close and use the same connection.
+Run: `go test ./internal/daemon/ -race -count=5 -run ReaderAtEOF`
+Expected: FAIL at "the writer could not deliver after the reader hit EOF" — the reader closed the connection, so the writer's `Encode` has nothing to write to.
 Remove it and confirm PASS.
+
+This mutation is the whole point of the task, so if it does **not** fail, do not move on: it means the test is not exercising the overlap and the coverage is the finding. An earlier draft of this test used `net.Pipe`, which has no half-close, and could not fail under this mutation for that reason.
 
 - [ ] **Step 7: Commit**
 
