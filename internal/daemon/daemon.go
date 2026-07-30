@@ -300,7 +300,7 @@ func (s *Server) addClient(ctx context.Context, conn net.Conn) {
 		c.writeLoop(s.logf)
 	}()
 	if s.requests != nil {
-		go c.readLoop(ctx, s.requests)
+		go c.readLoop(ctx, s.requests, s.logf)
 	}
 
 	s.mu.Lock()

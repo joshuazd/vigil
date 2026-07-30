@@ -163,6 +163,20 @@ func TestRequestDecoderReturnsEOFWhenExhausted(t *testing.T) {
 	}
 }
 
+// A malformed line is distinguishable from a dead transport: the line was
+// already off the wire, so the caller can call Next again on the same
+// decoder rather than treating the connection as gone.
+func TestRequestDecoderDistinguishesAMalformedLineFromEOF(t *testing.T) {
+	d := NewRequestDecoder(strings.NewReader("not json\n"))
+	_, err := d.Next()
+	if !errors.Is(err, ErrMalformedRequest) {
+		t.Errorf("got %v, want ErrMalformedRequest", err)
+	}
+	if errors.Is(err, io.EOF) {
+		t.Errorf("got %v, want it distinguishable from io.EOF", err)
+	}
+}
+
 func TestSnapshotCarriesJobs(t *testing.T) {
 	var buf bytes.Buffer
 	snap := &Snapshot{

@@ -436,6 +436,11 @@ func testConfig() *config.Config {
 // the job appearing in a broadcast Snapshot - belongs to Task 6, which is what
 // populates Snapshot.Jobs; asserting it here would make this task's acceptance
 // depend on the next task's deliverable.
+// Waits for JobRunning, not merely "present": JobQueued satisfies
+// findJob != nil whether or not the worker goroutine (Run's
+// s.jobs.work(ctx)) ever started, so a test that stops at "queued" cannot
+// catch that goroutine regressing away. Only JobRunning proves work() picked
+// the job up and jobs.run actually executed.
 func TestASubmittedRequestReachesTheJobQueue(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	sockDir := shortTempDir(t)
@@ -450,9 +455,13 @@ func TestASubmittedRequestReachesTheJobQueue(t *testing.T) {
 	srv.jobs = newJobs(testJobsConfig(), stream, fetch.NewMockCommander(), srv.logf)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	runDone := make(chan error, 1)
 	go func() { runDone <- srv.Run(ctx) }()
+	t.Cleanup(func() {
+		close(stream.release)
+		cancel()
+		<-runDone
+	})
 
 	conn := dialWhenReady(t, srv.SocketPath)
 	defer func() { _ = conn.Close() }()
@@ -464,18 +473,5 @@ func TestASubmittedRequestReachesTheJobQueue(t *testing.T) {
 		t.Fatalf("EncodeRequest: %v", err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if findJob(srv.jobs.snapshot(), "job-1") != nil {
-			close(stream.release)
-			cancel()
-			<-runDone
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	close(stream.release)
-	cancel()
-	<-runDone
-	t.Fatal("the request never reached the job queue")
+	waitForJobState(t, srv.jobs, "job-1", protocol.JobRunning)
 }

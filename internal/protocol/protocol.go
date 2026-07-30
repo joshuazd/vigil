@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -32,6 +33,12 @@ const (
 )
 
 var ErrVersionMismatch = errors.New("protocol version mismatch")
+
+// ErrMalformedRequest wraps a Request decode failure that is recoverable: the
+// line was already scanned off the wire, so the connection itself is still
+// healthy and the caller can keep reading. Only a plain (unwrapped) error from
+// Next means the transport is gone.
+var ErrMalformedRequest = errors.New("malformed request frame")
 
 func SocketPath() string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
@@ -135,6 +142,11 @@ func NewRequestDecoder(r io.Reader) *RequestDecoder {
 // Next deliberately does not check Version. An unrecognized version has to
 // reach the daemon so it can answer with a failed job naming the reason;
 // refusing here would be indistinguishable from a daemon that never read.
+//
+// A json.Unmarshal failure is wrapped in ErrMalformedRequest: the line was
+// already scanned off the wire, so the connection is still good and a caller
+// can call Next again. A scan failure (or EOF) is returned bare, because that
+// means the transport itself is gone.
 func (d *RequestDecoder) Next() (*Request, error) {
 	if !d.scanner.Scan() {
 		if err := d.scanner.Err(); err != nil {
@@ -144,7 +156,7 @@ func (d *RequestDecoder) Next() (*Request, error) {
 	}
 	var req Request
 	if err := json.Unmarshal(d.scanner.Bytes(), &req); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrMalformedRequest, err)
 	}
 	return &req, nil
 }

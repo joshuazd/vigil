@@ -74,11 +74,22 @@ func (c *client) stop() { close(c.ch) }
 // readLoop consumes Request frames from this client until the connection ends.
 // It never closes the connection: writeLoop is the sole closer, so a reader at
 // EOF cannot pull the socket out from under a writer mid-Encode.
-func (c *client) readLoop(ctx context.Context, requests chan<- *protocol.Request) {
+//
+// A malformed frame does not end the loop: the line was already off the wire,
+// so the connection is still good, and silently dropping the client's ability
+// to dispatch - while it keeps receiving snapshots and looks perfectly healthy
+// - is the same failure shape jobs.submit's own refusal-registers-a-reason
+// comment exists to avoid. Only a bare decode error (the transport itself is
+// gone) ends the loop.
+func (c *client) readLoop(ctx context.Context, requests chan<- *protocol.Request, logf func(string, ...any)) {
 	dec := protocol.NewRequestDecoder(c.conn)
 	for {
 		req, err := dec.Next()
 		if err != nil {
+			if errors.Is(err, protocol.ErrMalformedRequest) {
+				logf("dropping malformed request frame: %v", err)
+				continue
+			}
 			return
 		}
 		select {

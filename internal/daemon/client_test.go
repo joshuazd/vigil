@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -313,7 +314,7 @@ func TestAReaderAtEOFDoesNotKillItsWriter(t *testing.T) {
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
-		c.readLoop(ctx, requests)
+		c.readLoop(ctx, requests, func(string, ...any) {})
 	}()
 
 	// A request, then a half-close of the peer's write side, which is what
@@ -359,5 +360,48 @@ func TestAReaderAtEOFDoesNotKillItsWriter(t *testing.T) {
 	case <-c.done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the writer did not exit")
+	}
+}
+
+// A malformed frame does not end the connection: the line was already off the
+// wire, so it is logged and dropped, and the reader keeps consuming whatever
+// follows it on the same connection. Silently dropping the connection's
+// ability to dispatch here would be the same failure shape jobs.submit's own
+// refusal-registers-a-reason comment exists to avoid.
+func TestReadLoopSkipsAMalformedFrameAndKeepsReading(t *testing.T) {
+	server, peer := net.Pipe()
+	c := newClient(server)
+
+	requests := make(chan *protocol.Request, 1)
+	logged := make(chan string, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.readLoop(ctx, requests, func(format string, args ...any) {
+		logged <- fmt.Sprintf(format, args...)
+	})
+
+	go func() {
+		_, _ = peer.Write([]byte("not json\n"))
+		_ = protocol.EncodeRequest(peer, &protocol.Request{
+			Version: protocol.Version, Type: protocol.RequestDispatch, ID: "b", Input: "sc-2",
+		})
+	}()
+
+	select {
+	case msg := <-logged:
+		if !strings.Contains(msg, "malformed") {
+			t.Errorf("got log %q, want it to mention the malformed frame", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no log line for the malformed frame")
+	}
+
+	select {
+	case got := <-requests:
+		if got.ID != "b" {
+			t.Errorf("got %+v, want the request that followed the malformed line", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reader never delivered the request after the malformed line")
 	}
 }
