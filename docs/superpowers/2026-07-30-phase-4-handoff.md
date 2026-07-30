@@ -77,10 +77,40 @@ placeholder, so a braced shell expansion fails before reaching `sh`. Use `$VAR`.
 
 ## Verification status
 
-**Nothing here has been verified on a real machine.** The branch is green - `go test -race`
-13/13 packages, `golangci-lint` 0 issues, 89/89 bats - and has been through a task review per
-task, eleven fix rounds, a whole-branch review and a scoped re-review of its fix wave. None
-of that is the same as having run a dispatch.
+Merged on 2026-07-30 (`352b254` here, the phase 4 merge in `~/dotfiles`), installed, and the
+daemon restarted onto the new binary. The hook was migrated, with the previous config backed
+up beside it as `config.toml.pre-phase4.*`.
+
+Three checks were run against real binaries on isolated servers. **A real story has not been
+dispatched yet**, so the teleport, the job line in a live panel, and a real worktree at the
+right size remain unobserved.
+
+- [x] **A dispatched session is sized against `VIGIL_CLIENT`.** Throwaway tmux server, a real
+      client at 350x90 attached through a pty, `create_tmux_session` called with no client of
+      its own. With `VIGIL_CLIENT` set: **window 350x90, panel pane 40x90** - the configured
+      absolute width. Genuinely headless, every client detached and no `VIGIL_CLIENT`:
+      **window 80x24, panel pane 40x24**, i.e. half the window, which is precisely the
+      proportional-rescale precondition that produced ~175 columns in phase 3. The fix does
+      what it claims, and the old failure is still there in the case it was always in.
+- [x] **The daemon shuts down promptly with a job in flight.** Isolated `HOME` and
+      `XDG_RUNTIME_DIR`, a hook that deliberately backgrounds a long-lived grandchild, SIGTERM
+      two seconds in: **the daemon exited in 0.02 s** and unlinked its socket, and the log
+      shows the process group kill reaping the grandchild (`45518 Killed: 9 sleep 300`).
+      Before the fix this is the case that hung forever and left a daemon that could never be
+      restarted.
+- [x] **`vigil dispatch` submits end to end against a real daemon.** Exit 0,
+      `dispatch queued: verify-shutdown`, the job ran, and its failure was reported with the
+      real reason from the hook.
+
+The developer's tmux server, sessions and daemon were left alone throughout; every check ran
+under its own `TMUX_TMPDIR`, and cleanup killed only PIDs the harness itself started.
+
+**Not yet verified, and the reason it matters:** the plan's Task 11 exists because **the bats
+tmux stub returns a constant `pane_width` and cannot observe real geometry**, a blind spot
+that hid phase 3's 175-column defect through seven per-task reviews. The isolated check above
+covers the sizing arithmetic. What it does not cover is a real dispatch: the teleport landing
+in the new session's `claude` window, the job line updating in a live panel, and
+`tmux show-environment` confirming `VIGIL_CLIENT` did not leak into the new session.
 
 The plan's Task 11 exists precisely because **the bats tmux stub returns a constant
 `pane_width` and cannot observe real geometry**. That blind spot hid phase 3's 175-column

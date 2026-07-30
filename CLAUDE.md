@@ -5,18 +5,30 @@ TUI dashboard for tmux sessions. Monitors git status and GitHub PR state across 
 ## In-flight design work
 
 An approved 6-phase design is turning the session list into the primary surface, with
-sessions expanded next to it. **Phases 0, 1, 2 and 3 are merged.** Phase 2's three blockers
-landed as `31721d4`. Phase 3 landed on 2026-07-29 as `a785fb1` here and `fefeeb1` in
-`~/dotfiles`; it spanned **two repositories** and neither half works without the other, so
-a change to one usually needs the other. The branches were `phase-3-panel` in both.
+sessions expanded next to it. **Phases 0, 1, 2, 3 and 4 are merged.** Phase 2's three
+blockers landed as `31721d4`. Phase 3 landed 2026-07-29 as `a785fb1` here and `fefeeb1` in
+`~/dotfiles`. Phase 4 landed 2026-07-30 as `352b254` here and the phase 4 merge in
+`~/dotfiles`. Both spanned **two repositories** and neither half works without the other, so
+a change to one usually needs the other.
 
-**Phase 4 is next: `vigil dispatch <url-or-id>`, submitting a job to the daemon.** The
-parent design says not to plan it until phase 3 has been lived on, and phase 3 has been
-merged for as long as you have been reading this - so live on it first. Phase 3 is the
-phase that makes N attached panels normal, which is the condition phase 4 inherits.
+Separately, **asserted effect ownership** landed as `b8afd82`, ahead of phase 4 and on
+purpose: a cold dispatch was the named trigger for the `firstSnapshotTimeout` loop, so phase
+4 would have inherited and widened the race it is now built on top of.
+
+**Phase 5 is next: the work queue.** `vigild` also polls assigned Shortcut stories and
+review-requested PRs; both vigil and the menu bar present a pickable list, and selecting an
+item dispatches it. The same rule as before applies - live on phase 4 first. Phase 4 is the
+phase that makes the daemon run jobs, which is the condition phase 5 inherits.
+
+**Start here: `docs/superpowers/2026-07-30-phase-4-handoff.md`.** It records what phase 4
+verified, what it did **not** (no real story has been dispatched yet), and the landmines -
+including `ExecCommander.Run`, the non-streaming path used by the `notify` and `cleanup`
+hooks, which still has the grandchild-holds-the-pipe defect that phase 4 fixed in
+`RunStream`. A hook that backgrounds a process wedges the daemon permanently; shipped
+defaults do not, which is the only reason it was left.
 
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
-`internal/view`'s layout, or the launch path in `~/dotfiles`:
+`internal/dispatch`, `internal/view`'s layout, or the launch path in `~/dotfiles`:
 
 - `docs/superpowers/2026-07-29-phase-3-handoff.md` - current state, what phase 3 changed,
   the verification results and what they do NOT prove, the deferred list and the landmines.
@@ -62,8 +74,9 @@ Go + Bubble Tea TUI. Single static binary.
 - `internal/cache/` — JSON session cache for instant startup
 - `internal/collect/` - UI-independent session state collection (shared by the daemon and the TUI's self-polling fallback)
 - `internal/transition/` - state-change detection (`Detector`) and the side effects a change triggers (`Runner`: the `notify` hook and `auto_cleanup`). The two halves have different owners: `Detector` is shared, because every client renders its own toasts and detection must not be implemented twice, while `Runner` is constructed only by the daemon. Effect ownership is **asserted, not inferred** - see the "Key Conventions" bullet
-- `internal/protocol/` - newline-delimited JSON snapshot protocol over a unix socket
-- `internal/daemon/` - `vigil daemon`: runs one `Snapshot` per tick at `tmux_interval` (default 1s) so tmux metadata (including bell flags) is never more than a tick stale; git state is gated inside `Snapshot` on `git_interval` (default 3s) and PR state per branch on `pr_interval` (default 30s), each via its own memo. Startup serializes on an flock'd lock file beside the socket (`vigild.sock.lock`), held across the stale-socket removal and the bind, so racing daemons cannot both bind. Every client gets its own writer goroutine and a one-deep latest-wins queue, so a client that stops reading can neither stall the poll loop nor block new connections. `New` wires a `transition.Detector` and a `transition.Runner` (nil disables both, which is what a `Server` literal in a test gets); effects run in one goroutine per event because `poll` is synchronous per tick, and `Run` waits on `pendingEffects` before returning
+- `internal/protocol/` - newline-delimited JSON over a unix socket, **bidirectional since phase 4**. The daemon writes `Snapshot`, clients write `Request`; direction alone disambiguates them, so there is no envelope. `Version` stays **1** because `Snapshot.Jobs` is additive - an old panel ignores the key, a new one sees nil against an old daemon. `RequestDecoder.Next` deliberately does not reject an unknown version: the daemon has to see such a request to answer with a refused job, and a drop at the decoder is indistinguishable from a daemon that never read
+- `internal/dispatch/` - the submission client behind `vigil dispatch` and the `d` key. Validates input, generates a job id, dials (spawning a daemon and retrying if none answers), writes one `Request`, and waits for its id to appear in a snapshot. **The snapshot is the ack**; there is no response frame, which is what makes a refusal visible in every panel rather than only to the CLI. Does not import `internal/daemon` - `Options.Spawn` is a func field so `main` does the wiring
+- `internal/daemon/` - `vigil daemon`: runs one `Snapshot` per tick at `tmux_interval` (default 1s) so tmux metadata (including bell flags) is never more than a tick stale; git state is gated inside `Snapshot` on `git_interval` (default 3s) and PR state per branch on `pr_interval` (default 30s), each via its own memo. Startup serializes on an flock'd lock file beside the socket (`vigild.sock.lock`), held across the stale-socket removal and the bind, so racing daemons cannot both bind. Every client gets its own writer goroutine and a one-deep latest-wins queue, so a client that stops reading can neither stall the poll loop nor block new connections. `New` wires a `transition.Detector` and a `transition.Runner` (nil disables both, which is what a `Server` literal in a test gets); effects run in one goroutine per event because `poll` is synchronous per tick, and `Run` waits on `pendingEffects` before returning. **Phase 4 added a job runner**: one reader goroutine per connection accepts `Request` frames, and a serialized queue runs one dispatch at a time, because two concurrent `git worktree add` calls in one repository contend on the index lock. Jobs run on their own goroutine - `poll` is synchronous per tick, so a job run there would freeze every panel's stream for the length of a dispatch. `Snapshot.Jobs` is built from a copy taken under the job mutex, since a running job writes `Status` while poll marshals. The **writer stays the sole closer** of a connection: a reader that closed it could pull the socket from under a writer mid-`Encode`
 - `vigil --panel` - the same `Model` with `panelMode` set: compact status bar, width-responsive table, no detail panel and no footer. Since phase 3 a panel is also created for every new tmux session, so this is the common way vigil runs, not the rare one. Spawning is no longer a panel-only behaviour: **every mode starts a daemon if none is running** - panel, dashboard and the `prefix v` popup, which is the dashboard model - at startup and on every failed reconnect probe, because the daemon is the only process that runs transition side effects and a dashboard-only user with `panel_auto = false` would otherwise never see the `notify` hook fire
 
 ## Testing
@@ -100,6 +113,10 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - Stale branch warnings when rebase age exceeds threshold
 - Draft toggle (`D`) with batch support
 - Auto-cleanup merged sessions (configurable via `auto_cleanup` setting, off by default). Safe to enable with any number of panels open: only the daemon runs it. Verified on a real machine on 2026-07-29, before asserted ownership landed, under the weaker guarantee of the time: with two panels attached, four sessions reaching `Done` produced four hook invocations rather than eight; an unattached session's worktree was removed and a session with a client attached survived. That measurement is still valid but no longer the binding argument - the client has no code path that could produce the eight
+- **`vigil dispatch` exits 0 on acceptance, not success.** The job outlives the CLI, which is the point. A refusal - duplicate input, unknown request version or type, empty input, full queue - is registered as a job in state `JobRefused`, never silently dropped, because the submitting client waits for its id to appear in a snapshot and a drop is indistinguishable from a daemon that never read the frame. `JobRefused` is distinct from `JobFailed` on purpose: refused means never accepted, failed means accepted, ran and lost. Conflating them made the CLI exit non-zero for work the daemon had actually started
+- **`VIGIL_CLIENT` is how a daemon-run job learns which tmux client to act on.** The daemon has no tty, so it resolves the most recently active client per job and exports it into the hook's environment. The shell side uses it for three things: the switch target, the new window's size, and the panel orientation. It is an environment variable rather than a flag because the alternative threads a parameter through five levels, one of which re-quotes into a command string with `printf '%q'` and runs it through `bash -c`. Verified 2026-07-30 on an isolated server: with it, a session comes out 350x90 with a 40-column panel; genuinely headless, 80x24 with a panel at half the window, which is the ~175-column balloon's precondition
+- **A hook's grandchildren can hold its output pipe.** `exec.CommandContext` kills only the direct child, so `cmd.Wait` blocks until every descendant closes the inherited fd. `ExecCommander.RunStream` therefore uses a process group, a `Cancel` that signals the group, and a `WaitDelay` backstop. Without it a hung dispatch was unbounded, blocked every later job, and left `Run` waiting on `pendingEffects` forever - a daemon that never exits, never releases its flock and never unlinks its socket, after which **no daemon can start again at all**. `ExecCommander.Run`, the non-streaming path used by `notify` and `cleanup`, still has this shape; shipped hook defaults do not background anything, which is the only reason it was left
+- **The `dispatch` hook must be `DISPATCH_INLINE=1 dispatch --non-interactive {input}`.** `--detached` skips the teleport, and without `DISPATCH_INLINE` a client-less daemon tries `tmux display-popup`, which has nothing to draw on. `vigil` warns at startup when the configured hook still looks like the old one. Note also that **no hook body may contain `${VAR}`**: `ExpandHook` reads every `{...}` as a placeholder, so a braced shell expansion fails before reaching `sh`. Use `$VAR`
 - Cache interop with previous Python version (same JSON format)
 - The TUI dials the daemon socket on startup and consumes its broadcast snapshots when reachable; it falls back to self-polling if the daemon is never reached, does not send a first snapshot within a bounded wait, or is lost mid-session
 - Both paths are permanently supported and must **render** identically: git/PR data, sort order, toasts. They no longer behave identically in effects, and that is the point - the self-polling path runs none, so a `notify` hook is a claim about a daemon being up, not about a client having seen a transition. The one exception to "the `notify` hook fires once per real transition" survives inside the daemon: a repeat `Done` arriving while that session's cleanup is still in flight is skipped along with its hook (measured at 5 invocations for 7 transitions with the first effect blocked; toasts were 7 of 7 on both paths, and still are)
