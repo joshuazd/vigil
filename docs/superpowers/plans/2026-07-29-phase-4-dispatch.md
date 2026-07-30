@@ -841,14 +841,17 @@ import (
 // blockingStream is a StreamCommander whose run does not return until released.
 // Used to observe a job mid-flight.
 type blockingStream struct {
-	mu       sync.Mutex
-	started  chan struct{}
-	release  chan struct{}
-	lines    []string
-	err      error
-	runs     int
-	maxAtOnce int
-	inFlight int
+	mu sync.Mutex
+	// ignoreContext makes a run outlive cancellation. Only the
+	// goroutine-unwind test sets it; a real job dies with the daemon.
+	ignoreContext bool
+	started       chan struct{}
+	release       chan struct{}
+	lines         []string
+	err           error
+	runs          int
+	maxAtOnce     int
+	inFlight      int
 }
 
 func newBlockingStream(lines ...string) *blockingStream {
@@ -868,16 +871,21 @@ func (b *blockingStream) RunStream(ctx context.Context, dir string, env []string
 	}
 	lines := append([]string(nil), b.lines...)
 	err := b.err
+	ignoreContext := b.ignoreContext
 	b.mu.Unlock()
 
 	b.started <- struct{}{}
 	for _, line := range lines {
 		onLine(line)
 	}
-	select {
-	case <-b.release:
-	case <-ctx.Done():
-		err = ctx.Err()
+	if ignoreContext {
+		<-b.release
+	} else {
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
 	}
 
 	b.mu.Lock()
@@ -1802,12 +1810,20 @@ func TestPollingContinuesWhileAJobIsRunning(t *testing.T) {
 	}
 }
 
-// Run must not return while a job is still executing, the same way it already
-// waits on pendingEffects.
-func TestRunWaitsForAnInFlightJob(t *testing.T) {
+// Run must not return while a job goroutine is still unwinding, the same way
+// it already waits on pendingEffects.
+//
+// Note what this does NOT assert. Cancelling the daemon's context kills the
+// job: RunStream uses exec.CommandContext with that same context, and the spec
+// is explicit that "the job dies with the daemon". So this uses a stream that
+// ignores cancellation, because the invariant under test is goroutine hygiene -
+// Run does not return while a goroutine that writes the job table is still
+// live - not job survival, which is not a property this design claims.
+func TestRunWaitsForAJobGoroutineToUnwind(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	stream := newBlockingStream()
+	stream.ignoreContext = true
 	srv := &Server{
 		Collector:  collect.New(testConfig(), fetch.NewMockCommander()),
 		Interval:   10 * time.Millisecond,
@@ -1870,7 +1886,9 @@ In `poll`, build the snapshot with jobs:
 
 `s.jobs.snapshot()` already returns a copy taken under the job mutex, which is what makes this safe to marshal while a job goroutine writes `Status`.
 
-The `work` goroutine registered in Task 5 is already tracked by `pendingEffects`, so `Run`'s existing `s.pendingEffects.Wait()` covers `TestRunWaitsForAnInFlightJob` — but `work` returns on `ctx.Done()` without waiting for the job it is inside. Fix by making `run` complete before `work` observes cancellation: `work`'s `j.run(ctx, id)` is synchronous, so `work` cannot return mid-job. Confirm by reading `work`; if the select can be taken while `run` is executing, it cannot, because `run` is called from the same goroutine.
+The `work` goroutine registered in Task 5 is already tracked by `pendingEffects`, so `Run`'s existing `s.pendingEffects.Wait()` is what `TestRunWaitsForAJobGoroutineToUnwind` exercises. `work` calls `j.run(ctx, id)` synchronously on its own goroutine, so it cannot take its `ctx.Done()` branch while a job is executing — the wait therefore covers an in-flight job's goroutine. Confirm that by reading `work` rather than assuming it.
+
+What the wait does **not** do is keep the job alive: `RunStream` uses `exec.CommandContext` with the same context, so cancelling the daemon kills the child. That is the spec's stated behavior ("the job dies with the daemon"), not a defect, which is why the test uses a stream that ignores cancellation to isolate the goroutine-hygiene question from the job-survival one.
 
 - [ ] **Step 4: Run to verify they pass**
 
@@ -2279,6 +2297,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/jzinkduda/vigil/internal/protocol"
@@ -2310,7 +2329,7 @@ type Options struct {
 // Validate rejects input before it reaches the daemon, so a malformed
 // submission never becomes a job at all.
 func Validate(input string) error {
-	trimmed := trimSpace(input)
+	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
 		return errors.New("dispatch input must not be empty")
 	}
@@ -2329,7 +2348,7 @@ func Submit(ctx context.Context, opts Options) (*protocol.Job, error) {
 	if err := Validate(opts.Input); err != nil {
 		return nil, err
 	}
-	input := trimSpace(opts.Input)
+	input := strings.TrimSpace(opts.Input)
 
 	id, err := newID()
 	if err != nil {
@@ -2419,7 +2438,7 @@ func newID() (string, error) {
 }
 ```
 
-Add a `trimSpace` helper or use `strings.TrimSpace` directly and import `"strings"`. Use `strings.TrimSpace`; the placeholder above exists only to keep the import list explicit.
+Note `Validate` trims before measuring length, so a 500-character input padded with spaces is accepted rather than refused on its padding.
 
 - [ ] **Step 6: Run to verify they pass**
 
@@ -2435,14 +2454,7 @@ In `parseArgs`, add before `default`:
 		return "dispatch", args[1:], nil
 ```
 
-In `run`, add to the second switch:
-
-```go
-	case "dispatch":
-		return runDispatch(rest, stdout, stderr)
-```
-
-Note this sits **after** the `tmux`/`git`/`gh` `LookPath` check and after `config.Load`, unlike `config get`: a dispatch genuinely needs all three, and a missing dependency is worth reporting before a job is queued. `run`'s current shape returns an `error` from the mode switch; `runDispatch` returns an int, so put its case in the same switch as `config` (the early one) only if you also move the dependency check — do not. Instead add it to the later switch and adapt:
+The `dispatch` case goes in the **later** switch — the one that assigns `err`, after the `tmux`/`git`/`gh` `LookPath` check and after `config.Load`. That placement is the point: unlike `config get`, a dispatch genuinely needs all three binaries, and a missing dependency is worth reporting before a job is queued rather than after.
 
 ```go
 	switch command {
