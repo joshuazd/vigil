@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -120,6 +121,13 @@ type Model struct {
 	daemonDecoder *protocol.Decoder
 	daemonReady   bool
 
+	// daemonWriteMu serializes client-to-daemon writes. net.Conn is safe for
+	// concurrent read and write, but two concurrent writes can interleave into
+	// one malformed frame - which the daemon tolerates and drops, so the
+	// dismiss would silently not happen. A pointer, so the value copies Bubble
+	// Tea makes all share one.
+	daemonWriteMu *sync.Mutex
+
 	// lastSnapshot is when the most recent daemon snapshot was applied. A
 	// daemon that is connected but silent is invisible without it.
 	lastSnapshot time.Time
@@ -228,6 +236,7 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 
 		dispatchInput: ti,
 		help:          help.New(),
+		daemonWriteMu: &sync.Mutex{},
 	}
 
 	// Load the cache synchronously, on both the daemon and self-polling
@@ -725,6 +734,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dispatchActive = false
 			return m, nil
 		}
+		if m.daemonConn != nil && m.hasDismissableJob() {
+			return m, dismissJobsCmd(m.daemonConn, m.daemonWriteMu)
+		}
 		m.cancel()
 		return m, tea.Quit
 	}
@@ -1166,6 +1178,15 @@ func (m Model) daemonHealth() string {
 	return ""
 }
 
+func (m Model) hasDismissableJob() bool {
+	for _, j := range m.jobs {
+		if j.State == protocol.JobFailed || j.State == protocol.JobRefused {
+			return true
+		}
+	}
+	return false
+}
+
 // staleAfter is how long a connected daemon may stay silent before the status
 // bar says so: three poll cycles, never less than 5s.
 func (m Model) staleAfter() time.Duration {
@@ -1336,6 +1357,27 @@ func dispatchCwd(ctx context.Context, cmd fetch.Commander, gitRoot string) strin
 		return ""
 	}
 	return cwd
+}
+
+// dismissJobsCmd asks the daemon to clear its terminal jobs. It goes out on
+// the client's existing connection - the daemon's per-connection reader takes
+// requests from the same socket it writes snapshots to - so there is no dial,
+// no daemon spawn and no ack to wait for. The job vanishing from the next
+// snapshot is the ack.
+func dismissJobsCmd(conn net.Conn, mu *sync.Mutex) tea.Cmd {
+	return func() tea.Msg {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
+		if err := protocol.EncodeRequest(conn, &protocol.Request{
+			Version: protocol.Version,
+			Type:    protocol.RequestDismiss,
+		}); err != nil {
+			return ActionResultMsg{Action: "dismiss", OK: false, Message: err.Error()}
+		}
+		return nil
+	}
 }
 
 // --- Batch commands ---
