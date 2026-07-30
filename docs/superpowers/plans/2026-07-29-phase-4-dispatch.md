@@ -2737,6 +2737,22 @@ func TestRenderJobLinePrefersAFailureOverAQueuedJob(t *testing.T) {
 		t.Errorf("got %q, want the failure reason", got)
 	}
 }
+
+// JobRefused was added during Task 7: an accepted job that fails at runtime and
+// a submission the daemon never accepted are different things, and conflating
+// them made `vigil dispatch` exit non-zero for work it had actually started.
+// The distinction is real on the wire, but it is not a distinction a glance at a
+// panel needs - both are "this did not happen, here is why" - so it renders the
+// same as a failure and outranks a queued job the same way.
+func TestRenderJobLineTreatsARefusalLikeAFailure(t *testing.T) {
+	got := RenderJobLine([]protocol.Job{
+		{ID: "a", Input: "sc-1", State: protocol.JobRefused, Status: "duplicate of an in-flight dispatch"},
+		{ID: "b", Input: "sc-2", State: protocol.JobQueued},
+	}, 80)
+	if !strings.Contains(got, "duplicate of an in-flight dispatch") {
+		t.Errorf("got %q, want the refusal reason", got)
+	}
+}
 ```
 
 Use whatever width helper the package already has (`lipgloss.Width`, or the existing `TruncateVisible`'s companion) rather than inventing `lipglossWidth` — read `internal/view/layout.go:139` and `internal/view/table.go` first and reuse.
@@ -2786,7 +2802,7 @@ func RenderJobLine(jobs []protocol.Job, width int) string {
 
 	marker, colour := "⚡", BrightCyan
 	switch lead.State {
-	case protocol.JobFailed:
+	case protocol.JobFailed, protocol.JobRefused:
 		marker, colour = "✗", BrightRed
 	case protocol.JobSucceeded:
 		marker, colour = "✓", BrightGreen
@@ -2804,7 +2820,9 @@ func RenderJobLine(jobs []protocol.Job, width int) string {
 }
 
 func pickJob(jobs []protocol.Job) *protocol.Job {
-	for _, state := range []string{protocol.JobFailed, protocol.JobRunning, protocol.JobSucceeded, protocol.JobQueued} {
+	// Refused ranks with failed: both are "this did not happen", and both are
+	// the only states the user has to act on.
+	for _, state := range []string{protocol.JobRefused, protocol.JobFailed, protocol.JobRunning, protocol.JobSucceeded, protocol.JobQueued} {
 		for i := range jobs {
 			if jobs[i].State == state {
 				return &jobs[i]
