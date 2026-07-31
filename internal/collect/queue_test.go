@@ -150,6 +150,23 @@ func TestQueueDisabledConstructsNoPollers(t *testing.T) {
 	}
 }
 
+func sortTestCommander() *fetch.MockCommander {
+	cmd := fetch.NewMockCommander()
+	// Two stories and two reviews with UpdatedAt values interleaved across kinds.
+	// Story B is newest among stories but second-newest overall.
+	// Review C is newest overall. Story A is oldest. Review D is second-oldest.
+	// Correct order (Kind, then UpdatedAt descending): B, A, C, D.
+	cmd.On("gh", `[{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
+		"updatedAt":"2026-07-31T20:00:00Z","url":"https://github.com/huntresslabs/portal/pull/34967"},
+		{"number":34966,"repository":{"name":"portal"},"title":"Date picker",
+		"updatedAt":"2026-07-31T14:00:00Z","url":"https://github.com/huntresslabs/portal/pull/34966"}]`, nil)
+	cmd.On("short", `{"data":[{"id":223480,"name":"Backfill audit rows",
+		"app_url":"https://app.shortcut.com/huntress/story/223480","updated_at":"2026-07-31T16:00:00Z"},
+		{"id":223479,"name":"Add caching","app_url":"https://app.shortcut.com/huntress/story/223479",
+		"updated_at":"2026-07-31T08:00:00Z"}]}`, nil)
+	return cmd
+}
+
 func seededCollector(t *testing.T) *Collector {
 	t.Helper()
 	c := New(&config.Config{}, queueCommander())
@@ -167,8 +184,33 @@ func TestQueueReturnsBothKinds(t *testing.T) {
 	if hidden != 0 {
 		t.Errorf("hidden = %d, want 0", hidden)
 	}
-	if items[0].Kind != session.QueueStory {
-		t.Errorf("items[0].Kind = %q, want story: stories sort before reviews", items[0].Kind)
+}
+
+// TestQueueSortsByKindThenUpdatedAt verifies sort order: stories first, then by
+// UpdatedAt descending. With interleaved timestamps across kinds, a broken
+// Kind branch or a missing UpdatedAt comparator produces a visibly different
+// sequence.
+func TestQueueSortsByKindThenUpdatedAt(t *testing.T) {
+	cmd := sortTestCommander()
+	c := New(&config.Config{}, cmd)
+	c.RefreshRemote(context.Background())
+
+	items, hidden := c.Queue(nil)
+	if hidden != 0 {
+		t.Errorf("hidden = %d, want 0", hidden)
+	}
+
+	// Expected order: story 223480 (B, 16:00), story 223479 (A, 08:00),
+	// review 34967 (C, 20:00), review 34966 (D, 14:00).
+	// A broken Kind branch (sorts purely by UpdatedAt) gives: 34967, 223480, 34966, 223479.
+	expected := []string{"sc-223480", "sc-223479", "portal#34967", "portal#34966"}
+	if len(items) != len(expected) {
+		t.Fatalf("got %d items, want %d", len(items), len(expected))
+	}
+	for i, exp := range expected {
+		if items[i].Label() != exp {
+			t.Errorf("items[%d].Label() = %q, want %q", i, items[i].Label(), exp)
+		}
 	}
 }
 
@@ -214,12 +256,18 @@ func TestQueueHidesReviewsByPRNumber(t *testing.T) {
 }
 
 func TestQueueAppliesTheLimit(t *testing.T) {
-	c := seededCollector(t)
+	cmd := sortTestCommander()
+	c := New(&config.Config{}, cmd)
+	c.RefreshRemote(context.Background())
 	c.QueueLimit = 1
 
 	items, _ := c.Queue(nil)
 	if len(items) != 1 {
 		t.Errorf("got %d items, want 1", len(items))
+	}
+	// The first item after sorting must be story 223480, not any other item.
+	if items[0].Label() != "sc-223480" {
+		t.Errorf("items[0].Label() = %q, want sc-223480 (the first after sorting)", items[0].Label())
 	}
 }
 
