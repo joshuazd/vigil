@@ -37,7 +37,7 @@ type remote struct {
 	pollers []poller
 	wakes   []chan struct{}
 	wg      sync.WaitGroup
-	started bool
+	once    sync.Once
 }
 
 func newRemote(pollers ...poller) *remote {
@@ -50,27 +50,28 @@ func newRemote(pollers ...poller) *remote {
 
 // start is idempotent rather than fatal on a second call: a client that loses
 // and regains a daemon can reach it more than once, and a second set of
-// workers would double the fetch rate for one collector.
+// workers would double the fetch rate for one collector. sync.Once, not a
+// bool: that path is reachable from more than one goroutine, and an
+// unsynchronized bool would race both the read/write on itself and
+// r.wg.Add(1) against a concurrent wait.
 func (r *remote) start(ctx context.Context) {
-	if r.started {
-		return
-	}
-	r.started = true
-	for i, p := range r.pollers {
-		p, wake := p, r.wakes[i]
-		r.wg.Add(1)
-		go func() {
-			defer r.wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-wake:
+	r.once.Do(func() {
+		for i, p := range r.pollers {
+			p, wake := p, r.wakes[i]
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-wake:
+					}
+					p.pass(ctx)
 				}
-				p.pass(ctx)
-			}
-		}()
-	}
+			}()
+		}
+	})
 }
 
 func (r *remote) wait() { r.wg.Wait() }
@@ -109,7 +110,6 @@ func (r *remote) refresh(ctx context.Context) {
 // It reads its interval and its clock through the Collector rather than
 // copying them, because Collector.PRInterval and Collector.clock are the knobs
 // New and the tests already treat as the single source of truth.
-//nolint:unused // wired into Snapshot in task 2b; unused until then
 type prPoller struct {
 	c *Collector
 
@@ -119,31 +119,32 @@ type prPoller struct {
 	// mu is not.
 	passMu sync.Mutex
 
-	// mu guards entries and working, and is held only for the map work at
-	// either end of a pass.
+	// mu guards entries, working and gen, and is held only for the map work
+	// at either end of a pass.
 	mu      sync.Mutex
 	entries map[string]prEntry
 	working []branchKey
+
+	// gen counts invalidations. A pass reads it alongside the working set
+	// and compares again at write-back: if it moved, an invalidate landed
+	// while the fetch was in flight and the fetch's answer may predate it.
+	gen uint64
 }
 
-//nolint:unused // wired into Snapshot in task 2b; unused until then
 type prEntry struct {
 	pr        *session.PRStatus
 	fetchedAt time.Time
 }
 
-//nolint:unused // wired into Snapshot in task 2b; unused until then
 type branchKey struct {
 	key, branch, gitRoot string
 }
 
-//nolint:unused // wired into Snapshot in task 2b; unused until then
 type dueBranch struct {
 	branchKey
 	pr *session.PRStatus
 }
 
-//nolint:unused // wired into Snapshot in task 2b; unused until then
 func newPRPoller(c *Collector) *prPoller {
 	return &prPoller{c: c, entries: make(map[string]prEntry)}
 }
@@ -151,8 +152,6 @@ func newPRPoller(c *Collector) *prPoller {
 // track posts the working set. Latest wins: a pass prunes its store to
 // whatever the most recent Snapshot saw, which is where the old per-Snapshot
 // memo rebuild went.
-//
-//nolint:unused // wired into Snapshot in task 2b; unused until then
 func (p *prPoller) track(branches []*branchRoot) {
 	working := make([]branchKey, 0, len(branches))
 	for _, br := range branches {
@@ -167,8 +166,6 @@ func (p *prPoller) track(branches []*branchRoot) {
 // has never been resolved, which is a different thing from a branch known to
 // have no PR, and transition.Detect treats them differently - so the
 // distinction has to survive onto the session.
-//
-//nolint:unused // wired into Snapshot in task 2b; unused until then
 func (p *prPoller) fill(branches []*branchRoot) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -188,18 +185,16 @@ func (p *prPoller) fill(branches []*branchRoot) {
 // the entries would re-mark every branch pending, and Detect skips a pending
 // session, so a forced refresh would swallow the next transition it was asked
 // to go and find.
-//
-//nolint:unused // wired into Snapshot in task 2b; unused until then
 func (p *prPoller) invalidate() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.gen++
 	for k, e := range p.entries {
 		e.fetchedAt = time.Time{}
 		p.entries[k] = e
 	}
 }
 
-//nolint:unused // wired into Snapshot in task 2b; unused until then
 func (p *prPoller) pass(ctx context.Context) {
 	p.passMu.Lock()
 	defer p.passMu.Unlock()
@@ -208,6 +203,7 @@ func (p *prPoller) pass(ctx context.Context) {
 	interval := p.c.PRInterval
 
 	p.mu.Lock()
+	startGen := p.gen
 	var due []*dueBranch
 	for _, bk := range p.working {
 		if prev, ok := p.entries[bk.key]; ok && now.Sub(prev.fetchedAt) < interval {
@@ -217,20 +213,20 @@ func (p *prPoller) pass(ctx context.Context) {
 	}
 	p.mu.Unlock()
 
-	if len(due) == 0 {
-		return
+	if len(due) > 0 {
+		runParallel(due, prWorkers, func(d *dueBranch) {
+			d.pr = fetch.FetchPRStatus(ctx, p.c.Cmd, d.branch, d.gitRoot)
+		})
 	}
-
-	runParallel(due, prWorkers, func(d *dueBranch) {
-		d.pr = fetch.FetchPRStatus(ctx, p.c.Cmd, d.branch, d.gitRoot)
-	})
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	// Prune to the working set as it stands now, not as it stood when the
 	// fetch started: a branch that vanished mid-fetch must not survive, and
-	// its result must not be written back.
+	// its result must not be written back. This runs even when nothing was
+	// due, or a branch dropped between two passes that both found nothing
+	// else to do would linger in entries indefinitely.
 	live := make(map[string]struct{}, len(p.working))
 	for _, bk := range p.working {
 		live[bk.key] = struct{}{}
@@ -241,6 +237,11 @@ func (p *prPoller) pass(ctx context.Context) {
 			next[key] = e
 		}
 	}
+
+	// If gen moved, an invalidate landed after this pass read the working
+	// set: this fetch's answer may predate it, so its entries stay due
+	// rather than being satisfied by a stale one.
+	invalidated := p.gen != startGen
 	for _, d := range due {
 		if _, ok := live[d.key]; !ok {
 			continue
@@ -254,7 +255,11 @@ func (p *prPoller) pass(ctx context.Context) {
 				pr = prev.pr
 			}
 		}
-		next[d.key] = prEntry{pr: pr, fetchedAt: now}
+		fetchedAt := now
+		if invalidated {
+			fetchedAt = time.Time{}
+		}
+		next[d.key] = prEntry{pr: pr, fetchedAt: fetchedAt}
 	}
 	p.entries = next
 }
