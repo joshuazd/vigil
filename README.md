@@ -120,7 +120,7 @@ Hook bodies must not contain `${VAR}`. A braced shell expansion collides with th
 | `queue_enabled` | `true` | Poll for assigned stories and review-requested PRs. `false` constructs no pollers at all. |
 | `queue_pr_query` | `review-requested:@me -is:draft` | Passed to `gh search prs` after `--`, split on whitespace. A qualifier containing a space is not supported. |
 | `queue_pr_age_days` | `14` | Appended as `updated:>=<date>`, recomputed each poll. GitHub search has no relative dates, which is why this is a separate setting rather than part of the query. `0` disables the window. |
-| `queue_story_query` | `owner:%self% !is:done !is:archived` | Passed to `short api /search/stories?query=`. Names no workflow state on purpose: state names are workspace-specific. |
+| `queue_story_query` | `owner:%self% !is:done !is:archived` | Passed to `short api /search/stories?query=`. `%self%` is substituted with your Shortcut mention name (looked up via `short api /member` and cached) before the query is sent - `short api` does no templating of its own, unlike `short search`. Names no workflow state on purpose: state names are workspace-specific. |
 | `queue_interval` | `60` | Seconds between queue polls. |
 | `queue_limit` | `20` | Caps each fetch and the merged list. |
 

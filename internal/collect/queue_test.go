@@ -12,10 +12,17 @@ import (
 )
 
 // queueCommander answers both queue subprocesses and nothing else.
+//
+// The default queue_story_query contains %self%, so SearchStories resolves it
+// via "short api /member" before searching. That lookup is cached
+// process-wide (fetch.selfCache), so only the first test in this binary to
+// need it actually spends the call - every test still gets the same
+// substituted query, so none of them depend on which one runs first.
 func queueCommander() *fetch.MockCommander {
 	cmd := fetch.NewMockCommander()
 	cmd.On("gh", `[{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
 		"updatedAt":"2026-07-31T18:54:14Z","url":"https://github.com/huntresslabs/portal/pull/34967"}]`, nil)
+	cmd.OnArgs("short api /member", `{"id":"1","mention_name":"joshuazd","name":"Joshua Zink-Duda"}`, nil)
 	cmd.On("short", `{"data":[{"id":223480,"name":"Backfill audit rows",
 		"app_url":"https://app.shortcut.com/huntress/story/223480","updated_at":"2026-07-31T10:00:00Z"}]}`, nil)
 	return cmd
@@ -163,6 +170,7 @@ func sortTestCommander() *fetch.MockCommander {
 		"updatedAt":"2026-07-31T14:00:00Z","url":"https://github.com/huntresslabs/portal/pull/34966"},
 		{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
 		"updatedAt":"2026-07-31T20:00:00Z","url":"https://github.com/huntresslabs/portal/pull/34967"}]`, nil)
+	cmd.OnArgs("short api /member", `{"id":"1","mention_name":"joshuazd","name":"Joshua Zink-Duda"}`, nil)
 	cmd.On("short", `{"data":[{"id":223479,"name":"Add caching","app_url":"https://app.shortcut.com/huntress/story/223479",
 		"updated_at":"2026-07-31T08:00:00Z"},
 		{"id":223480,"name":"Backfill audit rows","app_url":"https://app.shortcut.com/huntress/story/223480",
