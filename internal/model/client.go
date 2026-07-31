@@ -92,7 +92,8 @@ func (m Model) collectCmd(force bool) tea.Cmd {
 			return SnapshotMsg{Epoch: epoch, Local: true}
 		}
 		annotateClientFlags(ctx, cmd, sessions, fallbackCurrent)
-		return SnapshotMsg{Sessions: sessions, Epoch: epoch, Local: true}
+		queue, hidden := collector.Queue(sessions)
+		return SnapshotMsg{Sessions: sessions, Epoch: epoch, Local: true, Queue: queue, QueueHidden: hidden}
 	}
 }
 
@@ -139,7 +140,14 @@ func listenDaemonCmd(
 			return DaemonLostMsg{Epoch: epoch}
 		}
 		annotateClientFlags(ctx, cmd, snap.Sessions, fallbackCurrent)
-		return SnapshotMsg{Sessions: snap.Sessions, Jobs: snap.Jobs, DaemonBin: snap.DaemonBin, Epoch: epoch}
+		return SnapshotMsg{
+			Sessions:    snap.Sessions,
+			Jobs:        snap.Jobs,
+			DaemonBin:   snap.DaemonBin,
+			Queue:       snap.Queue,
+			QueueHidden: snap.QueueHidden,
+			Epoch:       epoch,
+		}
 	}
 }
 

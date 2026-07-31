@@ -87,6 +87,12 @@ type SnapshotMsg struct {
 	// Zero on the self-polling path, and zero from a daemon too old to send
 	// it, which is the same thing as far as a client is concerned.
 	DaemonBin selfbin.Stamp
+
+	// Queue is work waiting to be started. Populated on both paths: from the
+	// wire when a daemon feeds this client, from Collector.Queue when it
+	// self-polls.
+	Queue       []session.QueueItem
+	QueueHidden int
 }
 
 // DaemonLostMsg reports that the daemon stream ended, so the TUI should

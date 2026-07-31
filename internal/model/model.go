@@ -50,6 +50,11 @@ type Model struct {
 	sessions []*session.Session
 	prCache  map[string]*session.PRStatus
 
+	// queue is work waiting to be started: assigned stories and
+	// review-requested PRs. Populated on both paths by handleSnapshot.
+	queue       []session.QueueItem
+	queueHidden int
+
 	// reviewComments caches review comment bodies fetched on demand, keyed by
 	// branch, the way pane capture already works: only the detail panel's
 	// comments mode reads them, and only for the selected session.
@@ -525,7 +530,12 @@ func (m Model) View() string {
 	// Table
 	visible := m.visibleSessions()
 	jobLine := view.RenderJobLine(m.jobs, m.width)
+	queueSection := view.RenderQueue(m.queue, m.queueHidden, m.queueCursor(), m.width, time.Now())
 	tableHeight := m.tableHeight(jobLine != "")
+	if queueSection != "" {
+		tableHeight -= lipgloss.Height(queueSection)
+	}
+	tableHeight = max(1, tableHeight)
 	staleThreshold := m.cfg.GetSettingInt("stale_threshold")
 	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight, notif)
 
@@ -553,6 +563,9 @@ func (m Model) View() string {
 
 	// Compose — pin footer to bottom by padding with blank lines
 	parts := []string{statusBar, table}
+	if queueSection != "" {
+		parts = append(parts, queueSection)
+	}
 	if jobLine != "" {
 		parts = append(parts, jobLine)
 	}
@@ -589,7 +602,7 @@ func (m Model) panelView() string {
 	if jobLine != "" {
 		rows = max(1, m.height-2)
 	}
-	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth(), 0)
+	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth(), len(m.queue))
 	table := view.RenderTable(
 		m.visibleSessions(),
 		m.cursor,
@@ -638,18 +651,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Down):
 		m.lastManualNav = time.Now()
-		visible := m.visibleSessions()
-		if len(visible) > 0 {
-			m.cursor = (m.cursor + 1) % len(visible)
+		if n := m.rowCount(); n > 0 {
+			m.cursor = (m.cursor + 1) % n
 		}
 		m.resetDetailModeIfSessionChanged()
 		return m, m.refreshDetailCmd()
 
 	case key.Matches(msg, keys.Up):
 		m.lastManualNav = time.Now()
-		visible := m.visibleSessions()
-		if len(visible) > 0 {
-			m.cursor = (m.cursor - 1 + len(visible)) % len(visible)
+		if n := m.rowCount(); n > 0 {
+			m.cursor = (m.cursor - 1 + n) % n
 		}
 		m.resetDetailModeIfSessionChanged()
 		return m, m.refreshDetailCmd()
@@ -739,9 +750,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selected[s.Name] = true
 			}
 			// Move cursor down
-			visible := m.visibleSessions()
-			if len(visible) > 0 {
-				m.cursor = (m.cursor + 1) % len(visible)
+			if n := m.rowCount(); n > 0 {
+				m.cursor = (m.cursor + 1) % n
 			}
 		}
 		return m, nil
@@ -784,7 +794,7 @@ func (m Model) handleDispatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		input := m.dispatchInput.Value()
 		m.dispatchActive = false
 		m.dispatchInput.SetValue("")
-		return m, m.dispatchCmd(input)
+		return m, m.dispatchCmd(input, false)
 	case tea.KeyEsc:
 		m.dispatchActive = false
 		m.dispatchInput.SetValue("")
@@ -808,6 +818,9 @@ func (m Model) exitsAfterAction() bool {
 }
 
 func (m Model) handleSelect() (tea.Model, tea.Cmd) {
+	if input, detached, ok := m.queueDispatchTarget(); ok {
+		return m, m.dispatchCmd(input, detached)
+	}
 	s := m.selectedSession()
 	if s == nil {
 		return m, nil
@@ -1008,6 +1021,8 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		}
 		m.jobs = msg.Jobs
 		m.daemonBin = msg.DaemonBin
+		m.queue = msg.Queue
+		m.queueHidden = msg.QueueHidden
 		m.checkStateTransitions()
 		var cmds []tea.Cmd
 		if m.detailOpen {
@@ -1037,6 +1052,8 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	m.applySnapshot(msg.Sessions)
 	m.jobs = msg.Jobs
 	m.daemonBin = msg.DaemonBin
+	m.queue = msg.Queue
+	m.queueHidden = msg.QueueHidden
 
 	m.checkStateTransitions()
 	var cmds []tea.Cmd
@@ -1362,7 +1379,7 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 	}
 }
 
-func (m Model) dispatchCmd(input string) tea.Cmd {
+func (m Model) dispatchCmd(input string, detached bool) tea.Cmd {
 	// Only a plain string is captured here. Resolving it into a cwd runs
 	// fetch.MainWorktree - a git subprocess under ExecCommander's 10s default
 	// timeout - and that has to happen inside the returned tea.Cmd, off the
@@ -1380,6 +1397,7 @@ func (m Model) dispatchCmd(input string) tea.Cmd {
 			SocketPath: protocol.SocketPath(),
 			Spawn:      spawnDaemon,
 			AckTimeout: dispatch.DefaultAckTimeout,
+			Detached:   detached,
 		}); err != nil {
 			return ActionResultMsg{Action: "dispatch", OK: false, Message: err.Error()}
 		}
@@ -1593,6 +1611,33 @@ func (m Model) visibleSessions() []*session.Session {
 		}
 	}
 	return filtered
+}
+
+// rowCount is the number of selectable rows: sessions first, then queue
+// items. The cursor indexes this space, and selectedSession's existing bounds
+// check against visibleSessions is what makes every session action a no-op on
+// a queue row - no new guard, and batchSessions cannot reach one at all.
+func (m Model) rowCount() int {
+	return len(m.visibleSessions()) + len(m.queue)
+}
+
+// queueCursor is the cursor's index into m.queue, or -1 when it is on a
+// session row.
+func (m Model) queueCursor() int {
+	i := m.cursor - len(m.visibleSessions())
+	if i < 0 || i >= len(m.queue) {
+		return -1
+	}
+	return i
+}
+
+// queueDispatchTarget reports what enter should dispatch, if anything.
+func (m Model) queueDispatchTarget() (input string, detached bool, ok bool) {
+	i := m.queueCursor()
+	if i < 0 {
+		return "", false, false
+	}
+	return m.queue[i].Input, true, true
 }
 
 func (m Model) selectedSession() *session.Session {
