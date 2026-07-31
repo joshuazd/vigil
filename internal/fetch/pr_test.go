@@ -2,6 +2,8 @@ package fetch
 
 import (
 	"context"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -225,4 +227,49 @@ func TestGetNWOHTTPS(t *testing.T) {
 	}
 
 	nwoCache.Delete("/repo2")
+}
+
+// failingCommand produces a genuine *exec.ExitError with stderr populated, the
+// same shape ExecCommander.Run returns, so these two tests exercise the real
+// discriminator rather than a string match on a fabricated error.
+func failingCommand(t *testing.T, stderr string) error {
+	t.Helper()
+	_, err := exec.Command("sh", "-c", "echo "+strconv.Quote(stderr)+" >&2; exit 1").Output()
+	if err == nil {
+		t.Fatal("the helper command succeeded; it must fail to produce an ExitError")
+	}
+	return err
+}
+
+// A branch with no PR is the normal state of every freshly dispatched session,
+// and gh answers it by exiting 1. Retrying that answer three times with 1s and
+// 2s of backoff cost about 4.5s inside a synchronous Snapshot, during which no
+// client saw any update at all - which is why a new session took 5 to 10
+// seconds to appear in its own panel.
+func TestFetchPRStatusDoesNotRetryWhenTheBranchHasNoPR(t *testing.T) {
+	mock := NewMockCommander()
+	mock.On("gh", "", failingCommand(t, `no pull requests found for branch "feature/x"`))
+
+	if got := FetchPRStatus(context.Background(), mock, "feature/x", "/repo"); got != nil {
+		t.Fatalf("got %+v, want nil for a branch with no PR", got)
+	}
+	if n := len(mock.Calls); n != 1 {
+		t.Fatalf("gh invoked %d times, want 1: no-PR is an answer, not a transient failure", n)
+	}
+}
+
+// The counterpart, so the fix above cannot be mistaken for deleting the retry.
+// Parallel because it deliberately sits through the real backoff.
+func TestFetchPRStatusStillRetriesATransientFailure(t *testing.T) {
+	t.Parallel()
+
+	mock := NewMockCommander()
+	mock.On("gh", "", failingCommand(t, "error connecting to api.github.com"))
+
+	if got := FetchPRStatus(context.Background(), mock, "feature/x", "/repo"); got != nil {
+		t.Fatalf("got %+v, want nil", got)
+	}
+	if n := len(mock.Calls); n != 3 {
+		t.Fatalf("gh invoked %d times, want 3: a transient failure must still be retried", n)
+	}
 }
