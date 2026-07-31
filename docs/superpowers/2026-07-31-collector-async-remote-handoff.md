@@ -167,8 +167,9 @@ has been **relocated from `gh` to `git`, not removed**. Anyone who reads this br
 - **The `RefreshRemote` gap.** Production reaches a pass **only through the worker**.
   `RefreshRemote` is the synchronous seam tests drive so they do not race a goroutine, so a
   `nudge` that never reached a worker would leave **every `RefreshRemote`-driven test green**.
-  Only `TestRunStartsTheRemoteWorkers` and `TestNewStartsTheRemoteWorkers` go through a real
-  `Start` and would catch it. Do not weaken either into "assert `Start` was called".
+  `TestRunStartsTheRemoteWorkers`, `TestNewStartsTheRemoteWorkers` and
+  `TestADaemonFedClientSpendsNoGhBudget` go through a real `Start` and would catch it. Do not
+  weaken any of the three into "assert `Start` was called".
 - **The pending skip costs at most one `notify` hook per session, at daemon start.** A session
   whose state genuinely changes inside the pending window loses its notification. If a missing
   notification is reported right after a restart, this is why. It is the deliberate trade
@@ -179,11 +180,17 @@ has been **relocated from `gh` to `git`, not removed**. Anyone who reads this br
   cannot re-exec anything**: a panel must already be running the feature to notice. So expect
   one round of spurious toasts on the panels that were open when this shipped.
 - **`Collector.Wait()` inherits `ExecCommander.Run`'s grandchild-holds-the-pipe defect.** The
-  defect is pre-existing and phase 4 left it deliberately, but the blast radius moved: a
-  wedged `gh` now blocks **daemon shutdown** rather than just one poll, and a daemon that
-  never returns from `Run` never releases its flock and never unlinks its socket, after which
-  no daemon can start again. `RunStream` was fixed in phase 4; `Run`, used by the `notify` and
-  `cleanup` hooks and by `FetchPRStatus`, was not. Phase 5 still inherits it.
+  defect is pre-existing and phase 4 left it deliberately, and this branch narrows its blast
+  radius rather than widening it. Before this branch `poll` ran inline in `Run`'s select loop
+  and `fillPRs` ran inside `poll`, so a `cmd.Wait` wedged on a grandchild-held pipe blocked the
+  goroutine inside `poll` and `Run` never reached its `ctx.Done()` arm at all: the flock was
+  never released, the socket never unlinked, and the daemon also stopped publishing and
+  stopped accepting connections for the whole wedge. Now the wedge sits on a worker goroutine,
+  and only `Collector.Wait` waits on it - publication and connection handling no longer stop
+  too. The flock-and-socket failure mode survives: a wedged `gh` still prevents `Run` from
+  returning, so no daemon can start again after one. `RunStream` was fixed in phase 4; `Run`,
+  used by the `notify` and `cleanup` hooks and by `FetchPRStatus`, was not. Phase 5 still
+  inherits it.
 - **`remote.start`'s `sync.Once` makes the first context permanent, and `Run` is its sole
   caller.** A `Server` whose `Run` is invoked twice gets dead pollers plus a `Wait` that
   returns instantly: a daemon that publishes tmux and git forever and never a PR, with no
@@ -202,6 +209,12 @@ has been **relocated from `gh` to `git`, not removed**. Anyone who reads this br
   remote data now comes back **a tick later** rather than inside the same call.
 - **`pr_pending` is written into the session cache.** Additive, `omitempty`, overwritten a
   tick later; the Python-era cache reader ignores unknown keys.
+- **`internal/daemon/daemon.go`'s `poll` saves the session cache on every pass, including the
+  first, where every session is `PRPending` with `PR == nil`.** A panel that starts and loads
+  the cache within that first pass paints a blank PR column until the next pass lands.
+  Self-correcting within one pass and cosmetic, not fixed here. The realistic way a user hits
+  it is a `make install` fleet re-exec, where every panel restarts against a freshly restarted
+  daemon at once.
 
 ## Deferred
 

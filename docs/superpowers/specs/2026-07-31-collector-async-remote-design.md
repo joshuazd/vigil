@@ -40,6 +40,11 @@ Not in scope: `fillGit`, `ListSessions` and `BellFlags` stay synchronous and sta
 `Snapshot`. They are local subprocesses. `fillGit` is also the last lock-free
 goroutine-owned memo in the collector, and moving it would spend that for no latency.
 
+**Superseded on that last point.** The real-machine verification measured `fillGit` at 3.0 to
+3.5 seconds - 99.7% of `Snapshot` - dominated by `git status --porcelain` on active portal
+worktrees. "Not the latency source" is wrong on this machine; see the `fillGit` finding in
+`docs/superpowers/2026-07-31-collector-async-remote-handoff.md`.
+
 ## Architecture
 
 ### The poller seam

@@ -1094,7 +1094,18 @@ func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	selfPolled := cmd.CallCount("gh")
+	// Hardcoded, not latched off the count so far: fetch.nwoCache is a
+	// package-level sync.Map keyed by git root, shared across every test in
+	// the binary. This fixture's getNWO has no "git remote get-url origin"
+	// handler, so fetchReviewThreads bails before its graphql call and one
+	// gh call is the only one a pass over /repo/alpha can ever spend here -
+	// but only as long as nothing else in the binary warms that cache entry
+	// first. Latching off cmd.CallCount would silently stop catching a
+	// ticker regression the day some other test did.
+	const selfPolled = 1
+	if got := cmd.CallCount("gh"); got != selfPolled {
+		t.Fatalf("got %d gh calls from the self-polling client, want %d", got, selfPolled)
+	}
 
 	m.daemonConn = &fakeConn{}
 	if got := m.startPoll(false); got != nil {
