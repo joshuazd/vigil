@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -22,6 +23,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/dispatch"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/selfbin"
 	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/transition"
 	"github.com/jzinkduda/vigil/internal/view"
@@ -32,6 +34,16 @@ const autoFocusCooldown = 15 * time.Second
 // spawnCooldown is the floor between two attempts by one client to start a
 // daemon.
 const spawnCooldown = 15 * time.Second
+
+// binCheckInterval is how often a client stats its own binary. A stat is
+// cheap; doing it on every 1s tick would still be pointless.
+const binCheckInterval = 10 * time.Second
+
+// binRestartFloor is the anti-loop guard. A re-exec'd process stamps at its
+// own startup, so a stable binary never fires twice - that is the structural
+// defence. This bounds the damage if a stat is somehow nondeterministic: one
+// exec per floor rather than a hot spin that makes a panel unusable.
+const binRestartFloor = 30 * time.Second
 
 type Model struct {
 	// Data
@@ -109,9 +121,19 @@ type Model struct {
 	daemonDecoder *protocol.Decoder
 	daemonReady   bool
 
+	// daemonWriteMu serializes client-to-daemon writes. net.Conn is safe for
+	// concurrent read and write, but two concurrent writes can interleave into
+	// one malformed frame - which the daemon tolerates and drops, so the
+	// dismiss would silently not happen. A pointer, so the value copies Bubble
+	// Tea makes all share one.
+	daemonWriteMu *sync.Mutex
+
 	// lastSnapshot is when the most recent daemon snapshot was applied. A
 	// daemon that is connected but silent is invisible without it.
 	lastSnapshot time.Time
+
+	// daemonBin is the last stamp a daemon published for its own image.
+	daemonBin selfbin.Stamp
 
 	// panelMode renders the compact per-session panel instead of the full
 	// dashboard. Set by NewPanel.
@@ -119,6 +141,24 @@ type Model struct {
 
 	// lastSpawn is when this panel last tried to start a daemon.
 	lastSpawn time.Time
+
+	// binProber stats this process's own image. Zero value is the real one.
+	binProber    selfbin.Prober
+	binAtStart   selfbin.Stamp
+	binOnDisk    selfbin.Stamp
+	lastBinCheck time.Time
+	startedAt    time.Time
+
+	// binPending is a changed stamp seen once and not yet confirmed by a
+	// second check. `make build` writes ./vigil in place, so a stat can land
+	// mid-write and report a short size; exec'ing that file kills the pane.
+	binPending selfbin.Stamp
+
+	// restartRequested asks the caller to re-exec after the program exits.
+	// The exec cannot happen here: Bubble Tea owns raw mode and the alt
+	// screen, and a process exec'd from inside Update inherits a terminal
+	// nobody restored.
+	restartRequested bool
 
 	// Context for cancellation
 	ctx    context.Context
@@ -175,6 +215,11 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 
 	insideTmux := os.Getenv("TMUX") != ""
 
+	// A failed probe leaves the zero Stamp, which means "unknown" everywhere
+	// it is read: checkBinary adopts the first stamp it can get as the
+	// baseline and daemonHealth stays quiet until then.
+	startStamp, _ := selfbin.Prober{}.Current()
+
 	m := Model{
 		currentSessionName: currentSession,
 		prCache:            make(map[string]*session.PRStatus),
@@ -193,8 +238,13 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		cancel:    cancel,
 		collector: collect.New(cfg, cmd),
 
+		startedAt:  time.Now(),
+		binAtStart: startStamp,
+		binOnDisk:  startStamp,
+
 		dispatchInput: ti,
 		help:          help.New(),
+		daemonWriteMu: &sync.Mutex{},
 	}
 
 	// Load the cache synchronously, on both the daemon and self-polling
@@ -353,6 +403,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.daemonConn != nil {
 			return m, nil
 		}
+		if m.checkBinary(time.Now()) {
+			m.cancel()
+			return m, tea.Quit
+		}
 		// The reschedule is unconditional and does not depend on startPoll
 		// succeeding. A tick consumed while a poll is already in flight would
 		// otherwise vanish - tea.Tick is one-shot - and kill the loop.
@@ -388,6 +442,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// replaced or torn down.
 		if msg.Epoch != m.epoch || m.daemonDecoder == nil {
 			return m, nil
+		}
+		if m.checkBinary(time.Now()) {
+			m.cancel()
+			return m, tea.Quit
 		}
 		return m, renderTickCmd(1*time.Second, m.epoch)
 
@@ -690,6 +748,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dispatchActive = false
 			return m, nil
 		}
+		if m.daemonConn != nil && m.hasDismissableJob() {
+			return m, dismissJobsCmd(m.daemonConn, m.daemonWriteMu)
+		}
 		m.cancel()
 		return m, tea.Quit
 	}
@@ -940,6 +1001,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 			m.applySnapshot(msg.Sessions)
 		}
 		m.jobs = msg.Jobs
+		m.daemonBin = msg.DaemonBin
 		m.checkStateTransitions()
 		var cmds []tea.Cmd
 		if m.detailOpen {
@@ -968,6 +1030,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	m.lastSnapshot = time.Now()
 	m.applySnapshot(msg.Sessions)
 	m.jobs = msg.Jobs
+	m.daemonBin = msg.DaemonBin
 
 	m.checkStateTransitions()
 	var cmds []tea.Cmd
@@ -1075,6 +1138,58 @@ func (m Model) handleProbeResult(msg DaemonProbeResultMsg) (tea.Model, tea.Cmd) 
 	)
 }
 
+// RestartRequested reports whether this process asked to be replaced by a
+// newer image on disk. Read by main after p.Run() returns and Bubble Tea has
+// restored the terminal.
+func (m Model) RestartRequested() bool { return m.restartRequested }
+
+// checkBinary reports whether this process should quit now so its caller can
+// re-exec the newer image. The tick arms turn that into tea.Quit: nothing else
+// makes p.Run() return, and main only execs once it has.
+func (m *Model) checkBinary(now time.Time) bool {
+	if m.restartRequested {
+		return true
+	}
+	if !m.lastBinCheck.IsZero() && now.Sub(m.lastBinCheck) < binCheckInterval {
+		return false
+	}
+	m.lastBinCheck = now
+
+	stamp, ok := m.binProber.Current()
+	if !ok {
+		return false
+	}
+	m.binOnDisk = stamp
+	// A startup probe that failed left binAtStart zero, which is "unknown"
+	// rather than a real prior value: comparing against it would restart a
+	// binary that never changed. The first stamp this process can actually
+	// get is its baseline.
+	if m.binAtStart.Zero() {
+		m.binAtStart = stamp
+	}
+	if stamp == m.binAtStart {
+		m.binPending = selfbin.Stamp{}
+		return false
+	}
+	// The same changed stamp has to survive two checks a binCheckInterval
+	// apart. A file still being written grows between them, so a torn read is
+	// never what triggers the exec.
+	if stamp != m.binPending {
+		m.binPending = stamp
+		return false
+	}
+	if now.Sub(m.startedAt) < binRestartFloor {
+		return false
+	}
+	// Unsaved user intent. All three are states the user is actively in and
+	// about to leave, so no indicator is needed for the wait.
+	if m.confirmAction != ConfirmNone || m.dispatchActive || len(m.selected) > 0 {
+		return false
+	}
+	m.restartRequested = true
+	return true
+}
+
 // daemonHealth describes the state of the data source, for the status bar.
 // Empty means nothing worth saying: either the daemon is feeding us or the
 // TUI is self-polling, which is a supported mode and already announced by a
@@ -1093,7 +1208,22 @@ func (m Model) daemonHealth() string {
 	if age := time.Since(m.lastSnapshot); age > m.staleAfter() {
 		return fmt.Sprintf("daemon stale %ds", int(age.Seconds()))
 	}
+	// Lowest precedence: a daemon that is behind is still feeding correct
+	// data, it is just missing whatever the newer image adds. An absent stamp
+	// counts, because a daemon too old to send the field is too old.
+	if !m.binOnDisk.Zero() && m.daemonBin != m.binOnDisk {
+		return "daemon outdated"
+	}
 	return ""
+}
+
+func (m Model) hasDismissableJob() bool {
+	for _, j := range m.jobs {
+		if j.State == protocol.JobFailed || j.State == protocol.JobRefused {
+			return true
+		}
+	}
+	return false
 }
 
 // staleAfter is how long a connected daemon may stay silent before the status
@@ -1266,6 +1396,27 @@ func dispatchCwd(ctx context.Context, cmd fetch.Commander, gitRoot string) strin
 		return ""
 	}
 	return cwd
+}
+
+// dismissJobsCmd asks the daemon to clear its terminal jobs. It goes out on
+// the client's existing connection - the daemon's per-connection reader takes
+// requests from the same socket it writes snapshots to - so there is no dial,
+// no daemon spawn and no ack to wait for. The job vanishing from the next
+// snapshot is the ack.
+func dismissJobsCmd(conn net.Conn, mu *sync.Mutex) tea.Cmd {
+	return func() tea.Msg {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
+		if err := protocol.EncodeRequest(conn, &protocol.Request{
+			Version: protocol.Version,
+			Type:    protocol.RequestDismiss,
+		}); err != nil {
+			return ActionResultMsg{Action: "dismiss", OK: false, Message: err.Error()}
+		}
+		return nil
+	}
 }
 
 // --- Batch commands ---

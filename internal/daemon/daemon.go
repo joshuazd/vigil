@@ -17,6 +17,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/selfbin"
 	"github.com/jzinkduda/vigil/internal/session"
 	"github.com/jzinkduda/vigil/internal/transition"
 )
@@ -31,6 +32,13 @@ type Server struct {
 	SocketPath string
 	CachePath  string
 	Log        *log.Logger
+
+	// BinStamp identifies the image this daemon is running. Published in every
+	// snapshot so a client - which stats the same path for its own restart
+	// check - can tell the user the daemon is behind. The daemon never acts on
+	// it: restarting itself would drop every client connection, so every panel
+	// would bounce through daemon-lost on every install.
+	BinStamp selfbin.Stamp
 
 	// Detector and Effects fire state-transition side effects once per event.
 	// Clients render their own toasts from their own detectors; only this
@@ -98,6 +106,14 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 		inFlightEffects: make(map[string]struct{}),
 		requests:        make(chan *protocol.Request, queueDepth),
 	}
+	// Publishing a zero stamp is the correct fail-safe - every client then
+	// reads this daemon as outdated - but silently accusing itself is not
+	// diagnosable, so say it once here.
+	stamp, ok := selfbin.Prober{}.Current()
+	if !ok {
+		logger.Printf("cannot stamp own binary; clients will report this daemon as outdated")
+	}
+	srv.BinStamp = stamp
 	// The job table exists even when the commander cannot stream. It refuses
 	// every submission in that case, which is the point: a nil table left the
 	// request read off the wire and dropped with nothing registered, and a
@@ -163,16 +179,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case conn := <-incoming:
 			s.addClient(ctx, conn)
 		case req := <-s.requests:
-			if s.jobs != nil {
-				s.jobs.submit(req)
-				// Immediately, not on the next tick. The submitting CLI waits
-				// to see its id in a snapshot, and on a cold daemon the next
-				// tick is behind a first poll that runs git and gh across
-				// every session - so a job that was already running was
-				// reported to the user as a daemon too old to have accepted
-				// it.
-				s.publishJobs(s.jobs.snapshot())
-			}
+			s.handleRequest(req)
 		case <-ticker.C:
 			s.poll(ctx)
 		}
@@ -254,6 +261,7 @@ func (s *Server) poll(ctx context.Context) {
 		Timestamp: time.Now().Unix(),
 		Sessions:  sessions,
 		Jobs:      jobList,
+		DaemonBin: s.BinStamp,
 	}
 
 	s.mu.Lock()
@@ -337,6 +345,27 @@ func (s *Server) publishJobs(jobs []protocol.Job) {
 	s.mu.Unlock()
 
 	s.broadcast(&updated)
+}
+
+// handleRequest routes one client frame. The default arm stays submit rather
+// than becoming a refusal: submit's reason switch already produces the
+// unsupported-type refusal, and that behaviour must not move.
+func (s *Server) handleRequest(req *protocol.Request) {
+	if s.jobs == nil || req == nil {
+		return
+	}
+	switch req.Type {
+	case protocol.RequestDismiss:
+		if !s.jobs.dismissTerminal() {
+			return
+		}
+	default:
+		s.jobs.submit(req)
+	}
+	// Immediately, not on the next tick. The submitting CLI waits to see its
+	// id in a snapshot, and on a cold daemon the next tick is behind a first
+	// poll that runs git and gh across every session.
+	s.publishJobs(s.jobs.snapshot())
 }
 
 // logf guards s.Log so a zero-valued Server built directly (e.g. in a test)

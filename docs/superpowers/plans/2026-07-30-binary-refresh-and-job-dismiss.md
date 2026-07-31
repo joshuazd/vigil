@@ -987,29 +987,40 @@ git commit -m "feat(model): notice when this process's binary has been replaced"
 
 **Interfaces:**
 - Consumes: `model.Model.RestartRequested()` from Task 6.
-- Produces: `var execSelf = syscall.Exec` and `func restartIfRequested(final tea.Model) error`.
+- Produces: `var execSelf = syscall.Exec`, `type restartRequester interface { RestartRequested() bool }`, and `func restartIfRequested(final tea.Model) error`.
+
+**Why an interface rather than a type assertion to `model.Model`:** asserting the concrete type would force a test in package `main` to build a real `model.Model` with the flag set, and the flag is unexported. The only ways out are an exported test-only setter on `Model` - production API that exists solely for a test, in a package that has none - or this one-line interface. `model.Model` satisfies it for free because `RestartRequested()` already has a value receiver.
 
 - [ ] **Step 1: Write the failing test**
 
 Append to `main_test.go`:
 
 ```go
+// fakeFinalModel stands in for the model tea.Program returns. It exists so
+// this test can drive the restart branch without building a real Model, whose
+// flag is unexported.
+type fakeFinalModel struct{ restart bool }
+
+func (f fakeFinalModel) Init() tea.Cmd                           { return nil }
+func (f fakeFinalModel) Update(tea.Msg) (tea.Model, tea.Cmd)     { return f, nil }
+func (f fakeFinalModel) View() string                            { return "" }
+func (f fakeFinalModel) RestartRequested() bool                  { return f.restart }
+
 func TestRestartIfRequestedExecsTheSamePathAndArgv(t *testing.T) {
 	original := execSelf
 	t.Cleanup(func() { execSelf = original })
 
 	var gotPath string
 	var gotArgv []string
+	var gotEnv []string
 	execSelf = func(path string, argv []string, envv []string) error {
 		gotPath = path
 		gotArgv = argv
+		gotEnv = envv
 		return nil
 	}
 
-	m := model.New(&config.Config{}, fetch.NewMockCommander())
-	m.SetRestartRequestedForTest(true)
-
-	if err := restartIfRequested(m); err != nil {
+	if err := restartIfRequested(fakeFinalModel{restart: true}); err != nil {
 		t.Fatalf("restartIfRequested: %v", err)
 	}
 
@@ -1023,6 +1034,9 @@ func TestRestartIfRequestedExecsTheSamePathAndArgv(t *testing.T) {
 	if len(gotArgv) == 0 || gotArgv[0] != exe {
 		t.Fatalf("argv = %v, want argv[0] to be the executable", gotArgv)
 	}
+	if len(gotEnv) != len(os.Environ()) {
+		t.Fatalf("env has %d entries, want the process environ's %d", len(gotEnv), len(os.Environ()))
+	}
 }
 
 func TestRestartIfRequestedDoesNothingWithoutTheFlag(t *testing.T) {
@@ -1032,31 +1046,34 @@ func TestRestartIfRequestedDoesNothingWithoutTheFlag(t *testing.T) {
 		t.Fatal("exec'd without a restart request")
 		return nil
 	}
-	if err := restartIfRequested(model.New(&config.Config{}, fetch.NewMockCommander())); err != nil {
+	if err := restartIfRequested(fakeFinalModel{restart: false}); err != nil {
 		t.Fatalf("restartIfRequested: %v", err)
 	}
 }
 
-func TestRestartIfRequestedIgnoresANonModel(t *testing.T) {
+// A tea.Model that knows nothing about restarting must be ignored rather than
+// panicking the process on its way out.
+func TestRestartIfRequestedIgnoresAModelWithoutTheMethod(t *testing.T) {
 	original := execSelf
 	t.Cleanup(func() { execSelf = original })
 	execSelf = func(string, []string, []string) error {
-		t.Fatal("exec'd for a model of the wrong type")
+		t.Fatal("exec'd for a model that cannot request a restart")
 		return nil
 	}
 	if err := restartIfRequested(nil); err != nil {
 		t.Fatalf("restartIfRequested: %v", err)
 	}
 }
+
+// The real Model must satisfy restartRequester, or the interface assertion in
+// restartIfRequested silently never fires in production. Nothing else catches
+// that: every other test here uses the fake.
+func TestTheRealModelSatisfiesRestartRequester(t *testing.T) {
+	var _ restartRequester = model.New(&config.Config{}, fetch.NewMockCommander())
+}
 ```
 
-This needs a test-only setter, because `restartRequested` is unexported and `main` is a different package. Add to `internal/model/model.go`:
-
-```go
-// SetRestartRequestedForTest exists because main, in a different package,
-// needs to drive the restart branch without a real binary swap.
-func (m *Model) SetRestartRequestedForTest(v bool) { m.restartRequested = v }
-```
+No test-only setter on `Model`. The interface is what makes that unnecessary, and `TestTheRealModelSatisfiesRestartRequester` is what stops the interface drifting away from the real type.
 
 - [ ] **Step 2: Run the tests and verify they fail**
 
@@ -1076,12 +1093,18 @@ var execSelf = syscall.Exec
 Add:
 
 ```go
+// restartRequester is what restartIfRequested needs of a finished program's
+// model. An interface rather than a concrete assertion to model.Model so a
+// test can supply a fake without model exporting a setter that exists only
+// for tests.
+type restartRequester interface{ RestartRequested() bool }
+
 // restartIfRequested replaces this process with the newer image on disk. It
 // runs after p.Run() has returned, because Bubble Tea restores the terminal on
 // its way out and an exec from inside Update would hand the new process raw
 // mode and an alt screen nobody left.
 func restartIfRequested(final tea.Model) error {
-	m, ok := final.(model.Model)
+	m, ok := final.(restartRequester)
 	if !ok || !m.RestartRequested() {
 		return nil
 	}
@@ -1128,7 +1151,7 @@ Make `restartIfRequested` return nil unconditionally. `TestRestartIfRequestedExe
 - [ ] **Step 6: Commit**
 
 ```bash
-git add main.go main_test.go internal/model/model.go
+git add main.go main_test.go
 git commit -m "feat: re-exec a client whose binary was replaced on disk"
 ```
 

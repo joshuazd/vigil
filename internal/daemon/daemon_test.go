@@ -18,6 +18,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
 	"github.com/jzinkduda/vigil/internal/protocol"
+	"github.com/jzinkduda/vigil/internal/selfbin"
 )
 
 // maxSockPath is the largest usable length for a unix socket path
@@ -764,5 +765,64 @@ func TestADaemonThatCannotStreamRefusesRatherThanDropping(t *testing.T) {
 		t.Errorf("got state %q, want %q", got.State, protocol.JobRefused)
 	case !strings.Contains(got.Status, "stream"):
 		t.Errorf("got reason %q, want it to name the missing streaming support", got.Status)
+	}
+}
+
+func TestRunRoutesADismissFrameToDismissTerminal(t *testing.T) {
+	s := &Server{jobs: newJobs(&config.Config{}, nil, nil, func(string, ...any) {})}
+	s.jobs.byID = map[string]*protocol.Job{"f": {ID: "f", State: protocol.JobFailed}}
+	s.jobs.order = []string{"f"}
+
+	s.handleRequest(&protocol.Request{Version: protocol.Version, Type: protocol.RequestDismiss})
+
+	if got := s.jobs.snapshot(); len(got) != 0 {
+		t.Fatalf("the failed job survived a dismiss frame: %+v", got)
+	}
+}
+
+// The unknown-type refusal must keep working. Routing dismiss must not turn
+// the default arm into a refusal of its own: submit already owns that.
+//
+// This needs a real stream, unlike the dismiss tests above: submit's reason
+// switch checks for a non-streaming commander before it checks req.Type, so
+// a nil stream would refuse on that ground first and never exercise the
+// unsupported-type path this test is pinning.
+func TestRunStillRefusesAnUnknownRequestType(t *testing.T) {
+	s := &Server{jobs: newJobs(testJobsConfig(), newBlockingStream(), fetch.NewMockCommander(), func(string, ...any) {})}
+
+	s.handleRequest(&protocol.Request{Version: protocol.Version, Type: "nonsense", ID: "x", Input: "in"})
+
+	got := s.jobs.snapshot()
+	if len(got) != 1 || got[0].State != protocol.JobRefused {
+		t.Fatalf("got %+v, want one refused job", got)
+	}
+	if !strings.Contains(got[0].Status, "nonsense") {
+		t.Fatalf("refusal reason %q does not name the type", got[0].Status)
+	}
+}
+
+func TestPollPublishesTheDaemonBinaryStamp(t *testing.T) {
+	want := selfbin.Stamp{Size: 4242, ModNano: 99}
+	s := testServer(t)
+	s.BinStamp = want
+
+	s.poll(context.Background())
+
+	s.mu.Lock()
+	latest := s.latest
+	s.mu.Unlock()
+	if latest == nil {
+		t.Fatal("poll published no snapshot")
+		return
+	}
+	if latest.DaemonBin != want {
+		t.Fatalf("DaemonBin = %+v, want %+v", latest.DaemonBin, want)
+	}
+}
+
+func TestNewStampsTheRunningBinary(t *testing.T) {
+	s := New(&config.Config{}, fetch.NewMockCommander())
+	if s.BinStamp.Zero() {
+		t.Fatal("New left BinStamp zero; a client reads that as an outdated daemon")
 	}
 }

@@ -22,6 +22,16 @@ import (
 
 var version = "dev"
 
+// execSelf is a seam. A test that called syscall.Exec directly would replace
+// the test binary with a second copy of vigil.
+var execSelf = syscall.Exec
+
+// restartRequester is satisfied by model.Model. Asserting an interface here
+// instead of the concrete type keeps this file free of a test-only exported
+// setter on internal/model; TestTheRealModelSatisfiesRestartRequester in
+// main_test.go is the compile-time check that the two have not drifted apart.
+type restartRequester interface{ RestartRequested() bool }
+
 func parseArgs(args []string) (string, []string, error) {
 	if len(args) == 0 {
 		return "tui", nil, nil
@@ -151,20 +161,39 @@ func runDaemon(cfg *config.Config, cmd fetch.Commander) error {
 	return daemon.New(cfg, cmd).Run(ctx)
 }
 
+// restartIfRequested replaces this process with the newer image on disk. It
+// runs after p.Run() has returned, because Bubble Tea restores the terminal on
+// its way out and an exec from inside Update would hand the new process raw
+// mode and an alt screen nobody left.
+func restartIfRequested(final tea.Model) error {
+	m, ok := final.(restartRequester)
+	if !ok || !m.RestartRequested() {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return execSelf(exe, append([]string{exe}, os.Args[1:]...), os.Environ())
+}
+
 func runTUI(cfg *config.Config, cmd fetch.Commander) error {
-	m := model.New(cfg, cmd)
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	_, err := p.Run()
-	return err
+	final, err := tea.NewProgram(model.New(cfg, cmd), tea.WithAltScreen()).Run()
+	if err != nil {
+		return err
+	}
+	return restartIfRequested(final)
 }
 
 // runPanel renders the compact session list for a single tmux pane. It shares
 // every code path with the dashboard, so panel and dashboard can never
 // disagree about state.
 func runPanel(cfg *config.Config, cmd fetch.Commander) error {
-	p := tea.NewProgram(model.NewPanel(cfg, cmd), tea.WithAltScreen())
-	_, err := p.Run()
-	return err
+	final, err := tea.NewProgram(model.NewPanel(cfg, cmd), tea.WithAltScreen()).Run()
+	if err != nil {
+		return err
+	}
+	return restartIfRequested(final)
 }
 
 // runDispatch submits a job and returns. Exit 0 means the daemon accepted the

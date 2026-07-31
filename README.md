@@ -63,7 +63,7 @@ If `vigil daemon` is running, `vigil` consumes its broadcast snapshots instead o
 | `x` | Cleanup session (press twice to confirm) |
 | `d` | Dispatch (run configured hook with input) |
 | `r` | Refresh |
-| `Escape` | Clear selection / cancel |
+| `Escape` | Clear selection / cancel, then dismiss a failed or refused dispatch job, then quit |
 | `q` | Quit |
 
 With multi-select active, `m`, `a`, `x`, `b`, and `D` operate on all selected sessions as a batch.

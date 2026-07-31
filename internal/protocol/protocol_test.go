@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jzinkduda/vigil/internal/selfbin"
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
@@ -226,5 +227,51 @@ func TestNoJobsMeansNoJobsKey(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "jobs") {
 		t.Errorf("frame mentions jobs: %s", buf.String())
+	}
+}
+
+func TestSnapshotCarriesTheDaemonBinaryStamp(t *testing.T) {
+	var buf bytes.Buffer
+	want := selfbin.Stamp{Size: 991, ModNano: 12345}
+	if err := Encode(&buf, &Snapshot{Version: Version, DaemonBin: want}); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	got, err := NewDecoder(&buf).Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if got.DaemonBin != want {
+		t.Fatalf("DaemonBin = %+v, want %+v", got.DaemonBin, want)
+	}
+}
+
+// The additive claim, tested rather than asserted in a comment: a snapshot
+// written by a daemon that predates the field still decodes at version 1, and
+// the field reads as the zero Stamp.
+func TestASnapshotWithoutTheStampStillDecodesAtVersionOne(t *testing.T) {
+	line := []byte(`{"version":1,"timestamp":7,"sessions":[]}` + "\n")
+	got, err := NewDecoder(bytes.NewReader(line)).Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if !got.DaemonBin.Zero() {
+		t.Fatalf("DaemonBin = %+v, want the zero Stamp", got.DaemonBin)
+	}
+}
+
+func TestTheDismissRequestTypeRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EncodeRequest(&buf, &Request{Version: Version, Type: RequestDismiss}); err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	got, err := NewRequestDecoder(&buf).Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if got.Type != RequestDismiss {
+		t.Fatalf("Type = %q, want %q", got.Type, RequestDismiss)
+	}
+	if got.ID != "" {
+		t.Fatalf("ID = %q, want empty: an old daemon must drop this frame silently rather than register a refused job for an unknown type", got.ID)
 	}
 }

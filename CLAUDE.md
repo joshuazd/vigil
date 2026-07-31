@@ -20,12 +20,20 @@ review-requested PRs; both vigil and the menu bar present a pickable list, and s
 item dispatches it. The same rule as before applies - live on phase 4 first. Phase 4 is the
 phase that makes the daemon run jobs, which is the condition phase 5 inherits.
 
+**Phase 4's two deferred items landed on 2026-07-31**, before phase 5 and on purpose: one of
+them - a client silently running a stale binary - gets strictly worse with every byte phase 5
+adds to the snapshot. `esc` now clears a failed dispatch line for every panel at once, and a
+client re-execs when its own binary changes. See
+`docs/superpowers/2026-07-30-binary-refresh-handoff.md`, which carries the real-machine
+results and the operational note that **the first install after it cannot re-exec anything**,
+because a panel needs to already be running the feature to notice.
+
 **Start here: `docs/superpowers/2026-07-30-phase-4-handoff.md`.** It records what phase 4
-verified, what it did **not** (no real story has been dispatched yet), and the landmines -
-including `ExecCommander.Run`, the non-streaming path used by the `notify` and `cleanup`
-hooks, which still has the grandchild-holds-the-pipe defect that phase 4 fixed in
-`RunStream`. A hook that backgrounds a process wedges the daemon permanently; shipped
-defaults do not, which is the only reason it was left.
+verified, what it did **not**, and the landmines - including `ExecCommander.Run`, the
+non-streaming path used by the `notify` and `cleanup` hooks, which still has the
+grandchild-holds-the-pipe defect that phase 4 fixed in `RunStream`. A hook that backgrounds a
+process wedges the daemon permanently; shipped defaults do not, which is the only reason it
+was left. Superseded on its two deferred items, which are the work above.
 
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
 `internal/dispatch`, `internal/view`'s layout, or the launch path in `~/dotfiles`:
@@ -133,3 +141,6 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - Any test that reaches `config.Load(config.ConfigPath())` must set its own `HOME`. `ConfigPath` resolves under `os.UserHomeDir`, so without one the suite reads the developer's real `~/.config/vigil/config.toml` - and `panel_auto = "false"` there, the documented way to turn the panel off, turned the suite red. Same class as the `cachePath` note above, different file
 - Panel geometry is tmux's concern, not vigil's: vigil renders to fit whatever pane it is given and never chooses or changes its own size. Both panel creation paths live on the dotfiles side (`~/dotfiles`, `scripts/scripts/lib/tmux.sh`) - a separate repository. `add_vigil_panel <window-target>` is the one implementation of "split a panel and mark the pane"; `vigil-panel` (bound to `prefix p`) is a thin toggle over it, and `create_tmux_session` calls it for every new session
 - The dotfiles half has one non-obvious rule vigil readers keep rediscovering: `create_tmux_session` runs `tmux new-session -d`, and a detached session has no client, so tmux sizes its windows to `default-size` 80x24. A 40-column panel is then half the window and tmux scales it to ~175 columns when a 350-column client attaches. `new-session` therefore takes `-x/-y` from the calling client (omitted entirely when there is no client - real tmux rejects an empty `-x` and would cost the user the session). `prefix p` never had this problem, because the window it splits is already at client size
+- `esc` unwinds one layer per press: confirm prompt / multi-selection / dispatch prompt, then failed and refused dispatch jobs, then quit. The dismiss layer sends a `RequestDismiss` frame **with an empty ID**, so an old daemon drops it via `jobs.submit`'s empty-ID guard rather than registering an undismissable refusal for a type it does not know.
+- Every vigil client stats its own executable every `binCheckInterval` and re-execs when size or mtime changes, deferring while a prompt or a selection is open and never within `binRestartFloor` of its own start. **The changed stamp must be seen on two consecutive checks**: `make build` writes `./vigil` in place, and exec'ing a half-written file kills the pane. A startup probe that failed leaves no baseline at all, so the first stamp a process can actually get is adopted rather than compared against zero. `checkBinary` reports whether to quit and both tick arms return `tea.Quit` when it does - the exec itself happens in `main` after `p.Run()` returns, because Bubble Tea owns the terminal inside `Update`. **macOS only**: on Linux `os.Executable()` resolves to `"/path/vigil (deleted)"` after a rename-over, the stat fails, and the whole feature (including `daemon outdated`) is a permanent, fail-closed no-op.
+- **The daemon never restarts itself.** It publishes `Snapshot.DaemonBin` and clients render `daemon outdated`. Restarting it would drop every connection, so every panel would bounce through daemon-lost on every install. This was designed, rejected, and the reasoning is in the spec - do not reintroduce it.
