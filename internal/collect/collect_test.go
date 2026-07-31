@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,9 +131,14 @@ func TestSnapshotDeduplicatesPRFetchesByBranchAndGitRoot(t *testing.T) {
 	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
 
 	c := New(&config.Config{}, cmd)
-	sessions, err := c.Snapshot(context.Background())
+	ctx := context.Background()
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	c.RefreshRemote(ctx)
+	sessions, err := c.Snapshot(ctx)
 	if err != nil {
-		t.Fatalf("Snapshot: %v", err)
+		t.Fatalf("second Snapshot: %v", err)
 	}
 	if len(sessions) != 2 {
 		t.Fatalf("got %d sessions, want 2", len(sessions))
@@ -191,24 +197,30 @@ func TestSnapshotSkipsPRFetchWithinPRInterval(t *testing.T) {
 	cmd := singleBranchCommander()
 	cmd.On("gh", `{"number": 42, "state": "MERGED"}`, nil)
 
+	ctx := context.Background()
 	c := New(&config.Config{}, cmd)
-	first, err := c.Snapshot(context.Background())
-	if err != nil {
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("first Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
 	if got := countGhCalls(cmd); got != 1 {
-		t.Fatalf("got %d gh calls on the first Snapshot, want 1", got)
+		t.Fatalf("got %d gh calls after the first pass, want 1", got)
 	}
-
-	second, err := c.Snapshot(context.Background())
+	first, err := c.Snapshot(ctx)
 	if err != nil {
 		t.Fatalf("second Snapshot: %v", err)
 	}
+
+	c.RefreshRemote(ctx)
 	if got := countGhCalls(cmd); got != 1 {
-		t.Errorf("got %d gh calls after two Snapshots, want 1 (memo should skip the refetch)", got)
+		t.Errorf("got %d gh calls after two passes, want 1 (the store should skip the refetch)", got)
+	}
+	second, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("third Snapshot: %v", err)
 	}
 	if second[0].PR != first[0].PR {
-		t.Error("second Snapshot should reuse the memoized *PRStatus pointer")
+		t.Error("the second Snapshot should reuse the stored *PRStatus pointer")
 	}
 }
 
@@ -220,14 +232,17 @@ func TestSnapshotRefetchesPRAfterPRInterval(t *testing.T) {
 	c := New(&config.Config{}, cmd)
 	c.clock = func() time.Time { return now }
 
-	if _, err := c.Snapshot(context.Background()); err != nil {
+	ctx := context.Background()
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("first Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
 
 	now = now.Add(c.PRInterval)
-	if _, err := c.Snapshot(context.Background()); err != nil {
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("second Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
 	if got := countGhCalls(cmd); got != 2 {
 		t.Errorf("got %d gh calls, want 2 (the PR interval has elapsed)", got)
 	}
@@ -241,25 +256,34 @@ func TestSnapshotKeepsLastPRWhenFetchFails(t *testing.T) {
 	c := New(&config.Config{}, cmd)
 	c.clock = func() time.Time { return now }
 
-	first, err := c.Snapshot(context.Background())
-	if err != nil {
+	ctx := context.Background()
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("first Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
+	first, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
 	if first[0].PR == nil {
-		t.Fatal("first Snapshot should populate PR")
+		t.Fatal("the first pass should populate PR")
 	}
 
 	cmd.On("gh", "not json", nil)
 	now = now.Add(c.PRInterval)
-	second, err := c.Snapshot(context.Background())
+	c.RefreshRemote(ctx)
+	second, err := c.Snapshot(ctx)
 	if err != nil {
-		t.Fatalf("second Snapshot: %v", err)
+		t.Fatalf("third Snapshot: %v", err)
 	}
 	if second[0].PR == nil {
 		t.Fatal("a failed PR fetch should keep the last known PR, got nil")
 	}
 	if second[0].PR != first[0].PR {
 		t.Errorf("got PR %+v, want the previous pointer %+v", second[0].PR, first[0].PR)
+	}
+	if second[0].PRPending {
+		t.Error("a failed refetch must not re-mark the branch pending: Detect would stop seeing it")
 	}
 }
 
@@ -336,26 +360,57 @@ func TestInvalidateForcesARefetchOfGitAndPR(t *testing.T) {
 	cmd := singleBranchCommander()
 	cmd.On("gh", `{"number": 42, "state": "MERGED"}`, nil)
 
+	ctx := context.Background()
 	c := New(&config.Config{}, cmd)
-	if _, err := c.Snapshot(context.Background()); err != nil {
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("first Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
 	if got := countGitCalls(cmd); got != 1 {
 		t.Fatalf("got %d git calls on the first Snapshot, want 1", got)
 	}
 	if got := countGhCalls(cmd); got != 1 {
-		t.Fatalf("got %d gh calls on the first Snapshot, want 1", got)
+		t.Fatalf("got %d gh calls after the first pass, want 1", got)
 	}
 
 	c.Invalidate()
-	if _, err := c.Snapshot(context.Background()); err != nil {
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("second Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
 	if got := countGitCalls(cmd); got != 2 {
 		t.Errorf("got %d git calls after Invalidate, want 2 (the memo should have been dropped)", got)
 	}
 	if got := countGhCalls(cmd); got != 2 {
-		t.Errorf("got %d gh calls after Invalidate, want 2 (the memo should have been dropped)", got)
+		t.Errorf("got %d gh calls after Invalidate, want 2 (every entry should have been made due)", got)
+	}
+}
+
+// TestInvalidateDoesNotReMarkBranchesPending is why Invalidate zeroes
+// fetchedAt instead of dropping the entries. A pending session is skipped by
+// transition.Detect, so an Invalidate that blanked the store would have the
+// forced refresh swallow the very transition it was pressed to go and find.
+func TestInvalidateDoesNotReMarkBranchesPending(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	ctx := context.Background()
+	c := New(&config.Config{}, cmd)
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	c.RefreshRemote(ctx)
+
+	c.Invalidate()
+	sessions, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if sessions[0].PRPending {
+		t.Error("Invalidate must leave the branch resolved: it makes entries due, it does not forget them")
+	}
+	if sessions[0].PR == nil {
+		t.Error("Invalidate must leave the last known PR readable until the refetch lands")
 	}
 }
 
@@ -395,15 +450,18 @@ func TestSnapshotGitGatingIndependentOfPRElapsing(t *testing.T) {
 	c := New(&config.Config{}, cmd)
 	c.clock = func() time.Time { return now }
 
-	if _, err := c.Snapshot(context.Background()); err != nil {
+	ctx := context.Background()
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("first Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
 	firstGit, firstGh := countGitCalls(cmd), countGhCalls(cmd)
 
 	now = now.Add(c.GitInterval)
-	if _, err := c.Snapshot(context.Background()); err != nil {
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("second Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
 	if got := countGitCalls(cmd); got <= firstGit {
 		t.Errorf("got %d git calls, want more than %d (git interval elapsed)", got, firstGit)
 	}
@@ -422,19 +480,261 @@ func TestSnapshotPRGatingIndependentOfGitElapsing(t *testing.T) {
 	c.GitInterval = 10 * time.Second
 	c.PRInterval = 1 * time.Second
 
-	if _, err := c.Snapshot(context.Background()); err != nil {
+	ctx := context.Background()
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("first Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
 	firstGit, firstGh := countGitCalls(cmd), countGhCalls(cmd)
 
 	now = now.Add(c.PRInterval)
-	if _, err := c.Snapshot(context.Background()); err != nil {
+	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("second Snapshot: %v", err)
 	}
+	c.RefreshRemote(ctx)
 	if got := countGitCalls(cmd); got != firstGit {
 		t.Errorf("got %d git calls, want %d (git interval has not elapsed)", got, firstGit)
 	}
 	if got := countGhCalls(cmd); got <= firstGh {
 		t.Errorf("got %d gh calls, want more than %d (PR interval elapsed)", got, firstGh)
 	}
+}
+
+// TestSnapshotIssuesNoGhCalls is the entire point of the change and nothing
+// else pins it. Snapshot may do local work only; every network call belongs to
+// a poller running on its own goroutine.
+func TestSnapshotIssuesNoGhCalls(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	c := New(&config.Config{}, cmd)
+	if _, err := c.Snapshot(context.Background()); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if got := countGhCalls(cmd); got != 0 {
+		t.Errorf("got %d gh calls inside Snapshot, want 0: publication must never be behind a network call", got)
+	}
+}
+
+// TestSnapshotMarksAnUnresolvedBranchPending and its sibling below are the
+// two halves of the contract Detect reads: pending means "never resolved",
+// and it must clear once the poller has an answer - including the answer
+// "there is no PR".
+func TestSnapshotMarksAnUnresolvedBranchPending(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	c := New(&config.Config{}, cmd)
+	sessions, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !sessions[0].PRPending {
+		t.Error("want PRPending on the first Snapshot: nothing has fetched a PR yet")
+	}
+	if sessions[0].PR != nil {
+		t.Errorf("got PR %+v, want nil before any pass has run", sessions[0].PR)
+	}
+}
+
+func TestRefreshRemoteResolvesTheBranchForTheNextSnapshot(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	ctx := context.Background()
+	c := New(&config.Config{}, cmd)
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	c.RefreshRemote(ctx)
+
+	sessions, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if sessions[0].PRPending {
+		t.Error("PRPending should have cleared once the poller had an answer")
+	}
+	if sessions[0].PR == nil || sessions[0].PR.Number != 42 {
+		t.Errorf("got PR %+v, want number 42", sessions[0].PR)
+	}
+}
+
+// TestAResolvedBranchWithNoPRIsNotPending is the case that would otherwise
+// mute a session forever: gh answering "there is no PR" is an answer, and the
+// session has to become visible to Detect.
+func TestAResolvedBranchWithNoPRIsNotPending(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", "", nil)
+
+	ctx := context.Background()
+	c := New(&config.Config{}, cmd)
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	c.RefreshRemote(ctx)
+
+	sessions, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if sessions[0].PRPending {
+		t.Error("a branch gh answered for is resolved, even when the answer is that it has no PR")
+	}
+	if sessions[0].PR != nil {
+		t.Errorf("got PR %+v, want nil", sessions[0].PR)
+	}
+}
+
+// TestASessionWithNoGitRootIsNeverPending: a session outside a repository can
+// never have a PR, so marking it pending would hide it from Detect for the
+// life of the process.
+func TestASessionWithNoGitRootIsNeverPending(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|alpha|/tmp/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.On("git", "", nil)
+
+	c := New(&config.Config{}, cmd)
+	sessions, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if sessions[0].PRPending {
+		t.Error("a session with no git root must not be marked pending")
+	}
+}
+
+// TestPassEvictsABranchThatLeftTheWorkingSet replaces the pruning the old
+// per-Snapshot memo rebuild did for free. Without it the store grows for the
+// life of the daemon and a renamed branch keeps its old PR forever.
+func TestPassEvictsABranchThatLeftTheWorkingSet(t *testing.T) {
+	branch := "feature"
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|alpha|/repo/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
+			return "/repo/alpha", nil
+		},
+		"git branch --show-current": func(context.Context, string, []string) (string, error) {
+			return branch, nil
+		},
+	}
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	ctx := context.Background()
+	c := New(&config.Config{}, cmd)
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	c.RefreshRemote(ctx)
+
+	oldKey := "feature\x00/repo/alpha"
+	c.prs.mu.Lock()
+	_, present := c.prs.entries[oldKey]
+	c.prs.mu.Unlock()
+	if !present {
+		t.Fatalf("fixture is broken: %q should be in the store after a pass", oldKey)
+	}
+
+	branch = "renamed"
+	c.Invalidate() // drop the git memo so the new branch is read
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	c.RefreshRemote(ctx)
+
+	c.prs.mu.Lock()
+	_, stillPresent := c.prs.entries[oldKey]
+	c.prs.mu.Unlock()
+	if stillPresent {
+		t.Errorf("%q is still in the store after leaving the working set", oldKey)
+	}
+}
+
+// TestAFailedEnumerationDoesNotWipeThePRStore: a Snapshot that cannot
+// enumerate tmux knows nothing about the working set, so it must not post one.
+// A regression that tracked before the error check would post an empty set; a
+// pass prunes unconditionally, so the store would be wiped, every session would
+// come back PRPending, and Detect skips a pending session - one transient tmux
+// failure would silently swallow a real Done, its notify hook and its cleanup.
+func TestAFailedEnumerationDoesNotWipeThePRStore(t *testing.T) {
+	tmuxBroken := false
+	cmd := singleBranchCommander()
+	cmd.HandlerFuncs["tmux"] = func(_ context.Context, _ string, args []string) (string, error) {
+		if tmuxBroken {
+			return "", context.DeadlineExceeded
+		}
+		if len(args) > 0 && args[0] == "list-windows" {
+			return "alpha|0", nil
+		}
+		return "1700000000|alpha|/repo/alpha", nil
+	}
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	ctx := context.Background()
+	c := New(&config.Config{}, cmd)
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	c.RefreshRemote(ctx)
+	sessions, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if sessions[0].PRPending || sessions[0].PR == nil {
+		t.Fatalf("fixture is broken: want the branch resolved before the failure, got PRPending=%v PR=%+v",
+			sessions[0].PRPending, sessions[0].PR)
+	}
+
+	tmuxBroken = true
+	if _, err := c.Snapshot(ctx); err == nil {
+		t.Fatal("want an error when tmux enumeration fails")
+	}
+	c.RefreshRemote(ctx)
+
+	tmuxBroken = false
+	sessions, err = c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot after recovery: %v", err)
+	}
+	if sessions[0].PRPending {
+		t.Error("a failed enumeration must not re-mark the branch pending: Detect would stop seeing it")
+	}
+	if sessions[0].PR == nil || sessions[0].PR.Number != 42 {
+		t.Errorf("got PR %+v, want number 42 still in the store", sessions[0].PR)
+	}
+}
+
+// TestSnapshotAndRefreshRemoteAreRaceFree drives the two goroutines the design
+// actually creates against each other. -race is the assertion; the loop counts
+// are only there to make a window.
+func TestSnapshotAndRefreshRemoteAreRaceFree(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	ctx := context.Background()
+	c := New(&config.Config{}, cmd)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			if _, err := c.Snapshot(ctx); err != nil {
+				t.Errorf("Snapshot: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			c.RefreshRemote(ctx)
+		}
+	}()
+	wg.Wait()
 }

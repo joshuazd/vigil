@@ -528,3 +528,75 @@ func TestRunLogsARealHookFailure(t *testing.T) {
 		t.Errorf("got %q, want the log to name the hook, the session, and the underlying error", logged[0])
 	}
 }
+
+// TestDetectDoesNotSeedAPendingSession is the whole reason PRPending exists.
+// Without the skip, the first observation seeds the session at its PR-less
+// state (Idle) and the second - once the async fill lands - reads as a
+// transition into Done, which on the daemon runs auto_cleanup against an
+// already-merged worktree on every start.
+//
+// Two Detect calls, not one: a single call proves nothing, because the first
+// call primes and returns nothing whether or not the skip exists.
+func TestDetectDoesNotSeedAPendingSession(t *testing.T) {
+	d := NewDetector()
+
+	if events := d.Detect([]*session.Session{
+		{Name: "alpha", PRPending: true},
+	}); len(events) != 0 {
+		t.Fatalf("got %d events on the priming call, want 0", len(events))
+	}
+
+	events := d.Detect([]*session.Session{
+		{Name: "alpha", PR: &session.PRStatus{Number: 1, State: "MERGED"}},
+	})
+	if len(events) != 0 {
+		t.Fatalf("got %d events, want 0: a pending session must not be seeded, so the observation that carries real PR data is its first sighting, not a transition", len(events))
+	}
+}
+
+// TestDetectStillReportsATransitionAfterAPendingSession is the other half:
+// the skip must mute the seed, not the session. A Detect that dropped pending
+// sessions permanently would pass the test above and silence every later
+// notify hook for that session.
+func TestDetectStillReportsATransitionAfterAPendingSession(t *testing.T) {
+	d := NewDetector()
+
+	d.Detect([]*session.Session{{Name: "alpha", PRPending: true}})
+	d.Detect([]*session.Session{
+		{Name: "alpha", PR: &session.PRStatus{Number: 1, State: "OPEN"}},
+	})
+
+	events := d.Detect([]*session.Session{
+		{Name: "alpha", PR: &session.PRStatus{Number: 1, State: "MERGED"}},
+	})
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if events[0].New != session.Done {
+		t.Errorf("got new state %v, want Done", events[0].New)
+	}
+}
+
+// TestDetectSeedsAPendingSessionThatHasAFallbackPR pins the PR == nil half of
+// the condition. On a client, Model.prCache fills the last known PR for a
+// branch before transitions are checked, so a pending session that already has
+// data is as good as a resolved one. Skipping on PRPending alone would mute
+// every transition for every branch the client has history for, for as long as
+// the daemon kept republishing pending.
+func TestDetectSeedsAPendingSessionThatHasAFallbackPR(t *testing.T) {
+	d := NewDetector()
+
+	d.Detect([]*session.Session{{
+		Name:      "alpha",
+		PRPending: true,
+		PR:        &session.PRStatus{Number: 1, State: "OPEN"},
+	}})
+
+	events := d.Detect([]*session.Session{{
+		Name: "alpha",
+		PR:   &session.PRStatus{Number: 1, State: "MERGED"},
+	}})
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: a pending session with a cached PR must still be seeded", len(events))
+	}
+}

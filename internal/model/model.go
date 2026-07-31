@@ -247,6 +247,12 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		daemonWriteMu: &sync.Mutex{},
 	}
 
+	// The collector's remote pollers fetch off the poll loop. Starting them
+	// unconditionally is safe: they are woken only by Snapshot, and a
+	// daemon-fed client never calls it, so this client's workers block for the
+	// life of the process and spend no gh budget.
+	m.collector.Start(ctx)
+
 	// Load the cache synchronously, on both the daemon and self-polling
 	// paths, so the first paint is never blank: the daemon may not have
 	// completed a successful poll yet. Doing it here rather than as a command

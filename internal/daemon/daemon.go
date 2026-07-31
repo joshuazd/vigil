@@ -163,6 +163,11 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
+	// The collector's remote pollers fetch off the poll loop. Without this
+	// they are never woken and the daemon publishes tmux and git forever
+	// while never fetching a PR.
+	s.Collector.Start(ctx)
+
 	ticker := time.NewTicker(s.Interval)
 	defer ticker.Stop()
 
@@ -175,6 +180,9 @@ func (s *Server) Run(ctx context.Context) error {
 			accepted.Wait()
 			s.closeClients()
 			s.pendingEffects.Wait()
+			// Returning here releases the flock and unlinks the socket, so it
+			// must not happen while a poller still has a gh child running.
+			s.Collector.Wait()
 			return nil
 		case conn := <-incoming:
 			s.addClient(ctx, conn)

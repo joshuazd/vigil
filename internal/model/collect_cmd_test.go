@@ -636,6 +636,8 @@ func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 	m.cmd = cmd
 	m.collector = collect.New(&config.Config{}, cmd)
 
+	ctx := context.Background()
+
 	unforced := m.startPoll(false)
 	if unforced == nil {
 		t.Fatal("the first poll was refused")
@@ -643,8 +645,12 @@ func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 	if _, ok := unforced().(SnapshotMsg); !ok {
 		t.Fatal("the first poll did not produce a SnapshotMsg")
 	}
+	if got := countCalls(cmd, "gh"); got != 0 {
+		t.Fatalf("got %d gh calls inside a poll, want 0: Snapshot must not touch the network", got)
+	}
+	m.collector.RefreshRemote(ctx)
 	if got := countCalls(cmd, "gh"); got != 1 {
-		t.Fatalf("got %d gh calls after the first poll, want 1", got)
+		t.Fatalf("got %d gh calls after the first pass, want 1", got)
 	}
 
 	m.pollInFlight = false // stand in for that first poll's SnapshotMsg having landed
@@ -655,8 +661,9 @@ func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 	if _, ok := forced().(SnapshotMsg); !ok {
 		t.Fatal("the forced poll did not produce a SnapshotMsg")
 	}
+	m.collector.RefreshRemote(ctx)
 	if got := countCalls(cmd, "gh"); got != 2 {
-		t.Errorf("got %d gh calls after a forced poll, want 2 (force should have invalidated the PR memo)", got)
+		t.Errorf("got %d gh calls after a forced poll, want 2 (force should have made every entry due)", got)
 	}
 }
 
@@ -959,6 +966,8 @@ func TestRefreshKeyReachesInvalidateEndToEnd(t *testing.T) {
 	m.cmd = cmd
 	m.collector = collect.New(&config.Config{}, cmd)
 
+	ctx := context.Background()
+
 	first := m.startPoll(false)
 	if first == nil {
 		t.Fatal("the first poll was refused")
@@ -966,8 +975,12 @@ func TestRefreshKeyReachesInvalidateEndToEnd(t *testing.T) {
 	if _, ok := first().(SnapshotMsg); !ok {
 		t.Fatal("the first poll did not produce a SnapshotMsg")
 	}
+	if got := countCalls(cmd, "gh"); got != 0 {
+		t.Fatalf("got %d gh calls inside a poll, want 0: Snapshot must not touch the network", got)
+	}
+	m.collector.RefreshRemote(ctx)
 	if got := countCalls(cmd, "gh"); got != 1 {
-		t.Fatalf("got %d gh calls after the first poll, want 1", got)
+		t.Fatalf("got %d gh calls after the first pass, want 1", got)
 	}
 	m.pollInFlight = false // stand in for that poll's SnapshotMsg having landed
 
@@ -979,7 +992,130 @@ func TestRefreshKeyReachesInvalidateEndToEnd(t *testing.T) {
 	if _, ok := refresh().(SnapshotMsg); !ok {
 		t.Fatal("Refresh did not produce a SnapshotMsg")
 	}
+	m.collector.RefreshRemote(ctx)
 	if got := countCalls(cmd, "gh"); got != 2 {
 		t.Errorf("got %d gh calls after pressing r, want 2 (r must invalidate the PR memo)", got)
+	}
+}
+
+// TestNewStartsTheRemoteWorkers pins the client half of the line the daemon
+// needed in Run. Without Collector.Start in newModel, a self-polling panel
+// renders tmux and git correctly and never shows a PR column again, and every
+// test in internal/collect stays green because they drive RefreshRemote
+// directly.
+//
+// This goes through the real New rather than newTestModel: newTestModel builds
+// a Model literal, so it cannot observe anything newModel does.
+func TestNewStartsTheRemoteWorkers(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no socket there, so this client self-polls
+
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|alpha|/repo/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
+			return "/repo/alpha", nil
+		},
+		"git branch --show-current": func(context.Context, string, []string) (string, error) {
+			return "feature", nil
+		},
+	}
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	m := New(&config.Config{}, cmd)
+	defer m.cancel()
+	if m.daemonDecoder != nil {
+		t.Fatal("fixture is broken: this client found a daemon and will never self-poll")
+	}
+
+	// Init's first collectCmd is what nudges the workers.
+	if msg := m.collectCmd(false)(); msg == nil {
+		t.Fatal("collectCmd produced no message")
+	}
+
+	deadline := time.After(3 * time.Second)
+	for cmd.CallCount("gh") == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("no gh call after 3s: New never started the remote workers")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestADaemonFedClientSpendsNoGhBudget is the whole reason the remote layer
+// has no ticker. One daemon means one gh budget regardless of how many panels
+// are open; a ticker in the poller would quietly restore per-panel polling and
+// nothing else in the suite would notice.
+//
+// Two things give it teeth against exactly that, and both are load-bearing.
+// The self-poll before the daemon attaches is one: the PR store has no working
+// set until a Snapshot tracks one, and a pass over an empty working set spends
+// nothing whether a ticker or a nudge woke it. Zeroing PRInterval is the
+// other: at the default 30s a woken pass would find nothing due and spend
+// nothing either. It is also the real path - a client that loses a daemon
+// self-polls and gets one back.
+func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|alpha|/repo/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
+			return "/repo/alpha", nil
+		},
+		"git branch --show-current": func(context.Context, string, []string) (string, error) {
+			return "feature", nil
+		},
+	}
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+	m.collector.PRInterval = 0
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.collector.Start(ctx)
+
+	if _, err := m.collector.Snapshot(ctx); err != nil {
+		t.Fatalf("the self-polling snapshot failed: %v", err)
+	}
+	deadline := time.After(3 * time.Second)
+	for cmd.CallCount("gh") == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("the self-polling client never spent a gh call: this fixture cannot detect a ticker")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	// Hardcoded, not latched off the count so far: fetch.nwoCache is a
+	// package-level sync.Map keyed by git root, shared across every test in
+	// the binary. This fixture's getNWO has no "git remote get-url origin"
+	// handler, so fetchReviewThreads bails before its graphql call and one
+	// gh call is the only one a pass over /repo/alpha can ever spend here -
+	// but only as long as nothing else in the binary warms that cache entry
+	// first. Latching off cmd.CallCount would silently stop catching a
+	// ticker regression the day some other test did.
+	const selfPolled = 1
+	if got := cmd.CallCount("gh"); got != selfPolled {
+		t.Fatalf("got %d gh calls from the self-polling client, want %d", got, selfPolled)
+	}
+
+	m.daemonConn = &fakeConn{}
+	if got := m.startPoll(false); got != nil {
+		t.Fatal("a daemon-fed client issued a poll of its own")
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// CallCount, not countCalls: the workers are live, so a ticker would have
+	// this assertion race the append it exists to catch.
+	if got := cmd.CallCount("gh"); got != selfPolled {
+		t.Errorf("got %d gh calls once a daemon was feeding this client, want %d: only Snapshot may wake a poller", got, selfPolled)
 	}
 }
