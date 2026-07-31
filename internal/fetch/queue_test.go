@@ -150,3 +150,92 @@ func TestSearchReviewRequestsReturnsErrorOnBadJSON(t *testing.T) {
 		t.Fatal("want an error on unparseable output, got nil")
 	}
 }
+
+const shortAPIOutput = `{
+  "next": null,
+  "data": [
+    {"id":223477,
+     "name":"Bug: investigation status does not revert to Open when draft report is deleted",
+     "app_url":"https://app.shortcut.com/huntress/story/223477",
+     "updated_at":"2026-07-31T19:18:13Z"},
+    {"id":223453,
+     "name":"Control Plane - expose EDR Athena Redfig controls",
+     "app_url":"https://app.shortcut.com/huntress/story/223453",
+     "updated_at":"2026-07-31T14:25:54Z"}
+  ]
+}`
+
+func TestSearchStoriesParsesItems(t *testing.T) {
+	cmd := NewMockCommander()
+	cmd.On("short", shortAPIOutput, nil)
+
+	items, err := SearchStories(context.Background(), cmd, "owner:%self% !is:done", 20)
+	if err != nil {
+		t.Fatalf("SearchStories: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+
+	want := session.QueueItem{
+		Kind:      session.QueueStory,
+		ID:        "223477",
+		Title:     "Bug: investigation status does not revert to Open when draft report is deleted",
+		Input:     "https://app.shortcut.com/huntress/story/223477",
+		UpdatedAt: time.Date(2026, 7, 31, 19, 18, 13, 0, time.UTC).Unix(),
+	}
+	if items[0] != want {
+		t.Errorf("items[0] = %+v, want %+v", items[0], want)
+	}
+}
+
+// TestSearchStoriesURLEncodesTheQuery pins that the query reaches short as one
+// encoded path argument. The default query contains a space, a percent and a
+// bang; unencoded, the space alone truncates the query server-side and the
+// queue silently returns the wrong stories.
+func TestSearchStoriesURLEncodesTheQuery(t *testing.T) {
+	cmd := NewMockCommander()
+	cmd.On("short", `{"data":[]}`, nil)
+
+	if _, err := SearchStories(context.Background(), cmd, "owner:%self% !is:done", 20); err != nil {
+		t.Fatalf("SearchStories: %v", err)
+	}
+	if len(cmd.Calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(cmd.Calls))
+	}
+	call := cmd.Calls[0]
+	if call.Name != "short" {
+		t.Errorf("ran %q, want short", call.Name)
+	}
+	want := []string{"api", "/search/stories?query=owner%3A%25self%25+%21is%3Adone"}
+	if len(call.Args) != len(want) {
+		t.Fatalf("args = %v, want %v", call.Args, want)
+	}
+	for i := range want {
+		if call.Args[i] != want[i] {
+			t.Errorf("args[%d] = %q, want %q", i, call.Args[i], want[i])
+		}
+	}
+}
+
+func TestSearchStoriesAppliesLimit(t *testing.T) {
+	cmd := NewMockCommander()
+	cmd.On("short", shortAPIOutput, nil)
+
+	items, err := SearchStories(context.Background(), cmd, "owner:%self%", 1)
+	if err != nil {
+		t.Fatalf("SearchStories: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+}
+
+func TestSearchStoriesReturnsErrorOnFailure(t *testing.T) {
+	cmd := NewMockCommander()
+	cmd.On("short", "", errors.New("short: command not found"))
+
+	if _, err := SearchStories(context.Background(), cmd, "owner:%self%", 20); err == nil {
+		t.Fatal("want an error when short fails, got nil")
+	}
+}

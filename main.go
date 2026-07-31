@@ -22,6 +22,12 @@ import (
 
 var version = "dev"
 
+// startupDependencies are the binaries vigil refuses to start without.
+// `short` is deliberately absent: a missing Shortcut CLI leaves the story half
+// of the work queue empty, which is a degraded feature rather than a reason to
+// refuse to run.
+var startupDependencies = []string{"tmux", "git", "gh"}
+
 // execSelf is a seam. A test that called syscall.Exec directly would replace
 // the test binary with a second copy of vigil.
 var execSelf = syscall.Exec
@@ -77,7 +83,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runConfigGet(rest, stdout, stderr)
 	}
 
-	for _, dep := range []string{"tmux", "git", "gh"} {
+	for _, dep := range startupDependencies {
 		if _, err := exec.LookPath(dep); err != nil {
 			_, _ = fmt.Fprintf(stderr, "vigil: %s not found in PATH\n", dep)
 			return 1

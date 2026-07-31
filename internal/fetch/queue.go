@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -74,4 +75,46 @@ func parseTimestamp(s string) int64 {
 		return 0
 	}
 	return t.Unix()
+}
+
+// SearchStories lists Shortcut stories per the configured query.
+//
+// `short api` is used rather than `short search`: `short search --format`
+// templates do not interpolate, and `short api` returns clean JSON on stdout
+// with its progress spinner on stderr, which Commander.Run discards.
+func SearchStories(ctx context.Context, cmd Commander, query string, limit int) ([]session.QueueItem, error) {
+	path := "/search/stories?query=" + url.QueryEscape(query)
+
+	out, err := cmd.Run(ctx, "", "short", "api", path)
+	if err != nil {
+		return nil, fmt.Errorf("short api: %w", err)
+	}
+
+	var payload struct {
+		Data []struct {
+			ID        int    `json:"id"`
+			Name      string `json:"name"`
+			AppURL    string `json:"app_url"`
+			UpdatedAt string `json:"updated_at"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return nil, fmt.Errorf("parsing short api output: %w", err)
+	}
+
+	if limit > 0 && len(payload.Data) > limit {
+		payload.Data = payload.Data[:limit]
+	}
+
+	items := make([]session.QueueItem, 0, len(payload.Data))
+	for _, d := range payload.Data {
+		items = append(items, session.QueueItem{
+			Kind:      session.QueueStory,
+			ID:        strconv.Itoa(d.ID),
+			Title:     d.Name,
+			Input:     d.AppURL,
+			UpdatedAt: parseTimestamp(d.UpdatedAt),
+		})
+	}
+	return items, nil
 }

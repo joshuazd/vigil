@@ -322,3 +322,15 @@ func TestRestartIfRequestedIgnoresANonModel(t *testing.T) {
 func TestTheRealModelSatisfiesRestartRequester(t *testing.T) {
 	var _ restartRequester = model.Model{}
 }
+
+// TestShortIsNotAStartupDependency pins the deliberate asymmetry: vigil must
+// keep working for anyone without Shortcut installed. A missing short leaves
+// the story half of the queue empty, which is a degraded feature; adding it to
+// this list would make it a refusal to start.
+func TestShortIsNotAStartupDependency(t *testing.T) {
+	for _, dep := range startupDependencies {
+		if dep == "short" {
+			t.Fatal("short must not be a startup dependency: vigil has to run without Shortcut")
+		}
+	}
+}
