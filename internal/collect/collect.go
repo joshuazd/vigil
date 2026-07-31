@@ -14,10 +14,6 @@ const (
 	defaultGitWorkers  = 8
 	defaultGitInterval = 3 * time.Second
 	defaultPRInterval  = 30 * time.Second
-
-	// prWorkers caps concurrent gh invocations. Each due branch costs two of
-	// them against a per-hour API quota, so this stays below GitWorkers.
-	prWorkers = 4
 )
 
 type Collector struct {
