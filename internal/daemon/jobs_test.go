@@ -447,6 +447,9 @@ func TestDetachedJobPassesTheFlag(t *testing.T) {
 
 			script := stream.lastScript()
 			if tt.want == "" {
+				if !strings.Contains(script, "sc-1") {
+					t.Errorf("script = %q, want it to contain the input", script)
+				}
 				if strings.Contains(script, "--detached") {
 					t.Errorf("script = %q, want no --detached", script)
 				}

@@ -136,7 +136,7 @@ func warnAboutAnUnmigratedDispatchHook(cfg *config.Config, stderr io.Writer) {
 		_, _ = fmt.Fprintf(stderr,
 			"vigil: the dispatch hook still passes %s; it now runs inside vigild, "+
 				"which has no terminal. See the dispatch section of the README: the hook "+
-				"should be DISPATCH_INLINE=1 dispatch --non-interactive {input}\n", stale)
+				"should be DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}\n", stale)
 		return
 	}
 
