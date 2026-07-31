@@ -185,3 +185,77 @@ session list (`SC-223453 ...`, `SC-223479 ...`, `main`) was unchanged start to f
   inside single-binary noise).
 - **Daemon-fed panel budget**: confirmed zero, over 95s (>60s `queue_interval`).
 - **Teardown**: clean, lock genuinely released.
+
+---
+
+# Re-verification after the `%self%` fix (`24079de`)
+
+Run by the controller directly, after the delegated agent spent an hour without starting it.
+Isolated daemon as before: own `HOME`, own `XDG_RUNTIME_DIR`, own socket, `GH_TOKEN` captured
+into a variable first (the brief's one-line form evaluates `HOME` before the token capture and
+silently leaves `gh` unauthenticated - a real defect in the plan document).
+
+**Config: the shipped defaults.** `VIGIL_QUEUE_STORY_QUERY` deliberately NOT set, because the
+whole point is whether the value every user gets now works.
+
+```
+$ jq '{queue_len:(.queue|length), queue_hidden:.queue_hidden,
+       stories:[.queue[]?|select(.kind=="story")|.id],
+       reviews:([.queue[]?|select(.kind=="review")]|length)}'
+{ "queue_len": 12, "queue_hidden": 1, "stories": [], "reviews": 12 }
+```
+
+Cross-checked against Shortcut at the same moment:
+
+```
+$ short api "/search/stories?query=owner%3Ajoshuazd%20%21is%3Adone%20%21is%3Aarchived"
+{ "total": 1, "ids": [223479], "names": ["Investigation Canvas/Panel - dynamic rep"] }
+```
+
+and against tmux: `SC-223479 Investigation Canvas/Panel - dynamic` is a live session.
+
+**The fix works.** Exactly one assigned story exists; the daemon fetched it through the
+substituted mention name and dedup then hid it because its session is live. `queue_hidden: 1`
+with zero stories rendered is the correct answer.
+
+This is conclusive rather than suggestive: **before the fix the default query returned
+`total: 0`, so nothing could ever be hidden.** A nonzero `queue_hidden` under the shipped
+default is only reachable if `%self%` was substituted.
+
+(The earlier run saw two stories, `223453` and `223479`. `223453` has since left the query -
+the user closed it out mid-session. The count moving is real-world drift, not instability.)
+
+**Teardown:** daemon killed by recorded PID, process gone, `vigild.sock` unlinked,
+`vigild.sock.lock` left in place as designed. The user's daemon (PID 13320) and all three of
+their panels confirmed alive and untouched throughout.
+
+## Step 5 was NOT run, and why
+
+The user authorized Step 5 conditionally: only via the isolated daemon, and only on condition
+that it not teleport them. That condition turns out not to be satisfiable through any
+non-interactive path:
+
+- `vigil dispatch` from the CLI sets `Request.Detached = false`. Only `enter` on a queue row in
+  the TUI sets it true. So a CLI dispatch expands `{flags}` to the empty string and **would
+  teleport the user** - precisely what they forbade.
+- Reaching the `enter` path means driving a live Bubble Tea TUI with `tmux send-keys` against a
+  real queue. A mis-aimed keystroke there dispatches the wrong item, or teleports.
+
+Attempting it to satisfy a checklist would have risked the exact outcome the user's condition
+existed to prevent, so it was not attempted.
+
+**What that leaves unproven:** that `--detached` actually suppresses the teleport inside
+`gh-review`/`shortcut-implement`, and that a dispatched item disappears from the queue once
+its own session exists.
+
+**What is proven without it:** `TestEnterOnAQueueRowDispatchesOverTheWire`
+(`internal/model/model_test.go`) drives `enter` through `m.Update`, stands up a real unix
+listener, decodes an actual `protocol.Request` and asserts `Detached == true`; and
+`TestDetachedJobPassesTheFlag` (`internal/daemon/jobs_test.go`) asserts `--detached` reaches
+the expanded hook script. Both were mutation-checked. So the chain is pinned from keystroke to
+hook string; only the shell scripts' own reaction to the flag is untested here - and
+`gh-review-poll` used `--detached --non-interactive` in production for months, which is
+indirect evidence the scripts honour it.
+
+Recommendation: run this the first time you dispatch from the queue after installing. If you
+are teleported, `{flags}` is missing from your `config.toml`.
