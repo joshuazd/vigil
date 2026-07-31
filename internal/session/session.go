@@ -124,6 +124,13 @@ type Session struct {
 	HasBell   bool      `json:"has_bell"`
 	Git       GitStatus `json:"git"`
 	PR        *PRStatus `json:"pr,omitempty"`
+
+	// PRPending means this session's branch has no entry in the PR store at
+	// all, which is not the same as a branch known to have no PR. It exists
+	// for transition.Detect: seeding a session at a PR-less state that the
+	// next observation contradicts is a burst of notify hooks, and
+	// auto_cleanup, on every daemon start.
+	PRPending bool `json:"pr_pending,omitempty"`
 }
 
 func (s *Session) State() SessionState {

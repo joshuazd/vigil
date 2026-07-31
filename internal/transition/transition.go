@@ -45,6 +45,15 @@ func (d *Detector) Detect(sessions []*session.Session) []Event {
 	next := make(map[string]session.SessionState, len(sessions))
 	var events []Event
 	for _, s := range sessions {
+		// A session whose PR has never resolved is not observed at all: no
+		// seed, no event, and deliberately not recorded in next, so the
+		// observation that carries real data is a first sighting. PR == nil is
+		// half the condition because a client fills the last known PR for the
+		// branch from prCache before this runs, and a session with data is as
+		// good as a resolved one.
+		if s.PRPending && s.PR == nil {
+			continue
+		}
 		state := s.State()
 		next[s.Name] = state
 		old, seen := d.prev[s.Name]
