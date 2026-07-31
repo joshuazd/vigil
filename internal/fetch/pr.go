@@ -1,9 +1,12 @@
 package fetch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -242,6 +245,25 @@ func getNWO(ctx context.Context, cmd Commander, gitRoot string) [2]string {
 	return nwo
 }
 
+// noPRMarker is how gh says a branch has no pull request. It exits 1 to say
+// it, which is indistinguishable from a transient failure unless the message
+// is read.
+var noPRMarker = []byte("no pull requests found")
+
+// definitiveAnswer reports whether an error is gh telling us something true
+// rather than gh failing. Retrying a true answer is what made a freshly
+// dispatched session take 5 to 10 seconds to appear: its branch has no PR yet,
+// so every poll spent three gh calls and 3s of backoff to be told the same
+// thing three times, all of it inside a synchronous Snapshot that publishes
+// nothing until it returns.
+func definitiveAnswer(err error) bool {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	return bytes.Contains(exit.Stderr, noPRMarker)
+}
+
 func runWithRetry(ctx context.Context, cmd Commander, dir string, name string, args ...string) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -251,6 +273,9 @@ func runWithRetry(ctx context.Context, cmd Commander, dir string, name string, a
 		out, err := cmd.Run(ctx, dir, name, args...)
 		if err == nil {
 			return out, nil
+		}
+		if definitiveAnswer(err) {
+			return "", err
 		}
 		lastErr = err
 		if attempt < 2 {
