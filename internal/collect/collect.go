@@ -2,6 +2,8 @@ package collect
 
 import (
 	"context"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -249,4 +251,63 @@ func groupByBranchRoot(sessions []*session.Session) []*branchRoot {
 		branches = append(branches, br)
 	}
 	return branches
+}
+
+// Queue merges the two queue stores, drops anything a live tmux session
+// already covers, sorts and caps. hidden is what this call removed, which is
+// the only number vigil can honestly report: the queries filter server-side
+// and vigil cannot see what they dropped.
+//
+// Pure over the stores plus sessions. Snapshot does not call it; the daemon
+// and the self-polling client each call it once per poll, and a daemon-fed
+// client never calls it at all.
+func (c *Collector) Queue(sessions []*session.Session) ([]session.QueueItem, int) {
+	if c.stories == nil && c.reviews == nil {
+		return nil, 0
+	}
+
+	var all []session.QueueItem
+	if c.stories != nil {
+		all = append(all, c.stories.list()...)
+	}
+	if c.reviews != nil {
+		all = append(all, c.reviews.list()...)
+	}
+
+	items := make([]session.QueueItem, 0, len(all))
+	hidden := 0
+	for _, it := range all {
+		if coveredBySession(it, sessions) {
+			hidden++
+			continue
+		}
+		items = append(items, it)
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Kind != items[j].Kind {
+			return items[i].Kind == session.QueueStory
+		}
+		return items[i].UpdatedAt > items[j].UpdatedAt
+	})
+
+	if c.QueueLimit > 0 && len(items) > c.QueueLimit {
+		items = items[:c.QueueLimit]
+	}
+	if len(items) == 0 {
+		return nil, hidden
+	}
+	return items, hidden
+}
+
+func coveredBySession(it session.QueueItem, sessions []*session.Session) bool {
+	for _, s := range sessions {
+		if it.MatchesSessionName(s.Name) {
+			return true
+		}
+		if it.Kind == session.QueueReview && s.PR != nil && strconv.Itoa(s.PR.Number) == it.ID {
+			return true
+		}
+	}
+	return false
 }

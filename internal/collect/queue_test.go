@@ -8,6 +8,7 @@ import (
 
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
+	"github.com/jzinkduda/vigil/internal/session"
 )
 
 // queueCommander answers both queue subprocesses and nothing else.
@@ -146,5 +147,90 @@ func TestQueueDisabledConstructsNoPollers(t *testing.T) {
 	}
 	if got := off.CallCount("short"); got != 0 {
 		t.Errorf("short called %d times with queue_enabled=false, want 0", got)
+	}
+}
+
+func seededCollector(t *testing.T) *Collector {
+	t.Helper()
+	c := New(&config.Config{}, queueCommander())
+	c.RefreshRemote(context.Background())
+	return c
+}
+
+func TestQueueReturnsBothKinds(t *testing.T) {
+	c := seededCollector(t)
+
+	items, hidden := c.Queue(nil)
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2", len(items))
+	}
+	if hidden != 0 {
+		t.Errorf("hidden = %d, want 0", hidden)
+	}
+	if items[0].Kind != session.QueueStory {
+		t.Errorf("items[0].Kind = %q, want story: stories sort before reviews", items[0].Kind)
+	}
+}
+
+// TestQueueHidesItemsWithASessionByName covers the primary dedup key on its
+// own: a review whose session exists but whose PR data has not been fetched
+// yet is still hidden.
+func TestQueueHidesItemsWithASessionByName(t *testing.T) {
+	c := seededCollector(t)
+	sessions := []*session.Session{
+		{Name: "PR-34967 Timeline tab"},
+		{Name: "SC-223480 Backfill audit rows"},
+	}
+
+	items, hidden := c.Queue(sessions)
+	if len(items) != 0 {
+		t.Errorf("got %d items, want 0: both have sessions", len(items))
+	}
+	if hidden != 2 {
+		t.Errorf("hidden = %d, want 2", hidden)
+	}
+}
+
+// TestQueueHidesReviewsByPRNumber covers the secondary key on its own. The
+// session is named nothing like the convention, so only the PR.Number match
+// can hide it. Tested separately from the name key so neither can carry the
+// other: if the name rule silently stopped working, this test would still
+// pass and the previous one would fail, which is the point.
+func TestQueueHidesReviewsByPRNumber(t *testing.T) {
+	c := seededCollector(t)
+	sessions := []*session.Session{
+		{Name: "some-unrelated-name", PR: &session.PRStatus{Number: 34967}},
+	}
+
+	items, hidden := c.Queue(sessions)
+	if hidden != 1 {
+		t.Errorf("hidden = %d, want 1", hidden)
+	}
+	for _, it := range items {
+		if it.Kind == session.QueueReview {
+			t.Errorf("review %s survived a session whose PR.Number matches", it.Label())
+		}
+	}
+}
+
+func TestQueueAppliesTheLimit(t *testing.T) {
+	c := seededCollector(t)
+	c.QueueLimit = 1
+
+	items, _ := c.Queue(nil)
+	if len(items) != 1 {
+		t.Errorf("got %d items, want 1", len(items))
+	}
+}
+
+func TestQueueIsNilWhenDisabled(t *testing.T) {
+	c := New(&config.Config{Settings: map[string]any{"queue_enabled": "false"}}, queueCommander())
+
+	items, hidden := c.Queue(nil)
+	if items != nil {
+		t.Errorf("items = %v, want nil", items)
+	}
+	if hidden != 0 {
+		t.Errorf("hidden = %d, want 0", hidden)
 	}
 }
