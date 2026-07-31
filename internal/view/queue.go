@@ -20,7 +20,13 @@ const queueLabelWidth = 20
 // hidden is what Collector.Queue removed because a session already covers it.
 // It is deliberately not "N filtered": the queries filter server-side and
 // those removals are not visible from here.
-func RenderQueue(items []session.QueueItem, hidden, cursor, width int, now time.Time) string {
+//
+// maxRows caps how many item rows are drawn (the header is not counted).
+// maxRows <= 0 means no cap. Items beyond it collapse into one "... +N more"
+// row rather than growing the section past what the caller budgeted, which is
+// what keeps the whole dashboard within m.height - RenderQueue has no other
+// way to know the terminal has a bottom edge.
+func RenderQueue(items []session.QueueItem, hidden, cursor, width, maxRows int, now time.Time) string {
 	if len(items) == 0 {
 		return ""
 	}
@@ -31,7 +37,19 @@ func RenderQueue(items []session.QueueItem, hidden, cursor, width int, now time.
 	}
 
 	lines := []string{FaintOnBar().Render(header)}
-	for i, it := range items {
+
+	shown := items
+	overflow := 0
+	if maxRows > 0 && len(items) > maxRows {
+		visible := maxRows - 1
+		if visible < 0 {
+			visible = 0
+		}
+		shown = items[:visible]
+		overflow = len(items) - visible
+	}
+
+	for i, it := range shown {
 		marker := "  "
 		if i == cursor {
 			marker = "> "
@@ -52,6 +70,9 @@ func RenderQueue(items []session.QueueItem, hidden, cursor, width int, now time.
 		}
 		lines = append(lines, row)
 	}
+	if overflow > 0 {
+		lines = append(lines, FaintOnBar().Render(fmt.Sprintf("… +%d more", overflow)))
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
@@ -60,6 +81,9 @@ func queueAge(updated int64, now time.Time) string {
 		return ""
 	}
 	d := now.Sub(time.Unix(updated, 0))
+	if d < 0 {
+		d = 0
+	}
 	switch {
 	case d < time.Hour:
 		return fmt.Sprintf("%dm", int(d.Minutes()))

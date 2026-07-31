@@ -59,6 +59,31 @@ func TestSelectedSessionIsNilOnAQueueRow(t *testing.T) {
 	}
 }
 
+// TestApplySnapshotClampsTheCursorToTheNewRowCount is Minor 3: a session
+// leaving between polls (auto_cleanup, most often) can leave the cursor
+// pointing past the end of the new session+queue space. Left alone, enter
+// would dispatch whatever queue row the cursor's stale absolute position now
+// happens to land on - unconfirmed, unlike every session action a stale
+// cursor could otherwise mis-target.
+func TestApplySnapshotClampsTheCursorToTheNewRowCount(t *testing.T) {
+	m := newTestModel()
+	m.queue = []session.QueueItem{
+		{Kind: session.QueueStory, ID: "1", Title: "x", Input: "sc-1"},
+		{Kind: session.QueueReview, ID: "2", Title: "y", Input: "sc-2"},
+	}
+	// 5 sessions + 2 queue items = 7 rows; cursor on the last one (queue row 1).
+	m.cursor = 6
+
+	m.applySnapshot([]*session.Session{
+		{Name: "alpha", PanePath: "/repo/alpha"},
+		{Name: "beta", PanePath: "/repo/beta"},
+	})
+
+	if want := m.rowCount() - 1; m.cursor != want {
+		t.Errorf("cursor = %d, want %d (rowCount()-1, clamped)", m.cursor, want)
+	}
+}
+
 func TestBatchSessionsNeverIncludesQueueRows(t *testing.T) {
 	m := modelWithQueue(t)
 	m.selected = map[string]bool{"sc-223480": true, "portal#34967": true, "alpha": true}
@@ -159,6 +184,46 @@ func TestHandleSnapshotStoresTheQueue(t *testing.T) {
 	}
 }
 
+// TestHandleSnapshotStoresTheQueueFromTheDaemon is
+// TestHandleSnapshotStoresTheQueue's daemon-fed half: that test only drives
+// the Local branch, so deleting `m.queue = msg.Queue` / `m.queueHidden =
+// msg.QueueHidden` from the non-local branch left the whole suite green - no
+// vigil client had ever been observed rendering a daemon-published queue, in
+// a test or on the real machine. This feeds a Snapshot through the
+// daemon-fed path (Local: false) and asserts the row actually renders,
+// rather than just checking the model's fields, since the fields alone
+// would not have caught the same class of defect in View() itself.
+func TestHandleSnapshotStoresTheQueueFromTheDaemon(t *testing.T) {
+	m := newTestModel()
+	m.daemonConn = &fakeConn{}
+	m.width, m.height = 120, 40
+	items := []session.QueueItem{{Kind: session.QueueStory, ID: "223480", Title: "Backfill", Input: "sc-223480"}}
+
+	next, _ := m.handleSnapshot(SnapshotMsg{
+		Epoch:       m.epoch,
+		Local:       false,
+		Sessions:    []*session.Session{{Name: "alpha", PanePath: "/repo/alpha"}},
+		Queue:       items,
+		QueueHidden: 2,
+	})
+	got := next.(Model)
+
+	if len(got.queue) != 1 || got.queue[0].ID != "223480" {
+		t.Fatalf("queue = %+v, want one item with ID 223480", got.queue)
+	}
+	if got.queueHidden != 2 {
+		t.Errorf("queueHidden = %d, want 2", got.queueHidden)
+	}
+
+	out := got.View()
+	if !strings.Contains(out, "QUEUE") {
+		t.Errorf("daemon-fed dashboard has no QUEUE section:\n%s", out)
+	}
+	if !strings.Contains(out, "sc-223480") {
+		t.Errorf("daemon-fed dashboard missing the queue row:\n%s", out)
+	}
+}
+
 // TestAFailedLocalSnapshotLeavesTheQueueIntact is Finding 2 made executable:
 // collectCmd returns a nil Queue alongside a nil Sessions on a failed poll,
 // and handleSnapshot must not let that blank a queue a prior successful poll
@@ -214,6 +279,76 @@ func TestDashboardViewFitsItsHeightWithQueue(t *testing.T) {
 	lines := strings.Split(m.View(), "\n")
 	if len(lines) != m.height {
 		t.Errorf("rendered %d lines, want %d (m.height)", len(lines), m.height)
+	}
+}
+
+// TestDashboardViewFitsItsHeightAcrossQueueLengths is the whole-branch
+// review's sweep: TestDashboardViewFitsItsHeightWithQueue above only ever
+// exercised one height, one queue length and one detailOpen state, so nothing
+// caught RenderQueue growing without a bound - a long queue could push the
+// combined table+queue section past m.height regardless of the table's own
+// 1-row floor. In an alt-screen Bubble Tea program, rendering more lines than
+// the terminal has scrolls the frame away and corrupts the display until a
+// resize.
+//
+// The first three cases are the reviewer's own measured overflow: height
+// 40/24/12 with a 20-item queue, which overflowed by +3, +11 and +12 lines
+// respectively before the fix.
+func TestDashboardViewFitsItsHeightAcrossQueueLengths(t *testing.T) {
+	type tc struct {
+		height     int
+		queueLen   int
+		detailOpen bool
+	}
+	cases := []tc{
+		{40, 20, true},
+		{24, 20, true},
+		{12, 20, false},
+
+		{40, 0, true},
+		{40, 0, false},
+		{40, 1, false},
+		{40, 5, true},
+		{40, 20, false},
+		{24, 0, true},
+		{24, 0, false},
+		{24, 5, false},
+		{24, 20, false},
+		{12, 0, false},
+		{12, 0, true},
+		{12, 1, false},
+		{12, 20, true},
+		{10, 20, true},
+		{10, 20, false},
+		{10, 0, false},
+	}
+
+	for _, c := range cases {
+		m := newTestModel()
+		m.width, m.height = 120, c.height
+		m.detailOpen = c.detailOpen
+		m.paneContent = "some pane output\nline two\nline three"
+		m.sessions = []*session.Session{
+			{Name: "alpha", PanePath: "/repo/alpha"},
+			{Name: "beta", PanePath: "/repo/beta"},
+			{Name: "gamma", PanePath: "/repo/gamma"},
+			{Name: "delta", PanePath: "/repo/delta"},
+			{Name: "epsilon", PanePath: "/repo/epsilon"},
+		}
+		m.queue = make([]session.QueueItem, c.queueLen)
+		for i := range m.queue {
+			m.queue[i] = session.QueueItem{
+				Kind:  session.QueueStory,
+				ID:    fmt.Sprintf("%d", i),
+				Title: fmt.Sprintf("item %d", i),
+			}
+		}
+
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) > c.height {
+			t.Errorf("height=%d queue=%d detailOpen=%v: rendered %d lines, overflow +%d",
+				c.height, c.queueLen, c.detailOpen, len(lines), len(lines)-c.height)
+		}
 	}
 }
 

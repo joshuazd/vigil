@@ -689,6 +689,38 @@ func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 	}
 }
 
+// TestCollectCmdReturnsThePopulatedQueue is the third of the three
+// deletion-silent sites the whole-branch review named: `queue, hidden :=
+// collector.Queue(sessions)` inside collectCmd. TestStartPollForceReaches
+// InvalidateEndToEnd above builds a fixture of the same shape but sets
+// queue_enabled: "false" to keep prPoller's gh call count isolated from the
+// queue pollers' own gh/short calls - this one needs queue_enabled left at
+// its default (true) instead, which is what actually reaches Collector.Queue.
+func TestCollectCmdReturnsThePopulatedQueue(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.On("gh", `[{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
+		"updatedAt":"2026-07-31T18:54:14Z","url":"https://github.com/huntresslabs/portal/pull/34967"}]`, nil)
+	cmd.On("short", `{"data":[]}`, nil)
+
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	m.collector.RefreshRemote(context.Background())
+
+	msg := m.collectCmd(false)()
+	snap, ok := msg.(SnapshotMsg)
+	if !ok {
+		t.Fatalf("collectCmd returned %T, want SnapshotMsg", msg)
+	}
+	if len(snap.Queue) != 1 || snap.Queue[0].ID != "34967" {
+		t.Fatalf("Queue = %+v, want one item with ID 34967", snap.Queue)
+	}
+}
+
 // TestActionResultDoesNothingWhenDaemonConnected pins the guard nothing else
 // in this package failed without: a daemon-fed client has nothing of its own
 // to force, and dropping this guard would have this client running its own

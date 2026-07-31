@@ -113,7 +113,7 @@ The default merge uses `--squash --delete-branch`. Override `[hooks] merge` for 
 
 Hook bodies must not contain `${VAR}`. A braced shell expansion collides with the `{placeholder}` syntax: `${VAR}` is read as the placeholder `{VAR}`, which is not a known variable, and the hook fails with `unknown placeholder in hook template` before `sh` ever sees it. Use `$VAR` instead. This applies to every hook, not just `dispatch`.
 
-### Settings
+### Work queue settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|

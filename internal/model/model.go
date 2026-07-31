@@ -530,8 +530,22 @@ func (m Model) View() string {
 	// Table
 	visible := m.visibleSessions()
 	jobLine := view.RenderJobLine(m.jobs, m.width)
-	queueSection := view.RenderQueue(m.queue, m.queueHidden, m.queueCursor(), m.width, time.Now())
 	tableHeight := m.tableHeight(jobLine != "")
+
+	// tableHeight above is the combined budget for the table and the queue
+	// section together - it is everything left after the status bar, footer,
+	// detail panel and job line. minTableRows is what the table keeps for
+	// itself before the queue gets to grow: without a floor here, a long
+	// queue can push the table to its own 1-row minimum and still not be
+	// short enough, because nothing then bounds the queue's own height and
+	// the two together can still exceed m.height.
+	const minTableRows = 3
+	var queueSection string
+	if len(m.queue) > 0 {
+		if budget := tableHeight - minTableRows; budget >= 2 {
+			queueSection = view.RenderQueue(m.queue, m.queueHidden, m.queueCursor(), m.width, budget-1, time.Now())
+		}
+	}
 	if queueSection != "" {
 		tableHeight -= lipgloss.Height(queueSection)
 	}
@@ -1020,9 +1034,12 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		// Sessions, so a nil Sessions means a nil Queue that must not
 		// overwrite what is already on screen.
 		if msg.Sessions != nil {
-			m.applySnapshot(msg.Sessions)
+			// Queue is assigned before applySnapshot so its cursor clamp sees
+			// the row count both sides of the snapshot actually settle on,
+			// not the queue length from before this poll.
 			m.queue = msg.Queue
 			m.queueHidden = msg.QueueHidden
+			m.applySnapshot(msg.Sessions)
 		}
 		m.jobs = msg.Jobs
 		m.daemonBin = msg.DaemonBin
@@ -1052,11 +1069,11 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		m.daemonReady = true
 	}
 	m.lastSnapshot = time.Now()
+	m.queue = msg.Queue
+	m.queueHidden = msg.QueueHidden
 	m.applySnapshot(msg.Sessions)
 	m.jobs = msg.Jobs
 	m.daemonBin = msg.DaemonBin
-	m.queue = msg.Queue
-	m.queueHidden = msg.QueueHidden
 
 	m.checkStateTransitions()
 	var cmds []tea.Cmd
@@ -1075,6 +1092,14 @@ func (m *Model) applySnapshot(sessions []*session.Session) {
 	m.warmCaches()
 	session.SortSessions(m.sessions, m.sortMode)
 	m.placeCursor()
+	// A session leaving between polls (auto_cleanup, most often) can leave
+	// the cursor pointing past the end of the new session+queue space. Left
+	// alone, enter would dispatch whatever queue row the cursor's old
+	// absolute position now happens to land on - never confirmed, unlike
+	// every session action a stale cursor could otherwise mis-target.
+	if n := m.rowCount(); n > 0 && m.cursor >= n {
+		m.cursor = n - 1
+	}
 
 	if m.cachePath == "" {
 		return
