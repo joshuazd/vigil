@@ -634,7 +634,10 @@ func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 
 	m := newTestModel()
 	m.cmd = cmd
-	m.collector = collect.New(&config.Config{}, cmd)
+	// queue_enabled: false, since this fixture's bare "gh" handler would
+	// otherwise also answer reviewPoller's search and inflate the counts
+	// below, which are about prPoller alone.
+	m.collector = collect.New(&config.Config{Settings: map[string]any{"queue_enabled": "false"}}, cmd)
 
 	ctx := context.Background()
 
@@ -964,7 +967,10 @@ func TestRefreshKeyReachesInvalidateEndToEnd(t *testing.T) {
 
 	m := newTestModel()
 	m.cmd = cmd
-	m.collector = collect.New(&config.Config{}, cmd)
+	// queue_enabled: false, since this fixture's bare "gh" handler would
+	// otherwise also answer reviewPoller's search and inflate the counts
+	// below, which are about prPoller alone.
+	m.collector = collect.New(&config.Config{Settings: map[string]any{"queue_enabled": "false"}}, cmd)
 
 	ctx := context.Background()
 
@@ -1086,25 +1092,34 @@ func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 	if _, err := m.collector.Snapshot(ctx); err != nil {
 		t.Fatalf("the self-polling snapshot failed: %v", err)
 	}
+	// Waits for both gh calls (prPoller's, reviewPoller's) and the short call
+	// (storyPoller's), not just a nonzero gh count: three workers wake off the
+	// same nudge and finish in whatever order the scheduler picks.
 	deadline := time.After(3 * time.Second)
-	for cmd.CallCount("gh") == 0 {
+	for cmd.CallCount("gh") < 2 || cmd.CallCount("short") < 1 {
 		select {
 		case <-deadline:
-			t.Fatal("the self-polling client never spent a gh call: this fixture cannot detect a ticker")
+			t.Fatalf("the self-polling client never finished: gh=%d short=%d, this fixture cannot detect a ticker",
+				cmd.CallCount("gh"), cmd.CallCount("short"))
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 	// Hardcoded, not latched off the count so far: fetch.nwoCache is a
 	// package-level sync.Map keyed by git root, shared across every test in
 	// the binary. This fixture's getNWO has no "git remote get-url origin"
-	// handler, so fetchReviewThreads bails before its graphql call and one
-	// gh call is the only one a pass over /repo/alpha can ever spend here -
-	// but only as long as nothing else in the binary warms that cache entry
-	// first. Latching off cmd.CallCount would silently stop catching a
-	// ticker regression the day some other test did.
-	const selfPolled = 1
-	if got := cmd.CallCount("gh"); got != selfPolled {
-		t.Fatalf("got %d gh calls from the self-polling client, want %d", got, selfPolled)
+	// handler, so fetchReviewThreads bails before its graphql call, leaving
+	// prPoller's "gh pr view" and reviewPoller's "gh search prs" as the only
+	// two gh calls a pass over /repo/alpha can ever spend here - but only as
+	// long as nothing else in the binary warms that cache entry first.
+	// Latching off cmd.CallCount would silently stop catching a ticker
+	// regression the day some other test did.
+	const selfPolledGh = 2
+	const selfPolledShort = 1
+	if got := cmd.CallCount("gh"); got != selfPolledGh {
+		t.Fatalf("got %d gh calls from the self-polling client, want %d", got, selfPolledGh)
+	}
+	if got := cmd.CallCount("short"); got != selfPolledShort {
+		t.Fatalf("got %d short calls from the self-polling client, want %d", got, selfPolledShort)
 	}
 
 	m.daemonConn = &fakeConn{}
@@ -1115,7 +1130,10 @@ func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 
 	// CallCount, not countCalls: the workers are live, so a ticker would have
 	// this assertion race the append it exists to catch.
-	if got := cmd.CallCount("gh"); got != selfPolled {
-		t.Errorf("got %d gh calls once a daemon was feeding this client, want %d: only Snapshot may wake a poller", got, selfPolled)
+	if got := cmd.CallCount("gh"); got != selfPolledGh {
+		t.Errorf("got %d gh calls once a daemon was feeding this client, want %d: only Snapshot may wake a poller", got, selfPolledGh)
+	}
+	if got := cmd.CallCount("short"); got != selfPolledShort {
+		t.Errorf("got %d short calls once a daemon was feeding this client, want %d: only Snapshot may wake a poller", got, selfPolledShort)
 	}
 }

@@ -11,13 +11,15 @@ import (
 )
 
 const (
-	defaultGitWorkers  = 8
-	defaultGitInterval = 3 * time.Second
-	defaultPRInterval  = 30 * time.Second
+	defaultGitWorkers    = 8
+	defaultGitInterval   = 3 * time.Second
+	defaultPRInterval    = 30 * time.Second
+	defaultQueueInterval = 60 * time.Second
+	defaultQueueLimit    = 20
 )
 
 type Collector struct {
-	// These four and clock are read-only once New returns. prPoller.pass reads
+	// These eight and clock are read-only once New returns. prPoller.pass reads
 	// Cmd, PRInterval and clock from its own worker goroutine while Snapshot
 	// runs on another, so a writer after construction is a data race - and one
 	// -race would surface only if a test happened to interleave the two. A
@@ -27,6 +29,12 @@ type Collector struct {
 	GitWorkers  int
 	GitInterval time.Duration
 	PRInterval  time.Duration
+
+	QueueInterval   time.Duration
+	QueuePRQuery    string
+	QueueStoryQuery string
+	QueuePRAgeDays  int
+	QueueLimit      int
 
 	// clock is nil outside tests; see now.
 	clock func() time.Time
@@ -41,6 +49,12 @@ type Collector struct {
 	// prs owns PR data. Snapshot posts its working set and reads it; the
 	// fetching happens on the poller's own worker goroutine.
 	prs *prPoller
+
+	// stories and reviews are nil when queue_enabled is false. Nil rather
+	// than constructed-and-skipped: there is then no code path that can spend
+	// budget by accident.
+	stories *storyPoller
+	reviews *reviewPoller
 
 	// remote schedules prs and, from phase 5 on, its siblings.
 	remote *remote
@@ -64,9 +78,35 @@ func New(cfg *config.Config, cmd fetch.Commander) *Collector {
 	if prInterval <= 0 {
 		prInterval = defaultPRInterval
 	}
-	c := &Collector{Cmd: cmd, GitWorkers: workers, GitInterval: gitInterval, PRInterval: prInterval}
+	queueInterval := cfg.GetSettingDuration("queue_interval")
+	if queueInterval <= 0 {
+		queueInterval = defaultQueueInterval
+	}
+	queueLimit := cfg.GetSettingInt("queue_limit")
+	if queueLimit <= 0 {
+		queueLimit = defaultQueueLimit
+	}
+
+	c := &Collector{
+		Cmd:             cmd,
+		GitWorkers:      workers,
+		GitInterval:     gitInterval,
+		PRInterval:      prInterval,
+		QueueInterval:   queueInterval,
+		QueuePRQuery:    cfg.GetSetting("queue_pr_query"),
+		QueueStoryQuery: cfg.GetSetting("queue_story_query"),
+		QueuePRAgeDays:  cfg.GetSettingInt("queue_pr_age_days"),
+		QueueLimit:      queueLimit,
+	}
 	c.prs = newPRPoller(c)
-	c.remote = newRemote(c.prs)
+
+	pollers := []poller{c.prs}
+	if cfg.GetSettingBool("queue_enabled") {
+		c.stories = newStoryPoller(c)
+		c.reviews = newReviewPoller(c)
+		pollers = append(pollers, c.stories, c.reviews)
+	}
+	c.remote = newRemote(pollers...)
 	return c
 }
 
