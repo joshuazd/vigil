@@ -15,10 +15,22 @@ Separately, **asserted effect ownership** landed as `b8afd82`, ahead of phase 4 
 purpose: a cold dispatch was the named trigger for the `firstSnapshotTimeout` loop, so phase
 4 would have inherited and widened the race it is now built on top of.
 
+Also separately, the **collector async remote layer** landed 2026-07-31 as `7b89c0e`, ahead
+of phase 5 and for the same kind of reason: phase 5 adds two network pollers, and adding
+them to a synchronous `Snapshot` would have made the session list slower for reasons
+unrelated to sessions. The seam phase 5 needs now exists, so phase 5 does not touch
+`Snapshot` at all.
+
 **Phase 5 is next: the work queue.** `vigild` also polls assigned Shortcut stories and
 review-requested PRs; both vigil and the menu bar present a pickable list, and selecting an
 item dispatches it. The same rule as before applies - live on phase 4 first. Phase 4 is the
 phase that makes the daemon run jobs, which is the condition phase 5 inherits.
+
+Concretely, phase 5's data half is: add a `poller` in `internal/collect/remote.go`, pass it
+to `newRemote` in `collect.New`, and read its store wherever the queue renders. Unlike
+`prPoller` it needs no `track`/`fill`, because assigned stories and review-requested PRs are
+global lists rather than per-session data. Weigh the `fillGit` finding in (1) below before
+assuming the session list is fast.
 
 **Read these three, in this order, before starting phase 5:**
 
@@ -47,9 +59,25 @@ phase that makes the daemon run jobs, which is the condition phase 5 inherits.
    defaults do not, which is the only reason it was left. Superseded only on its two deferred
    items, which are (2) above.
 
+**A standing warning about the plans in this directory, now a pattern rather than an
+incident.** Across two plans, **ten** briefs have contained tests that would have passed
+with their subject deleted - six in the phase 3 plan, four in the collector async remote
+plan - and in both cases most were written by the plan's author. All four of the recent
+ones were caught only by per-task review. So: where a brief and the shipped code disagree,
+**the code is right**; and when executing any plan here, watch every test fail before
+writing its subject, and work out what mutation it actually catches. A test that passes
+before its subject exists is a defect in the plan, not a happy accident.
+
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
 `internal/dispatch`, `internal/view`'s layout, or the launch path in `~/dotfiles`:
 
+- `docs/superpowers/specs/2026-07-31-collector-async-remote-design.md` and
+  `docs/superpowers/plans/2026-07-31-collector-async-remote.md` - the design and plan for
+  the poller seam. The design is **superseded on one point**, marked inline: it argues
+  `fillGit` stays synchronous because git is "not the latency source", which the
+  verification disproved. The plan's `TestRemoteStartIsIdempotent`,
+  `TestPollIssuesNoGhCalls` and `TestADaemonFedClientSpendsNoGhBudget` as written were
+  three of the four vacuous tests above; the shipped versions are the fixed ones.
 - `docs/superpowers/2026-07-29-phase-3-handoff.md` - current state, what phase 3 changed,
   the verification results and what they do NOT prove, the deferred list and the landmines.
   **Start here.** Superseded on one point: its "The two-owner window is narrowed, not
@@ -61,9 +89,8 @@ Read these before changing the daemon, `internal/collect`, `internal/transition`
   read it as history rather than as current state.
 - `docs/superpowers/plans/2026-07-29-phase-3-panel-by-default.md` - the phase 3 plan. Six
   of its briefs contained defects written by the plan's author, four of them tests that
-  would have passed with their subject deleted. Where a brief and the shipped code
-  disagree, the code is right. Read the handoff's process notes before trusting any brief
-  in it.
+  would have passed with their subject deleted; see the standing warning above. Read the
+  handoff's process notes before trusting any brief in it.
 - `docs/superpowers/2026-07-28-phase-2-blockers-handoff.md` - the state phase 3 started
   from. Still current on the daemon, the transition split and every landmine phase 3 did
   not touch. Superseded only where the phase 3 handoff says so.
@@ -120,7 +147,7 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - Commander interface for subprocess calls (testable). Every subprocess goes through it, hooks and the browser opener included. The only direct `exec` sites left are `internal/fetch/cmd.go` (the real `Commander`) and `internal/model/client.go` (the daemon spawn), which must be real processes
 - View is pure — pane capture in Update via tea.Cmd, not in View
 - context.Context for cancellation
-- Both the daemon and a self-polling client run one `Collector.Snapshot` per `tmux_interval` (default 1s); git work is gated inside it by the `git_interval` (default 3s) memo, and PR work per branch by the `pr_interval` (default 30s) check inside `prPoller.pass`, off the poll loop. The TUI has no separate tmux/git/PR tick cycles - `fetchTmuxCmd`, `fetchGitCmd`, `fetchPRsCmd` and their messages and ticks are gone
+- Both the daemon and a self-polling client run one `Collector.Snapshot` per `tmux_interval` (default 1s); git work is gated inside it by the `git_interval` (default 3s) memo, and PR work per branch by the `pr_interval` (default 30s) check inside `prPoller.pass`, off the poll loop. The TUI has no separate tmux/git/PR tick cycles - `fetchTmuxCmd`, `fetchGitCmd`, `fetchPRsCmd` and their messages and ticks are gone. **On a large monorepo the `git_interval` memo never actually skips** - see the `fillGit` bullet below, which is the measured behaviour rather than the intended one
 - `Collector.Snapshot` is not reentrant: `gitMemo`, the last lock-free memo here, is owned by the calling goroutine (the PR store is mutex-guarded instead, because a worker writes it while `Snapshot` reads). `Collector`'s exported fields and `clock` are read-only once `New` returns, since `prPoller.pass` reads `Cmd`, `PRInterval` and `clock` from its own goroutine. `Model.startPoll` is the only issuer of `collectCmd` and refuses while `pollInFlight`, so at most one `Snapshot` is ever in flight per client. The self-poll chain is a self-rescheduling one-shot `CollectTickMsg`, created at exactly two sites (`Init`'s fallback branch and `handleDaemonLost`) and continued only in the tick handler
 - **Transition side effects belong to the daemon and to nothing else. Ownership is asserted, not inferred.** `Model.checkStateTransitions` detects transitions and renders them - a toast per event, plus `maybeAutoFocus` - and runs no effects at all. Clients hold no `transition.EffectRunner`; `transition.Runner` is constructed only in `internal/daemon`. This replaced a timer (`spawnGrace` / `effectsDisownedUntil` / `daemonSeenSinceArm`) that tried to infer ownership from who owned the poll loop and could only *narrow* the window where two processes owned one event: `handleDaemonLost` started self-polling while the daemon it lost may still have been alive, `firstSnapshotTimeout` could loop a panel through connect/timeout/self-poll, and the per-process `inFlightEffects` could not help across two processes - one `Done` event then meant two `CleanupSession` calls against one worktree. None of that mechanism exists any more; do not reintroduce a client-side effect path
 - The price of asserted ownership, and it is deliberate: **while no daemon is running, the `notify` hook does not fire and nothing is auto-cleaned.** A client self-polling for data is a data path, not an owner. This is why every mode now spawns a daemon when none answers and retries on every failed probe (`spawnDaemonOnce`, floored at `spawnCooldown` 15s per process). Toasts are unaffected - they are per-client, ungated, and fire on both the daemon-fed and self-polling paths
