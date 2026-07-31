@@ -420,6 +420,26 @@ func TestDispatchTimeoutDefaultsTo300s(t *testing.T) {
 	}
 }
 
+func TestQueueSettingDefaults(t *testing.T) {
+	cfg := &Config{}
+	tests := []struct{ key, want string }{
+		{"queue_enabled", "true"},
+		{"queue_pr_query", "review-requested:@me -is:draft"},
+		{"queue_pr_age_days", "14"},
+		{"queue_story_query", "owner:%self% !is:done !is:archived"},
+		{"queue_interval", "60"},
+		{"queue_limit", "20"},
+	}
+	for _, tt := range tests {
+		if got := cfg.GetSetting(tt.key); got != tt.want {
+			t.Errorf("GetSetting(%q) = %q, want %q", tt.key, got, tt.want)
+		}
+		if !IsSetting(tt.key) {
+			t.Errorf("IsSetting(%q) = false, want true", tt.key)
+		}
+	}
+}
+
 // RunHook and RunHookStream share hookArgv. This pins that the sharing did not
 // change RunHook's contract: its output is trimmed and stderr is merged.
 func TestRunHookStillTrimsAndMergesAfterTheRefactor(t *testing.T) {

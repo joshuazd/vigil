@@ -43,6 +43,12 @@ var settingDefaults = map[string]settingDef{
 	"auto_focus":            {"VIGIL_AUTO_FOCUS", "true"},
 	"panel_auto":            {"VIGIL_PANEL_AUTO", "true"},
 	"dispatch_timeout":      {"VIGIL_DISPATCH_TIMEOUT", "300"},
+	"queue_enabled":         {"VIGIL_QUEUE_ENABLED", "true"},
+	"queue_pr_query":        {"VIGIL_QUEUE_PR_QUERY", "review-requested:@me -is:draft"},
+	"queue_pr_age_days":     {"VIGIL_QUEUE_PR_AGE_DAYS", "14"},
+	"queue_story_query":     {"VIGIL_QUEUE_STORY_QUERY", "owner:%self% !is:done !is:archived"},
+	"queue_interval":        {"VIGIL_QUEUE_INTERVAL", "60"},
+	"queue_limit":           {"VIGIL_QUEUE_LIMIT", "20"},
 }
 
 var hookDefaults = map[string]string{

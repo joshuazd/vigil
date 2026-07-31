@@ -84,6 +84,9 @@ stale_threshold = 86400       # Rebase age warning threshold (seconds, default 2
 notifications_enabled = true  # Toast + hook on session state changes
 auto_cleanup = false          # Auto-cleanup sessions when PR merges
 dispatch_timeout = 300        # Seconds before a running dispatch job is killed
+queue_enabled = true          # Poll for work queue (stories and review-requested PRs)
+queue_interval = 60           # Seconds between queue polls
+queue_limit = 20              # Max items per queue section
 
 [hooks]
 cleanup = "tmux kill-session -t {session} && git worktree remove {path}"
@@ -109,6 +112,17 @@ The built-in cleanup kills the tmux session, then removes the git worktree if th
 The default merge uses `--squash --delete-branch`. Override `[hooks] merge` for a different strategy. Set any hook to `""` to disable it.
 
 Hook bodies must not contain `${VAR}`. A braced shell expansion collides with the `{placeholder}` syntax: `${VAR}` is read as the placeholder `{VAR}`, which is not a known variable, and the hook fails with `unknown placeholder in hook template` before `sh` ever sees it. Use `$VAR` instead. This applies to every hook, not just `dispatch`.
+
+### Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `queue_enabled` | `true` | Poll for assigned stories and review-requested PRs. `false` constructs no pollers at all. |
+| `queue_pr_query` | `review-requested:@me -is:draft` | Passed to `gh search prs` after `--`, split on whitespace. A qualifier containing a space is not supported. |
+| `queue_pr_age_days` | `14` | Appended as `updated:>=<date>`, recomputed each poll. GitHub search has no relative dates, which is why this is a separate setting rather than part of the query. `0` disables the window. |
+| `queue_story_query` | `owner:%self% !is:done !is:archived` | Passed to `short api /search/stories?query=`. Names no workflow state on purpose: state names are workspace-specific. |
+| `queue_interval` | `60` | Seconds between queue polls. |
+| `queue_limit` | `20` | Caps each fetch and the merged list. |
 
 ### Dispatch
 
@@ -138,7 +152,7 @@ If your `dispatch` hook still passes `--detached` or still names `DISPATCH_IN_PO
 
 Environment variables override TOML settings for quick testing:
 
-`VIGIL_TMUX_INTERVAL`, `VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`, `VIGIL_AUTO_CLEANUP`, `VIGIL_AUTO_FOCUS`, `VIGIL_PANEL_AUTO`, `VIGIL_DISPATCH_TIMEOUT`
+`VIGIL_TMUX_INTERVAL`, `VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`, `VIGIL_AUTO_CLEANUP`, `VIGIL_AUTO_FOCUS`, `VIGIL_PANEL_AUTO`, `VIGIL_DISPATCH_TIMEOUT`, `VIGIL_QUEUE_ENABLED`, `VIGIL_QUEUE_PR_QUERY`, `VIGIL_QUEUE_PR_AGE_DAYS`, `VIGIL_QUEUE_STORY_QUERY`, `VIGIL_QUEUE_INTERVAL`, `VIGIL_QUEUE_LIMIT`
 
 ## Development
 
