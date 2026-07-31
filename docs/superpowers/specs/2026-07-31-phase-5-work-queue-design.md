@@ -254,7 +254,7 @@ lands cannot re-exec anything, so both directions will occur in practice for one
 
 | Failure | Behavior |
 |---|---|
-| `short` not on `PATH` | Logged once by the daemon; the story half stays empty. **Not** added to the startup `tmux`/`git`/`gh` `LookPath` check - vigil must keep working for anyone without Shortcut, and a spurious "short not found" at startup is the same class of harm as the `gh` case `main`'s dispatch ordering already guards against. |
+| `short` not on `PATH` | The subprocess fails, the pass is a failed pass, and the story half stays empty. **Not** added to the startup `tmux`/`git`/`gh` `LookPath` check - vigil must keep working for anyone without Shortcut, and a spurious "short not found" at startup is the same class of harm as the `gh` case `main`'s dispatch ordering already guards against. The poller does not log this, matching `prPoller`, which does not log a failed `gh` either. See the landmine below: that consistency has a cost. |
 | `gh search` or `short api` fails | The last known list is kept rather than blanked, the same rule `prPoller` applies to a failed PR fetch. `fetchedAt` still advances, so a rate-limited `gh` is not retried on every nudge. |
 | A malformed query | The subprocess exits non-zero and is treated as any other failed pass: last known list, logged. A query that is merely wrong returns zero results, which is indistinguishable from an empty queue and is the user's to notice. |
 | No daemon running | The self-polling client fetches the queue itself, exactly as it fetches everything else. Data path, not an owner - unchanged by this phase. |
@@ -323,10 +323,13 @@ happy accident.
   recomputes it on the next pass, which is correct but means the queue's contents can change
   with no user action and no state change. Expected; worth knowing before diagnosing it as a
   bug.
-- **The `short` dependency is soft in code and hard in practice.** A user without `short`
-  gets a silently empty story half, distinguishable from "no assigned stories" only in the
-  daemon log. This is the deliberate trade against a startup check that would break vigil for
-  non-Shortcut users.
+- **A missing or broken `short` is completely silent.** The story half of the queue is empty
+  and **nothing anywhere says why** - not a toast, not a status line, not the daemon log,
+  because the pollers do not log a failed pass and neither does `prPoller`. "No assigned
+  stories" and "Shortcut is unreachable" render identically. This is the cost of both
+  deliberate choices - no startup check, and consistency with `prPoller` - and it is the most
+  likely thing to waste someone's afternoon. A first diagnostic step is to run the poller's
+  exact command by hand: `short api "/search/stories?query=<your queue_story_query>"`.
 - **Two more subprocess classes now run on worker goroutines** and are waited on by
   `Collector.Wait()` before the daemon releases its flock and unlinks its socket. A wedged
   `short` has the same consequence as a wedged `gh`: `Run` never returns and no daemon can
