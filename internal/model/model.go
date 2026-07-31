@@ -1015,14 +1015,17 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		}
 
 		// A failed poll carries no sessions. Leave state alone rather than
-		// blanking the table.
+		// blanking the table - the queue included, since collectCmd only
+		// populates Queue on the same successful call that populates
+		// Sessions, so a nil Sessions means a nil Queue that must not
+		// overwrite what is already on screen.
 		if msg.Sessions != nil {
 			m.applySnapshot(msg.Sessions)
+			m.queue = msg.Queue
+			m.queueHidden = msg.QueueHidden
 		}
 		m.jobs = msg.Jobs
 		m.daemonBin = msg.DaemonBin
-		m.queue = msg.Queue
-		m.queueHidden = msg.QueueHidden
 		m.checkStateTransitions()
 		var cmds []tea.Cmd
 		if m.detailOpen {
@@ -1617,13 +1620,25 @@ func (m Model) visibleSessions() []*session.Session {
 // items. The cursor indexes this space, and selectedSession's existing bounds
 // check against visibleSessions is what makes every session action a no-op on
 // a queue row - no new guard, and batchSessions cannot reach one at all.
+//
+// panelView never renders queue rows (the design rejected rows below the
+// fold: they either displace sessions or are invisible), so the cursor must
+// not be able to reach them there either - a panel visitor would otherwise
+// see the highlight vanish for two presses and enter would fire a detached
+// dispatch of an item they cannot see.
 func (m Model) rowCount() int {
+	if m.panelMode {
+		return len(m.visibleSessions())
+	}
 	return len(m.visibleSessions()) + len(m.queue)
 }
 
 // queueCursor is the cursor's index into m.queue, or -1 when it is on a
-// session row.
+// session row or this is a panel, which never shows queue rows at all.
 func (m Model) queueCursor() int {
+	if m.panelMode {
+		return -1
+	}
 	i := m.cursor - len(m.visibleSessions())
 	if i < 0 || i >= len(m.queue) {
 		return -1
