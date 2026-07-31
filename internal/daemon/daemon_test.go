@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -824,5 +825,52 @@ func TestNewStampsTheRunningBinary(t *testing.T) {
 	s := New(&config.Config{}, fetch.NewMockCommander())
 	if s.BinStamp.Zero() {
 		t.Fatal("New left BinStamp zero; a client reads that as an outdated daemon")
+	}
+}
+
+// TestPollPublishesTheQueue is the only thing tying Collector.Queue to what a
+// client receives. Deleting the two lines in poll leaves every collect test
+// green.
+func TestPollPublishesTheQueue(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|alpha|/repo/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.On("gh", `[{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
+		"updatedAt":"2026-07-31T18:54:14Z","url":"https://github.com/huntresslabs/portal/pull/34967"}]`, nil)
+	cmd.On("short", `{"data":[]}`, nil)
+
+	c := collect.New(&config.Config{}, cmd)
+	s := &Server{Collector: c}
+
+	ctx := context.Background()
+	c.RefreshRemote(ctx)
+	s.poll(ctx)
+
+	s.mu.Lock()
+	snap := s.latest
+	s.mu.Unlock()
+
+	if snap == nil {
+		t.Fatal("poll published no snapshot")
+		return
+	}
+	if len(snap.Queue) != 1 {
+		t.Fatalf("snapshot Queue has %d items, want 1", len(snap.Queue))
+	}
+	if snap.Queue[0].ID != "34967" {
+		t.Errorf("Queue[0].ID = %q, want 34967", snap.Queue[0].ID)
+	}
+}
+
+// TestSnapshotQueueIsOmittedWhenEmpty pins the additive-field contract that
+// keeps protocol.Version at 1: an old client must see no key at all.
+func TestSnapshotQueueIsOmittedWhenEmpty(t *testing.T) {
+	data, err := json.Marshal(&protocol.Snapshot{Version: protocol.Version})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "queue") {
+		t.Errorf("empty snapshot carries a queue key: %s", data)
 	}
 }

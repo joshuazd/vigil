@@ -264,12 +264,15 @@ func (s *Server) poll(ctx context.Context) {
 		s.pollFailing = false
 		s.logf("poll recovered")
 	}
+	queue, queueHidden := s.Collector.Queue(sessions)
 	snap := &protocol.Snapshot{
-		Version:   protocol.Version,
-		Timestamp: time.Now().Unix(),
-		Sessions:  sessions,
-		Jobs:      jobList,
-		DaemonBin: s.BinStamp,
+		Version:     protocol.Version,
+		Timestamp:   time.Now().Unix(),
+		Sessions:    sessions,
+		Jobs:        jobList,
+		Queue:       queue,
+		QueueHidden: queueHidden,
+		DaemonBin:   s.BinStamp,
 	}
 
 	s.mu.Lock()
