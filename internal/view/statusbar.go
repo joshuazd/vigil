@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
@@ -31,11 +32,14 @@ func RenderStatusBar(sessions []*session.Session, filterState *session.SessionSt
 	// " · ". Only if it fits, because the alternative is truncating a rendered
 	// string mid escape sequence.
 	//
-	// visibleLen rather than len: the separator is a multi-byte "·" and state
-	// names may not stay ASCII forever.
+	// lipgloss.Width rather than visibleLen: visibleLen counts runes, so a
+	// two-cell glyph like the queue badge's "⚡" is undercounted by one column
+	// and the bar wraps. lipgloss.Width accounts for display width (and strips
+	// ANSI), which is the actual terminal-cell budget this function is
+	// enforcing.
 	addSegment := func(text, rendered string) {
 		const sep = " · "
-		cost := visibleLen(sep) + visibleLen(text)
+		cost := lipgloss.Width(sep) + lipgloss.Width(text)
 		if used+cost > budget {
 			return
 		}
@@ -44,8 +48,8 @@ func RenderStatusBar(sessions []*session.Session, filterState *session.SessionSt
 		b.WriteString(rendered)
 	}
 
-	if visibleLen("vigil") <= budget {
-		used += visibleLen("vigil")
+	if lipgloss.Width("vigil") <= budget {
+		used += lipgloss.Width("vigil")
 		b.WriteString(BoldOnBar().Render("vigil"))
 	}
 

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
@@ -37,19 +38,29 @@ func TestStatusBarOmitsEmptyHealth(t *testing.T) {
 // TestStatusBarNeverExceedsItsWidth is the panel's requirement: lipgloss
 // Width pads but does not truncate, so a status bar wider than the pane wraps
 // and pushes every table row down by one.
+//
+// The queueCount=4 sweep is what would have caught the badge's "⚡": it is
+// Emoji_Presentation and two terminal cells wide, but the budgeting used to
+// measure it with visibleLen, which counts runes. That undercounted every
+// segment following it by one column and the bar wrapped - confirmed to wrap
+// at widths 12, 25 and 34 before the fix. lipgloss.Width is used for the
+// assertion because it is the same display-cell measure the fix uses to
+// budget, not visibleLen.
 func TestStatusBarNeverExceedsItsWidth(t *testing.T) {
 	sessions := []*session.Session{
 		{Name: "SC-1 one", Git: session.GitStatus{Branch: "a"}},
 		{Name: "SC-2 two", Git: session.GitStatus{Branch: "b"}},
 		{Name: "SC-3 three", Git: session.GitStatus{Branch: "c"}},
 	}
-	for _, width := range []int{20, 30, 40, 60, 80, 120} {
-		out := RenderStatusBar(sessions, nil, session.SortAlpha, width, "no daemon", 0)
-		if strings.Contains(out, "\n") {
-			t.Fatalf("width %d wrapped: %q", width, out)
-		}
-		if got := visibleLen(out); got != width {
-			t.Errorf("width %d: rendered %d visible columns", width, got)
+	for _, queueCount := range []int{0, 4} {
+		for width := 8; width <= 120; width++ {
+			out := RenderStatusBar(sessions, nil, session.SortAlpha, width, "no daemon", queueCount)
+			if strings.Contains(out, "\n") {
+				t.Fatalf("queueCount %d width %d wrapped: %q", queueCount, width, out)
+			}
+			if got := lipgloss.Width(out); got != width {
+				t.Errorf("queueCount %d width %d: rendered %d visible columns", queueCount, width, got)
+			}
 		}
 	}
 }
