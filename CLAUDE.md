@@ -20,12 +20,20 @@ review-requested PRs; both vigil and the menu bar present a pickable list, and s
 item dispatches it. The same rule as before applies - live on phase 4 first. Phase 4 is the
 phase that makes the daemon run jobs, which is the condition phase 5 inherits.
 
+**Phase 4's two deferred items landed on 2026-07-31**, before phase 5 and on purpose: one of
+them - a client silently running a stale binary - gets strictly worse with every byte phase 5
+adds to the snapshot. `esc` now clears a failed dispatch line for every panel at once, and a
+client re-execs when its own binary changes. See
+`docs/superpowers/2026-07-30-binary-refresh-handoff.md`, which carries the real-machine
+results and the operational note that **the first install after it cannot re-exec anything**,
+because a panel needs to already be running the feature to notice.
+
 **Start here: `docs/superpowers/2026-07-30-phase-4-handoff.md`.** It records what phase 4
-verified, what it did **not** (no real story has been dispatched yet), and the landmines -
-including `ExecCommander.Run`, the non-streaming path used by the `notify` and `cleanup`
-hooks, which still has the grandchild-holds-the-pipe defect that phase 4 fixed in
-`RunStream`. A hook that backgrounds a process wedges the daemon permanently; shipped
-defaults do not, which is the only reason it was left.
+verified, what it did **not**, and the landmines - including `ExecCommander.Run`, the
+non-streaming path used by the `notify` and `cleanup` hooks, which still has the
+grandchild-holds-the-pipe defect that phase 4 fixed in `RunStream`. A hook that backgrounds a
+process wedges the daemon permanently; shipped defaults do not, which is the only reason it
+was left. Superseded on its two deferred items, which are the work above.
 
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
 `internal/dispatch`, `internal/view`'s layout, or the launch path in `~/dotfiles`:

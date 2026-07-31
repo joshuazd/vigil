@@ -97,27 +97,59 @@ of the nine implementation tasks carries its own per-task review, each reported 
 whole-branch review then found six findings on top of them - one Critical (Part B was
 unreachable), two Important (the zero startup stamp, the torn read) and three minor. All six
 are fixed; the three behavioural ones each have a test that was watched to fail against the
-unfixed code and against a targeted mutation of the fix. That is the complete list. No real
-binary has been installed and no real panel has been watched re-exec.
+unfixed code and against a targeted mutation of the fix.
 
-## What was NOT verified
+### Then it was run on the real machine, 2026-07-31
 
-**No real-machine check has been run at all.** The phase 4 handoff recorded that both of that
-phase's real defects were invisible to the test suite, and one of them - the PATH bug in
-`dispatch-from-chrome` - was structurally uncatchable by it, because the bats harness put a
-`vigil` stub on `PATH` in the one environment where the bug could not occur. Nothing here has
-had that kind of exposure yet. Specifically unobserved:
+Against the developer's live setup: 7 work sessions, 8 marked panel panes, a daemon that had
+been up since the previous afternoon. Every check below was **observed**, not inferred. The
+previous binary was copied to `~/.local/bin/.vigil.rollback` first and was not needed.
 
-- A panel actually re-execing after `make install` and coming back with its table intact.
-- `daemon outdated` actually appearing in a live panel while the daemon is on the old image,
-  and actually clearing once the daemon is restarted.
-- `esc` actually clearing a failed job line across multiple live panels at once, not just in
-  the daemon's in-memory job table as asserted by a test against a `net.Pipe`.
-- The daemon accepting a real `vigil dispatch` after this branch is installed.
+- [x] **A panel re-execs itself after `make install`.** Measured at **21 seconds** - the two
+      consecutive checks the torn-read fix requires, at a 10s interval. The PID was
+      **unchanged** (`syscall.Exec` replaces the image, not the process), the pane stayed
+      alive, the table came back intact, and `ps -o args=` still showed `--panel`, so argv
+      survived. Tracked by comparing the process's mapped executable inode
+      (`lsof -p PID -a -d txt`) against the installed file's, because the PID cannot move.
+- [x] **`daemon outdated` appears in a live panel** while the daemon is on the older image,
+      in the status bar alongside the session counts.
+- [x] **It clears when the daemon is restarted.** Killing the daemon had a client respawn it
+      within seconds through the existing `spawnDaemonOnce` path, and the marker went.
+- [x] **`esc` clears a failed line across every panel at once.** A dispatch of
+      `vigil-verify-not-a-real-target` was accepted, ran, and failed with the hook's real
+      reason; the red line appeared in **all 8** panes; one esc press in **one** pane cleared
+      it in **all 8**; that pane did not quit.
+- [x] **`esc` still quits when there is nothing to dismiss.** Confirmed on a panel with no
+      job line, which is the behaviour change most likely to annoy someone.
+- [x] **`vigil dispatch` still exits 0 on acceptance** against the new daemon.
 
-Step 2 of the task-10 brief is the checklist for all of this, and it is explicitly out of
-scope for this document: it installs over the developer's live binary and restarts their
-running daemon and panels, which needs their authorization and is being handled separately.
+### What real use taught that the design did not say
+
+**The first install after this lands cannot re-exec anything.** A panel can only notice its
+binary changed if it is already running a binary that has this feature. Every panel running
+at the moment this merges predates it, so that one time they must be respawned by hand:
+
+```bash
+tmux list-panes -a -F '#{pane_id} #{@vigil_panel}' | awk '$2==1{print $1}' |
+  while read -r p; do tmux respawn-pane -k -t "$p" "$HOME/.local/bin/vigil --panel"; done
+```
+
+From the second install onward it is automatic. This is inherent to the feature, not a
+defect, but it is the kind of thing that reads as "the feature does not work" the first time.
+
+**A respawned panel shows `daemon lost, polling directly` for a few seconds** before its
+first snapshot arrives, then reconnects on its own. Pre-existing behaviour, unrelated to this
+branch, but it is the first thing a fresh panel prints and it looks alarming.
+
+## What is still NOT verified
+
+- **Nothing on Linux.** See the landmine below: the feature is a silent no-op there, and that
+  claim is reasoned from `/proc/self/exe` semantics, not measured.
+- **The re-exec has never been observed on a `make build` that writes in place**, only on
+  `make install`'s rename. The two-check rule exists for exactly that case and is unit-tested,
+  but the real torn-read window has not been hit deliberately.
+- **No dashboard has been watched re-exec**, only panels. A dashboard defers while a prompt or
+  a selection is open, and that deferral is unit-tested only.
 
 ## Landmines
 
