@@ -610,6 +610,25 @@ func countCalls(cmd *fetch.MockCommander, name string) int {
 	return n
 }
 
+// countGhPrCalls and countGhSearchCalls distinguish prPoller's "gh pr view"
+// from reviewPoller's "gh search prs" - both are the "gh" binary, so
+// CallCount("gh") alone cannot tell them apart. Unlike countCalls above,
+// these go through CallCountFunc rather than ranging over cmd.Calls
+// directly: they are read while collect.Collector's remote workers may still
+// be running on their own goroutines, and cmd.Calls is only safe to read
+// under MockCommander's own lock in that case.
+func countGhPrCalls(cmd *fetch.MockCommander) int {
+	return cmd.CallCountFunc(func(c fetch.MockCall) bool {
+		return c.Name == "gh" && len(c.Args) > 0 && c.Args[0] == "pr"
+	})
+}
+
+func countGhSearchCalls(cmd *fetch.MockCommander) int {
+	return cmd.CallCountFunc(func(c fetch.MockCall) bool {
+		return c.Name == "gh" && len(c.Args) > 0 && c.Args[0] == "search"
+	})
+}
+
 // TestStartPollForceReachesInvalidateEndToEnd pins the wiring, not just the
 // primitive: internal/collect's own TestInvalidateForcesARefetchOfGitAndPR
 // proves Collector.Invalidate works, but nothing before this test exercised
@@ -1060,10 +1079,10 @@ func TestNewStartsTheRemoteWorkers(t *testing.T) {
 // Two things give it teeth against exactly that, and both are load-bearing.
 // The self-poll before the daemon attaches is one: the PR store has no working
 // set until a Snapshot tracks one, and a pass over an empty working set spends
-// nothing whether a ticker or a nudge woke it. Zeroing PRInterval is the
-// other: at the default 30s a woken pass would find nothing due and spend
-// nothing either. It is also the real path - a client that loses a daemon
-// self-polls and gets one back.
+// nothing whether a ticker or a nudge woke it. Zeroing PRInterval and
+// QueueInterval is the other: at their defaults (30s, 60s) a woken pass would
+// find nothing due and spend nothing either. Zeroing PRInterval is also the
+// real path - a client that loses a daemon self-polls and gets one back.
 func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 	cmd := fetch.NewMockCommander()
 	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
@@ -1084,6 +1103,11 @@ func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 	m.cmd = cmd
 	m.collector = collect.New(&config.Config{}, cmd)
 	m.collector.PRInterval = 0
+	// Zeroed for the same reason as PRInterval: at the default 60s a woken
+	// storyPoller/reviewPoller pass would find nothing due and spend nothing,
+	// which would let a ticker through undetected on the short assertion
+	// below - begin would say "not due" regardless of who woke it.
+	m.collector.QueueInterval = 0
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1092,15 +1116,22 @@ func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 	if _, err := m.collector.Snapshot(ctx); err != nil {
 		t.Fatalf("the self-polling snapshot failed: %v", err)
 	}
-	// Waits for both gh calls (prPoller's, reviewPoller's) and the short call
-	// (storyPoller's), not just a nonzero gh count: three workers wake off the
-	// same nudge and finish in whatever order the scheduler picks.
+	// Waits for prPoller's call, reviewPoller's call and storyPoller's call
+	// separately, not just a nonzero gh count: three workers wake off the
+	// same nudge and finish in whatever order the scheduler picks, and gh is
+	// shared by two of them. Without distinguishing prPoller's "gh pr view"
+	// from reviewPoller's "gh search prs", a prior test's warmed nwoCache
+	// (see below) could let prPoller alone spend two gh calls - fetchReviewThreads
+	// would then also run - satisfying a plain CallCount("gh") >= 2 before
+	// reviewPoller ever ran, so the assertions below would pass for the wrong
+	// reason and any real problem would surface as a false "only Snapshot may
+	// wake a poller" failure after the daemon attaches instead.
 	deadline := time.After(3 * time.Second)
-	for cmd.CallCount("gh") < 2 || cmd.CallCount("short") < 1 {
+	for countGhPrCalls(cmd) < 1 || countGhSearchCalls(cmd) < 1 || cmd.CallCount("short") < 1 {
 		select {
 		case <-deadline:
-			t.Fatalf("the self-polling client never finished: gh=%d short=%d, this fixture cannot detect a ticker",
-				cmd.CallCount("gh"), cmd.CallCount("short"))
+			t.Fatalf("the self-polling client never finished: gh pr=%d gh search=%d short=%d, this fixture cannot detect a ticker",
+				countGhPrCalls(cmd), countGhSearchCalls(cmd), cmd.CallCount("short"))
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
