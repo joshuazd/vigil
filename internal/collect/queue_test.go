@@ -152,18 +152,21 @@ func TestQueueDisabledConstructsNoPollers(t *testing.T) {
 
 func sortTestCommander() *fetch.MockCommander {
 	cmd := fetch.NewMockCommander()
-	// Two stories and two reviews with UpdatedAt values interleaved across kinds.
-	// Story B is newest among stories but second-newest overall.
-	// Review C is newest overall. Story A is oldest. Review D is second-oldest.
+	// Two stories and two reviews with UpdatedAt values interleaved across kinds,
+	// and within-kind insertion order reversed from sorted order.
+	// Story A is oldest (08:00), Story B is newest among stories (16:00).
+	// Review D is second-oldest (14:00), Review C is newest overall (20:00).
 	// Correct order (Kind, then UpdatedAt descending): B, A, C, D.
-	cmd.On("gh", `[{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
-		"updatedAt":"2026-07-31T20:00:00Z","url":"https://github.com/huntresslabs/portal/pull/34967"},
-		{"number":34966,"repository":{"name":"portal"},"title":"Date picker",
-		"updatedAt":"2026-07-31T14:00:00Z","url":"https://github.com/huntresslabs/portal/pull/34966"}]`, nil)
-	cmd.On("short", `{"data":[{"id":223480,"name":"Backfill audit rows",
-		"app_url":"https://app.shortcut.com/huntress/story/223480","updated_at":"2026-07-31T16:00:00Z"},
-		{"id":223479,"name":"Add caching","app_url":"https://app.shortcut.com/huntress/story/223479",
-		"updated_at":"2026-07-31T08:00:00Z"}]}`, nil)
+	// JSON order: stories [A, B], reviews [D, C] - reversed within each kind.
+	// Dropping UpdatedAt comparison would give [A, B, D, C], proving the key works.
+	cmd.On("gh", `[{"number":34966,"repository":{"name":"portal"},"title":"Date picker",
+		"updatedAt":"2026-07-31T14:00:00Z","url":"https://github.com/huntresslabs/portal/pull/34966"},
+		{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
+		"updatedAt":"2026-07-31T20:00:00Z","url":"https://github.com/huntresslabs/portal/pull/34967"}]`, nil)
+	cmd.On("short", `{"data":[{"id":223479,"name":"Add caching","app_url":"https://app.shortcut.com/huntress/story/223479",
+		"updated_at":"2026-07-31T08:00:00Z"},
+		{"id":223480,"name":"Backfill audit rows","app_url":"https://app.shortcut.com/huntress/story/223480",
+		"updated_at":"2026-07-31T16:00:00Z"}]}`, nil)
 	return cmd
 }
 
