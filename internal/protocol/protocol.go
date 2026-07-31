@@ -142,6 +142,10 @@ type Request struct {
 	ID      string `json:"id"`
 	Input   string `json:"input"`
 	Cwd     string `json:"cwd"`
+	// Detached asks the workflow scripts to skip the teleport. Additive, so
+	// an old daemon ignores it and dispatches attached - degrading to exactly
+	// today's behaviour rather than erroring.
+	Detached bool `json:"detached,omitempty"`
 }
 
 // Job is one dispatch, as the daemon sees it. Status is the last line the job

@@ -139,6 +139,13 @@ func (c *Config) GetHook(name string) string {
 	return ""
 }
 
+// rawPlaceholders are substituted without shell quoting. Every other
+// placeholder carries a value from tmux, git, gh or the user, and quoting is
+// what stops it reaching sh as syntax. {flags} carries one of exactly two
+// constants chosen by vigil - "" or "--detached" - and quoting it would pass
+// a stray empty argument to the hook.
+var rawPlaceholders = map[string]bool{"flags": true}
+
 // ExpandHook replaces {placeholders} with shell-escaped values.
 func ExpandHook(template string, vars map[string]string) (string, error) {
 	result := template
@@ -158,7 +165,11 @@ func ExpandHook(template string, vars map[string]string) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("unknown placeholder in hook template: {%s}", key)
 		}
-		result = result[:start] + shellQuote(val) + result[end+1:]
+		sub := val
+		if !rawPlaceholders[key] {
+			sub = shellQuote(val)
+		}
+		result = result[:start] + sub + result[end+1:]
 	}
 	return result, nil
 }

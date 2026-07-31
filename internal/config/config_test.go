@@ -129,6 +129,42 @@ func TestExpandUnknownPlaceholderErrors(t *testing.T) {
 	}
 }
 
+// TestExpandHookLeavesFlagsUnquoted pins the one placeholder that skips
+// shellQuote. Quoted, an empty {flags} becomes an empty quoted argument and
+// passes a stray argument to the hook.
+func TestExpandHookLeavesFlagsUnquoted(t *testing.T) {
+	tmpl := "dispatch --non-interactive {flags} {input}"
+
+	got, err := ExpandHook(tmpl, map[string]string{"flags": "--detached", "input": "sc-1"})
+	if err != nil {
+		t.Fatalf("ExpandHook: %v", err)
+	}
+	if !strings.Contains(got, " --detached ") {
+		t.Errorf("expanded = %q, want an unquoted --detached", got)
+	}
+
+	empty, err := ExpandHook(tmpl, map[string]string{"flags": "", "input": "sc-1"})
+	if err != nil {
+		t.Fatalf("ExpandHook: %v", err)
+	}
+	if strings.Contains(empty, "''") {
+		t.Errorf("expanded = %q, want no empty quoted argument", empty)
+	}
+}
+
+// TestExpandHookStillQuotesEverythingElse is the safety half. {flags} is safe
+// unquoted because vigil chooses it from two constants; every other
+// placeholder carries a value from tmux, git, gh or the user.
+func TestExpandHookStillQuotesEverythingElse(t *testing.T) {
+	got, err := ExpandHook("dispatch {input}", map[string]string{"input": "; rm -rf /"})
+	if err != nil {
+		t.Fatalf("ExpandHook: %v", err)
+	}
+	if !strings.Contains(got, `'; rm -rf /'`) {
+		t.Errorf("expanded = %q, want the input shell-quoted", got)
+	}
+}
+
 // --- GetSetting tests ---
 
 func TestGetSettingDefault(t *testing.T) {

@@ -189,12 +189,38 @@ func TestAnUnmigratedDispatchHookIsWarnedAbout(t *testing.T) {
 
 func TestAMigratedDispatchHookIsNotWarnedAbout(t *testing.T) {
 	cfg := &config.Config{Hooks: map[string]any{
-		"dispatch": "DISPATCH_INLINE=1 dispatch --non-interactive {input}",
+		"dispatch": "DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}",
 	}}
 	var stderr bytes.Buffer
 	warnAboutAnUnmigratedDispatchHook(cfg, &stderr)
 	if stderr.String() != "" {
 		t.Errorf("got %q, want silence", stderr.String())
+	}
+}
+
+func TestWarnsWhenTheDispatchHookHasNoFlagsPlaceholder(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := &config.Config{Hooks: map[string]any{
+		"dispatch": "DISPATCH_INLINE=1 dispatch --non-interactive {input}",
+	}}
+
+	warnAboutAnUnmigratedDispatchHook(cfg, &buf)
+
+	if !strings.Contains(buf.String(), "{flags}") {
+		t.Errorf("stderr = %q, want a warning naming {flags}", buf.String())
+	}
+}
+
+func TestNoWarningWhenTheDispatchHookHasFlags(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := &config.Config{Hooks: map[string]any{
+		"dispatch": "DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}",
+	}}
+
+	warnAboutAnUnmigratedDispatchHook(cfg, &buf)
+
+	if buf.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing", buf.String())
 	}
 }
 

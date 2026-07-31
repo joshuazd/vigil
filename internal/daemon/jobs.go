@@ -47,7 +47,7 @@ func statusLine(raw string) string {
 // `git worktree add` calls in one repository contend on the index lock, and
 // dispatches arrive one click at a time.
 //
-// mu guards byID, order and cwds. A running job's goroutine writes Status
+// mu guards byID, order, cwds and detached. A running job's goroutine writes Status
 // through setStatus, and poll reads the whole table through snapshot, so
 // nothing hands out a *Job that a goroutine is still writing.
 type jobs struct {
@@ -59,6 +59,10 @@ type jobs struct {
 	// protocol.Job: the cwd is a property of the request, not of the
 	// published job, and has no business being broadcast to every client.
 	cwds map[string]string
+
+	// detached holds each job's teleport preference, keyed by ID. Off
+	// protocol.Job for the same reason cwds is.
+	detached map[string]bool
 
 	pending chan string
 
@@ -73,14 +77,15 @@ type jobs struct {
 
 func newJobs(cfg *config.Config, stream fetch.StreamCommander, cmd fetch.Commander, logf func(string, ...any)) *jobs {
 	return &jobs{
-		byID:    make(map[string]*protocol.Job),
-		cwds:    make(map[string]string),
-		pending: make(chan string, queueDepth),
-		cfg:     cfg,
-		stream:  stream,
-		cmd:     cmd,
-		logf:    logf,
-		now:     time.Now,
+		byID:     make(map[string]*protocol.Job),
+		cwds:     make(map[string]string),
+		detached: make(map[string]bool),
+		pending:  make(chan string, queueDepth),
+		cfg:      cfg,
+		stream:   stream,
+		cmd:      cmd,
+		logf:     logf,
+		now:      time.Now,
 	}
 }
 
@@ -129,6 +134,7 @@ func (j *jobs) submit(req *protocol.Request) {
 	j.byID[req.ID] = job
 	j.order = append(j.order, req.ID)
 	j.cwds[req.ID] = req.Cwd
+	j.detached[req.ID] = req.Detached
 	j.mu.Unlock()
 
 	if reason != "" {
@@ -167,6 +173,7 @@ func (j *jobs) dismissTerminal() bool {
 		if ok && (job.State == protocol.JobFailed || job.State == protocol.JobRefused) {
 			delete(j.byID, id)
 			delete(j.cwds, id)
+			delete(j.detached, id)
 			removed = true
 			continue
 		}
@@ -209,15 +216,20 @@ func (j *jobs) run(ctx context.Context, id string) {
 	}
 	job.State = protocol.JobRunning
 	job.Started = j.now().Unix()
-	input, cwd := job.Input, j.cwds[id]
+	input, cwd, detached := job.Input, j.cwds[id], j.detached[id]
 	j.mu.Unlock()
 
 	// Resolved per job rather than per submission: a dispatch takes long
 	// enough that the client the user is sitting at can change in between.
 	client := fetch.MostRecentClient(ctx, j.cmd)
 
+	flags := ""
+	if detached {
+		flags = "--detached"
+	}
+
 	err := j.cfg.RunHookStream(ctx, j.stream, "dispatch",
-		map[string]string{"input": input},
+		map[string]string{"input": input, "flags": flags},
 		cwd,
 		[]string{"VIGIL_CLIENT=" + client},
 		j.cfg.GetSettingDuration("dispatch_timeout"),
@@ -303,6 +315,7 @@ func (j *jobs) snapshot() []protocol.Job {
 		if expired(job, now) {
 			delete(j.byID, id)
 			delete(j.cwds, id)
+			delete(j.detached, id)
 			continue
 		}
 		kept = append(kept, id)

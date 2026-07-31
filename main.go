@@ -139,6 +139,13 @@ func warnAboutAnUnmigratedDispatchHook(cfg *config.Config, stderr io.Writer) {
 				"should be DISPATCH_INLINE=1 dispatch --non-interactive {input}\n", stale)
 		return
 	}
+
+	if hook != "" && !strings.Contains(hook, "{flags}") {
+		_, _ = fmt.Fprintf(stderr,
+			"vigil: the dispatch hook has no {flags} placeholder, so selecting a queue "+
+				"item will teleport instead of dispatching in the background. The hook "+
+				"should be DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}\n")
+	}
 }
 
 // runConfigGet answers before the dependency check on purpose: reading a

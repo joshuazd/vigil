@@ -51,6 +51,9 @@ type Options struct {
 	// Spawn starts a daemon when none answers. Nil means do not try.
 	Spawn      func() error
 	AckTimeout time.Duration
+	// Detached asks the daemon to skip the teleport, for queue-originated
+	// dispatches where the user is mid-edit elsewhere.
+	Detached bool
 }
 
 // Validate rejects input before it reaches the daemon, so a malformed
@@ -89,11 +92,12 @@ func Submit(ctx context.Context, opts Options) (*protocol.Job, error) {
 	defer func() { _ = conn.Close() }()
 
 	req := &protocol.Request{
-		Version: protocol.Version,
-		Type:    protocol.RequestDispatch,
-		ID:      id,
-		Input:   input,
-		Cwd:     opts.Cwd,
+		Version:  protocol.Version,
+		Type:     protocol.RequestDispatch,
+		ID:       id,
+		Input:    input,
+		Cwd:      opts.Cwd,
+		Detached: opts.Detached,
 	}
 	if err := protocol.EncodeRequest(conn, req); err != nil {
 		return nil, fmt.Errorf("submitting the job: %w", err)

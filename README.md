@@ -102,7 +102,7 @@ Actions are shell command templates with `{placeholder}` variables, automaticall
 | Hook | Variables | Default |
 |------|-----------|---------|
 | `cleanup` | `{session}`, `{path}`, `{branch}`, `{git_root}` | Built-in (see below) |
-| `dispatch` | `{input}` | *(none — must be configured)* |
+| `dispatch` | `{input}`, `{flags}` | *(none — must be configured)* |
 | `merge` | `{branch}`, `{git_root}` | `gh pr merge {branch} --squash --delete-branch` |
 | `approve` | `{branch}`, `{git_root}` | `gh pr review {branch} --approve` |
 | `notify` | `{session}`, `{old_state}`, `{new_state}` | `tmux display-message "vigil: {session} → {new_state}"` |
@@ -135,18 +135,20 @@ The hook runs **inside the daemon**, which has no terminal:
 dispatch_timeout = 300        # Seconds before a running dispatch is killed
 
 [hooks]
-dispatch = "DISPATCH_INLINE=1 dispatch --non-interactive {input}"
+dispatch = "DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}"
 ```
+
+> `{flags}` expands to `--detached` when the dispatch came from the work queue and to nothing otherwise. It is the one placeholder vigil does not shell-quote, because it carries a vigil-chosen constant rather than external data. A hook without it still works - queue selections just teleport - and vigil warns at startup.
 
 What that means for the hook you write:
 
 - **No popup, no tty.** A hook that opens `tmux display-popup -E` has no client to draw on and will hang until `dispatch_timeout` kills it. Run the work inline instead. If you use the `dispatch` script from `~/dotfiles`, `DISPATCH_INLINE=1` is what selects that branch, and the older `DISPATCH_IN_POPUP` is gone.
-- **Do not pass `--detached`.** The teleport at the end of a dispatch is the feature; `--detached` skips it, leaving the new session created but unswitched.
+- **Do not hardcode `--detached`.** Use `{flags}` instead: vigil supplies `--detached` itself for queue-originated dispatches, where the user is mid-edit and should not be teleported away. A hook with a literal `--detached` skips the teleport for every dispatch, including ones started by hand from the TUI.
 - **`VIGIL_CLIENT` is exported into the hook.** It names the most recently active tmux client, resolved per job rather than per submission, and is how a client-less daemon can still pick a switch target, a window size, and a panel orientation. It is empty when no client is attached, and a hook must treat that as "nobody is watching" rather than an error.
 - **`dispatch_timeout` (default 300s, `VIGIL_DISPATCH_TIMEOUT`) bounds the job.** On expiry the hook's whole process group is killed, backgrounded grandchildren included, and the job reports the timeout rather than its last output line.
 - **Jobs run one at a time.** Two concurrent `git worktree add` calls in one repository contend on the index lock, so submissions queue; a duplicate of an in-flight input is refused rather than queued.
 
-If your `dispatch` hook still passes `--detached` or still names `DISPATCH_IN_POPUP`, vigil prints a warning at startup naming this section.
+If your `dispatch` hook still passes a literal `--detached` or still names `DISPATCH_IN_POPUP`, vigil prints a warning at startup naming this section. If it is otherwise fine but has no `{flags}` placeholder, vigil warns separately that queue selections will teleport.
 
 ### Environment variable overrides
 
