@@ -10,8 +10,9 @@ import (
 // RenderStatusBar renders the top status bar. Segments are appended in
 // priority order and any that does not fit the width is skipped, so a 40
 // column panel gets the identity, the count and the health rather than a
-// wrapped line. health is empty in the common case.
-func RenderStatusBar(sessions []*session.Session, filterState *session.SessionState, sortMode session.SortMode, width int, health string) string {
+// wrapped line. health is empty in the common case. queueCount is the number
+// of items waiting in the work queue; 0 hides the badge.
+func RenderStatusBar(sessions []*session.Session, filterState *session.SessionState, sortMode session.SortMode, width int, health string, queueCount int) string {
 	counts := make(map[session.SessionState]int)
 	for _, s := range sessions {
 		counts[s.State()]++
@@ -55,6 +56,13 @@ func RenderStatusBar(sessions []*session.Session, filterState *session.SessionSt
 	// segment worth the space.
 	if health != "" {
 		addSegment(health, OnBar(BrightYellow).Render(health))
+	}
+
+	// Above the state counts: at a narrow width, "work is waiting" is worth
+	// more than a per-state breakdown of what is already running.
+	if queueCount > 0 {
+		text := fmt.Sprintf("⚡%d", queueCount)
+		addSegment(text, OnBar(BrightYellow).Render(text))
 	}
 
 	for _, state := range session.AllStates() {

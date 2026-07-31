@@ -518,7 +518,7 @@ func (m Model) View() string {
 	}
 
 	// Status bar
-	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth())
+	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth(), 0)
 
 	notif := m.activeNotification()
 
@@ -589,7 +589,7 @@ func (m Model) panelView() string {
 	if jobLine != "" {
 		rows = max(1, m.height-2)
 	}
-	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth())
+	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth(), 0)
 	table := view.RenderTable(
 		m.visibleSessions(),
 		m.cursor,
