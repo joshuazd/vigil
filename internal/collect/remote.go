@@ -52,8 +52,7 @@ func newRemote(pollers ...poller) *remote {
 // and regains a daemon can reach it more than once, and a second set of
 // workers would double the fetch rate for one collector. sync.Once, not a
 // bool: that path is reachable from more than one goroutine, and an
-// unsynchronized bool would race both the read/write on itself and
-// r.wg.Add(1) against a concurrent wait.
+// unsynchronized bool would race the read/write on itself.
 func (r *remote) start(ctx context.Context) {
 	r.once.Do(func() {
 		for i, p := range r.pollers {

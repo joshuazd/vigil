@@ -227,15 +227,18 @@ func TestRemoteNudgeDuringAPassCoalescesIntoTheNext(t *testing.T) {
 	p.release = make(chan struct{})
 	r := newRemote(p)
 
+	// Releasing from the defer as well as the body keeps a failed waitForPass
+	// from hanging: cancel alone cannot free a worker parked on release.
+	release := sync.OnceFunc(func() { close(p.release) })
 	ctx, cancel := context.WithCancel(context.Background())
-	defer func() { cancel(); r.wait() }()
+	defer func() { cancel(); release(); r.wait() }()
 	r.start(ctx)
 
 	r.nudge()
 	waitForPass(t, p)
 
 	r.nudge()
-	close(p.release)
+	release()
 
 	waitForPass(t, p)
 	if got := p.count(); got != 2 {
@@ -283,10 +286,6 @@ func waitForDone(t *testing.T, done chan struct{}) {
 // not blank the PR column, but it must still count as an attempt, or a
 // rate-limited gh gets retried on every nudge instead of waiting out
 // PRInterval.
-//
-// Watched fail (mutation): removed the `pr = prev.pr` fallback line in pass's
-// write-back, leaving pr nil on a failed fetch. entry.pr came back nil,
-// failing the first assertion. Reverted before this test was accepted.
 func TestPassKeepsLastKnownPRAndMovesFetchedAtOnAFailedFetch(t *testing.T) {
 	cmd := fetch.NewMockCommander()
 	cmd.On("gh", "not json", nil)
@@ -321,10 +320,6 @@ func TestPassKeepsLastKnownPRAndMovesFetchedAtOnAFailedFetch(t *testing.T) {
 // known PR, only make the branch due again - Detect skips a pending session,
 // so dropping the entry would swallow the next transition instead of finding
 // it.
-//
-// Watched fail (mutation): changed invalidate to `p.entries =
-// make(map[string]prEntry)`, dropping every entry. The "ok" check failed.
-// Reverted before this test was accepted.
 func TestInvalidateZeroesFetchedAtButKeepsTheEntry(t *testing.T) {
 	c := New(&config.Config{}, fetch.NewMockCommander())
 	p := newPRPoller(c)
@@ -353,11 +348,6 @@ func TestInvalidateZeroesFetchedAtButKeepsTheEntry(t *testing.T) {
 // TestPassDiscardsAResultForABranchThatVanishedMidFetch: the write-back must
 // prune against the working set as it stands after the fetch, not as it
 // stood when the fetch started.
-//
-// Watched fail (mutation): had the write-back build `live` from the due
-// list's keys captured before runParallel, instead of re-reading p.working.
-// The vanished branch's entry survived, failing the "ok" check. Reverted
-// before this test was accepted.
 func TestPassDiscardsAResultForABranchThatVanishedMidFetch(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -390,10 +380,6 @@ func TestPassDiscardsAResultForABranchThatVanishedMidFetch(t *testing.T) {
 
 // TestPassDoesNotHoldMuAcrossTheFetch: mu guards the maps, not the network
 // call. A concurrent track or fill must not wait out a slow gh.
-//
-// Watched fail (mutation): wrapped the runParallel call in p.mu.Lock() /
-// Unlock(). The concurrent track call then blocked past the 200ms window.
-// Reverted before this test was accepted.
 func TestPassDoesNotHoldMuAcrossTheFetch(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -431,10 +417,6 @@ func TestPassDoesNotHoldMuAcrossTheFetch(t *testing.T) {
 // next call. A pass that returns early when nothing is due must not bring
 // that regression back by leaving a vanished branch's entry in place until
 // the next pass that happens to have work.
-//
-// Watched fail (unfixed code): before this round, pass returned at
-// `len(due) == 0` ahead of the prune block. "gone" survived. Fixed by
-// pruning unconditionally.
 func TestPassPrunesEvenWhenNothingWasDue(t *testing.T) {
 	c := New(&config.Config{}, fetch.NewMockCommander())
 	p := newPRPoller(c)
@@ -454,15 +436,12 @@ func TestPassPrunesEvenWhenNothingWasDue(t *testing.T) {
 	}
 }
 
-// TestPassDoesNotSatisfyAnInvalidateThatLandsDuringIt is Important 3's
-// regression test. The entry is seeded already-resolved-but-due (fetchedAt
-// zero), standing in for a branch made due by an earlier invalidate, so this
-// pass has real work in flight when the second invalidate lands.
-//
-// Watched fail (unfixed code): before this round, invalidate had no gen and
-// the write-back stamped fetchedAt with the pass's start-of-pass `now`
-// unconditionally, overwriting the zero the mid-pass invalidate had just
-// asked for. entry.fetchedAt came back non-zero. Fixed with the gen counter.
+// TestPassDoesNotSatisfyAnInvalidateThatLandsDuringIt: an invalidate that
+// lands mid-fetch must leave the branch due, because the answer in flight may
+// predate the state change the caller pressed refresh to go and find. The
+// entry is seeded already-resolved-but-due (fetchedAt zero), standing in for a
+// branch made due by an earlier invalidate, so this pass has real work in
+// flight when the second invalidate lands.
 func TestPassDoesNotSatisfyAnInvalidateThatLandsDuringIt(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})

@@ -28,23 +28,20 @@ type Collector struct {
 	// gitMemo holds the last git status per pane path so Snapshot can run on
 	// tmux_interval without refetching git every tick. Only Snapshot's own
 	// goroutine touches it: fillGit reads it before its fan-out and rewrites
-	// it after the fan-out has joined.
+	// it after the fan-out has joined. It is the last lock-free memo here, and
+	// it stays that way because git is local subprocesses, not the network.
 	gitMemo map[string]gitMemoEntry
 
-	// prMemo holds the last PR result per branch+git-root so Snapshot can run
-	// on tmux_interval without refetching PRs every tick. Only Snapshot's own
-	// goroutine touches it: fillPRs reads it before its fan-out and rewrites
-	// it after the fan-out has joined.
-	prMemo map[string]prMemoEntry
+	// prs owns PR data. Snapshot posts its working set and reads it; the
+	// fetching happens on the poller's own worker goroutine.
+	prs *prPoller
+
+	// remote schedules prs and, from phase 5 on, its siblings.
+	remote *remote
 }
 
 type gitMemoEntry struct {
 	status    session.GitStatus
-	fetchedAt time.Time
-}
-
-type prMemoEntry struct {
-	pr        *session.PRStatus
 	fetchedAt time.Time
 }
 
@@ -61,7 +58,10 @@ func New(cfg *config.Config, cmd fetch.Commander) *Collector {
 	if prInterval <= 0 {
 		prInterval = defaultPRInterval
 	}
-	return &Collector{Cmd: cmd, GitWorkers: workers, GitInterval: gitInterval, PRInterval: prInterval}
+	c := &Collector{Cmd: cmd, GitWorkers: workers, GitInterval: gitInterval, PRInterval: prInterval}
+	c.prs = newPRPoller(c)
+	c.remote = newRemote(c.prs)
+	return c
 }
 
 func (c *Collector) now() time.Time {
@@ -71,16 +71,38 @@ func (c *Collector) now() time.Time {
 	return time.Now()
 }
 
-// Invalidate drops the git and PR memos so the next Snapshot refetches both,
-// rather than serving values that are still within git_interval or
-// pr_interval. Callers that just changed state - a merge, a draft toggle -
-// use this rather than waiting out the interval.
+// Start runs the remote pollers' workers. Every process that calls Snapshot
+// must call this once: without it no off-box data is ever fetched. It is safe
+// to call more than once and does nothing on a second call.
 //
-// Like Snapshot's memos themselves, this must only ever be called from the
-// same goroutine as Snapshot: it is not guarded by a lock.
+// A process that never calls Snapshot may still call it. The workers are woken
+// only by a nudge, so a daemon-fed client's stay blocked and spend nothing.
+func (c *Collector) Start(ctx context.Context) { c.remote.start(ctx) }
+
+// Wait joins the workers after their context is cancelled. The daemon calls it
+// before Run returns, so the process does not release its flock and unlink its
+// socket with a gh child still running.
+func (c *Collector) Wait() { c.remote.wait() }
+
+// RefreshRemote runs one pass of every poller on the caller's goroutine. The
+// workers are a scheduler over this. It exists so a test can drive a pass
+// deterministically instead of racing a goroutine; production reaches a pass
+// only through Start.
+func (c *Collector) RefreshRemote(ctx context.Context) { c.remote.refresh(ctx) }
+
+// Invalidate drops the git memo and makes every remote entry due, so a caller
+// that just changed state - a merge, a draft toggle, the Refresh key - does
+// not have to wait out git_interval or pr_interval.
+//
+// Git comes back inside the next Snapshot, because fillGit is synchronous.
+// Remote data comes back a tick later, when the pass this nudges has landed.
+//
+// The git half must only ever be called from the same goroutine as Snapshot:
+// gitMemo is not guarded by a lock. The remote half is safe from anywhere.
 func (c *Collector) Invalidate() {
 	c.gitMemo = nil
-	c.prMemo = nil
+	c.remote.invalidate()
+	c.remote.nudge()
 }
 
 func (c *Collector) Snapshot(ctx context.Context) ([]*session.Session, error) {
@@ -102,7 +124,15 @@ func (c *Collector) Snapshot(ctx context.Context) ([]*session.Session, error) {
 	}
 
 	c.fillGit(ctx, sessions)
-	c.fillPRs(ctx, sessions)
+
+	// Everything past here is local. The PR store is read as it stands and the
+	// workers are nudged to refresh it; whatever they fetch is published by
+	// the next Snapshot, at most one tick later. Nothing here blocks on the
+	// network, which is the whole contract.
+	branches := groupByBranchRoot(sessions)
+	c.prs.track(branches)
+	c.prs.fill(branches)
+	c.remote.nudge()
 	return sessions, nil
 }
 
@@ -149,46 +179,6 @@ type branchRoot struct {
 	key             string
 	branch, gitRoot string
 	sessions        []*session.Session
-	pr              *session.PRStatus
-}
-
-func (c *Collector) fillPRs(ctx context.Context, sessions []*session.Session) {
-	branches := groupByBranchRoot(sessions)
-	now := c.now()
-
-	var due []*branchRoot
-	memo := make(map[string]prMemoEntry, len(branches))
-	for _, br := range branches {
-		if prev, ok := c.prMemo[br.key]; ok && now.Sub(prev.fetchedAt) < c.PRInterval {
-			br.pr = prev.pr
-			memo[br.key] = prev
-			continue
-		}
-		due = append(due, br)
-	}
-
-	runParallel(due, prWorkers, func(br *branchRoot) {
-		br.pr = fetch.FetchPRStatus(ctx, c.Cmd, br.branch, br.gitRoot)
-	})
-
-	for _, br := range due {
-		if br.pr == nil {
-			// A failed fetch keeps the last known PR rather than blanking the
-			// column and flipping the session to idle. fetchedAt still moves,
-			// so a rate-limited gh is not retried every git_interval.
-			if prev, ok := c.prMemo[br.key]; ok {
-				br.pr = prev.pr
-			}
-		}
-		memo[br.key] = prMemoEntry{pr: br.pr, fetchedAt: now}
-	}
-	c.prMemo = memo
-
-	for _, br := range branches {
-		for _, s := range br.sessions {
-			s.PR = br.pr
-		}
-	}
 }
 
 func groupByBranchRoot(sessions []*session.Session) []*branchRoot {
