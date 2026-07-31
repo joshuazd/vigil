@@ -90,6 +90,17 @@ func TestSearchReviewRequestsArgvPutsQueryAfterDoubleDash(t *testing.T) {
 	if !strings.Contains(after, "review-requested:@me") {
 		t.Errorf("review-requested:@me missing after --: %v", args)
 	}
+	// Fixed flags must precede the separator, not follow it.
+	before := strings.Join(args[:sep], " ")
+	if !strings.Contains(before, "--state=open") {
+		t.Errorf("--state=open missing before --: %v", args)
+	}
+	if !strings.Contains(before, "--limit") {
+		t.Errorf("--limit missing before --: %v", args)
+	}
+	if !strings.Contains(before, "--json") {
+		t.Errorf("--json missing before --: %v", args)
+	}
 }
 
 func TestSearchReviewRequestsAppendsAgeWindow(t *testing.T) {
