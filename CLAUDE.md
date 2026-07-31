@@ -20,20 +20,26 @@ review-requested PRs; both vigil and the menu bar present a pickable list, and s
 item dispatches it. The same rule as before applies - live on phase 4 first. Phase 4 is the
 phase that makes the daemon run jobs, which is the condition phase 5 inherits.
 
-**Phase 4's two deferred items landed on 2026-07-31**, before phase 5 and on purpose: one of
-them - a client silently running a stale binary - gets strictly worse with every byte phase 5
-adds to the snapshot. `esc` now clears a failed dispatch line for every panel at once, and a
-client re-execs when its own binary changes. See
-`docs/superpowers/2026-07-30-binary-refresh-handoff.md`, which carries the real-machine
-results and the operational note that **the first install after it cannot re-exec anything**,
-because a panel needs to already be running the feature to notice.
+**Read these three, in this order, before starting phase 5:**
 
-**Start here: `docs/superpowers/2026-07-30-phase-4-handoff.md`.** It records what phase 4
-verified, what it did **not**, and the landmines - including `ExecCommander.Run`, the
-non-streaming path used by the `notify` and `cleanup` hooks, which still has the
-grandchild-holds-the-pipe defect that phase 4 fixed in `RunStream`. A hook that backgrounds a
-process wedges the daemon permanently; shipped defaults do not, which is the only reason it
-was left. Superseded on its two deferred items, which are the work above.
+1. **`docs/superpowers/2026-07-31-poll-latency-handoff.md`** - short, and the most
+   phase-5-relevant page here. `Collector.Snapshot` is fully synchronous: one slow `gh` call
+   stalls every panel's view of everything. **Phase 5 adds two more network pollers to that
+   same path** (Shortcut stories, review-requested PRs), so the structural fix it describes
+   is worth more before phase 5 than after. Merged as `6874acf`.
+2. **`docs/superpowers/2026-07-30-binary-refresh-handoff.md`** - phase 4's two deferred items,
+   landed 2026-07-31 as `832a86e` and verified on the real machine. `esc` now clears a failed
+   dispatch line for every panel at once, and a client re-execs when its own binary changes.
+   Carries the operational note that **the first install after a change cannot re-exec
+   anything**, because a panel must already be running the feature to notice, and the
+   landmine that the whole re-exec mechanism is **macOS-only**.
+3. **`docs/superpowers/2026-07-30-phase-4-handoff.md`** - what phase 4 verified, what it did
+   **not**, and the landmines. Still the authority on the daemon's job runner and on
+   `ExecCommander.Run`, the non-streaming path used by the `notify` and `cleanup` hooks,
+   which **still** has the grandchild-holds-the-pipe defect that phase 4 fixed in
+   `RunStream`. A hook that backgrounds a process wedges the daemon permanently; shipped
+   defaults do not, which is the only reason it was left. Superseded only on its two deferred
+   items, which are (2) above.
 
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
 `internal/dispatch`, `internal/view`'s layout, or the launch path in `~/dotfiles`:
@@ -144,3 +150,5 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - `esc` unwinds one layer per press: confirm prompt / multi-selection / dispatch prompt, then failed and refused dispatch jobs, then quit. The dismiss layer sends a `RequestDismiss` frame **with an empty ID**, so an old daemon drops it via `jobs.submit`'s empty-ID guard rather than registering an undismissable refusal for a type it does not know.
 - Every vigil client stats its own executable every `binCheckInterval` and re-execs when size or mtime changes, deferring while a prompt or a selection is open and never within `binRestartFloor` of its own start. **The changed stamp must be seen on two consecutive checks**: `make build` writes `./vigil` in place, and exec'ing a half-written file kills the pane. A startup probe that failed leaves no baseline at all, so the first stamp a process can actually get is adopted rather than compared against zero. `checkBinary` reports whether to quit and both tick arms return `tea.Quit` when it does - the exec itself happens in `main` after `p.Run()` returns, because Bubble Tea owns the terminal inside `Update`. **macOS only**: on Linux `os.Executable()` resolves to `"/path/vigil (deleted)"` after a rename-over, the stat fails, and the whole feature (including `daemon outdated`) is a permanent, fail-closed no-op.
 - **The daemon never restarts itself.** It publishes `Snapshot.DaemonBin` and clients render `daemon outdated`. Restarting it would drop every connection, so every panel would bounce through daemon-lost on every install. This was designed, rejected, and the reasoning is in the spec - do not reintroduce it.
+- **`gh` exiting non-zero is not always a failure.** `runWithRetry` retries three times with 1s and 2s of backoff, and `gh pr view` on a branch with no PR exits 1 to say so - which cost ~4.5s per poll on every freshly dispatched session, all of it inside a synchronous `Snapshot` that publishes nothing until it returns. `definitiveAnswer` reads gh's stderr off the `*exec.ExitError` and returns immediately for a true answer. It matches on gh's English message, so a gh release that rewords it silently restores the old behaviour
+- **`Collector.Snapshot` is synchronous end to end and blocks publication**: `ListSessions` → `fillGit` → `fillPRs`, and nothing is broadcast until all of it returns. One slow remote call stalls every panel's view of data already in hand. Adding a new network poller inside `Snapshot` makes the session list slower for reasons unrelated to sessions - which is exactly what phase 5's Shortcut and review-request polling would do. See `docs/superpowers/2026-07-31-poll-latency-handoff.md`

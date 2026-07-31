@@ -1,8 +1,9 @@
 # Binary refresh and job dismissal: state after the branch
 
-Written 2026-07-30, with `binary-refresh` finished in this repository and **not yet merged,
-not yet installed, and not yet verified on a real machine**. That last point is the most
-important thing on this page; see "What was NOT verified".
+Written 2026-07-30. **Updated 2026-07-31: merged, installed, and verified on the real
+machine.** The original version of this page led with "not yet merged, not yet installed,
+not yet verified" - all three are now false, and the results are under "Then it was run on
+the real machine".
 
 - Design: `docs/superpowers/specs/2026-07-30-binary-refresh-and-job-dismiss-design.md`.
 - Executed plan: `docs/superpowers/plans/2026-07-30-binary-refresh-and-job-dismiss.md`,
@@ -13,11 +14,10 @@ important thing on this page; see "What was NOT verified".
   after `make install`, and a failed job line with no way to clear it - both hit on the first
   day of real dispatch use, neither speculative.
 
-Branch: `binary-refresh` in `~/vigil`, branched from `main` at `6a2a97c`. This page does not
-name its own head commit, and that is deliberate: two earlier revisions tried and both were
-false by the time anyone read them, because any commit after the doc commit invalidates the
-claim. Use `git log 6a2a97c..binary-refresh` instead. This is a single-repository change;
-nothing in `~/dotfiles` is required for it.
+**Merged into local `main` as `832a86e`** on 2026-07-31, 19 commits from `6a2a97c`. The
+branch and its worktree are gone; use `git log 6a2a97c..832a86e` to read the work. Nothing
+was pushed - `origin/main` is well behind local `main`, as it was for phases 2 through 4.
+This is a single-repository change; nothing in `~/dotfiles` is required for it.
 
 ## What landed
 
