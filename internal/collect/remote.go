@@ -53,6 +53,11 @@ func newRemote(pollers ...poller) *remote {
 // workers would double the fetch rate for one collector. sync.Once, not a
 // bool: that path is reachable from more than one goroutine, and an
 // unsynchronized bool would race the read/write on itself.
+//
+// The Once makes ctx sticky: the first caller's context is the only one the
+// workers ever select on, so it must outlive the process's use of this remote.
+// Starting with an already-cancelled one leaves the workers permanently
+// stopped and every later start a no-op.
 func (r *remote) start(ctx context.Context) {
 	r.once.Do(func() {
 		for i, p := range r.pollers {

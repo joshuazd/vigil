@@ -655,6 +655,60 @@ func TestPassEvictsABranchThatLeftTheWorkingSet(t *testing.T) {
 	}
 }
 
+// TestAFailedEnumerationDoesNotWipeThePRStore: a Snapshot that cannot
+// enumerate tmux knows nothing about the working set, so it must not post one.
+// A regression that tracked before the error check would post an empty set; a
+// pass prunes unconditionally, so the store would be wiped, every session would
+// come back PRPending, and Detect skips a pending session - one transient tmux
+// failure would silently swallow a real Done, its notify hook and its cleanup.
+func TestAFailedEnumerationDoesNotWipeThePRStore(t *testing.T) {
+	tmuxBroken := false
+	cmd := singleBranchCommander()
+	cmd.HandlerFuncs["tmux"] = func(_ context.Context, _ string, args []string) (string, error) {
+		if tmuxBroken {
+			return "", context.DeadlineExceeded
+		}
+		if len(args) > 0 && args[0] == "list-windows" {
+			return "alpha|0", nil
+		}
+		return "1700000000|alpha|/repo/alpha", nil
+	}
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	ctx := context.Background()
+	c := New(&config.Config{}, cmd)
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	c.RefreshRemote(ctx)
+	sessions, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	if sessions[0].PRPending || sessions[0].PR == nil {
+		t.Fatalf("fixture is broken: want the branch resolved before the failure, got PRPending=%v PR=%+v",
+			sessions[0].PRPending, sessions[0].PR)
+	}
+
+	tmuxBroken = true
+	if _, err := c.Snapshot(ctx); err == nil {
+		t.Fatal("want an error when tmux enumeration fails")
+	}
+	c.RefreshRemote(ctx)
+
+	tmuxBroken = false
+	sessions, err = c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot after recovery: %v", err)
+	}
+	if sessions[0].PRPending {
+		t.Error("a failed enumeration must not re-mark the branch pending: Detect would stop seeing it")
+	}
+	if sessions[0].PR == nil || sessions[0].PR.Number != 42 {
+		t.Errorf("got PR %+v, want number 42 still in the store", sessions[0].PR)
+	}
+}
+
 // TestSnapshotAndRefreshRemoteAreRaceFree drives the two goroutines the design
 // actually creates against each other. -race is the assertion; the loop counts
 // are only there to make a window.

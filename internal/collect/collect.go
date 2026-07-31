@@ -17,6 +17,12 @@ const (
 )
 
 type Collector struct {
+	// These four and clock are read-only once New returns. prPoller.pass reads
+	// Cmd, PRInterval and clock from its own worker goroutine while Snapshot
+	// runs on another, so a writer after construction is a data race - and one
+	// -race would surface only if a test happened to interleave the two. A
+	// test that needs a different clock or interval must set it before the
+	// first Snapshot, which is the only thing that can start a pass.
 	Cmd         fetch.Commander
 	GitWorkers  int
 	GitInterval time.Duration
@@ -74,6 +80,11 @@ func (c *Collector) now() time.Time {
 // Start runs the remote pollers' workers. Every process that calls Snapshot
 // must call this once: without it no off-box data is ever fetched. It is safe
 // to call more than once and does nothing on a second call.
+//
+// ctx must outlive the process's use of the collector. The first call wins
+// permanently, so starting with a short-lived or already-cancelled context
+// disables the pollers for good and the later call this tolerates becomes a
+// silent no-op.
 //
 // A process that never calls Snapshot may still call it. The workers are woken
 // only by a nudge, so a daemon-fed client's stay blocked and spend nothing.
