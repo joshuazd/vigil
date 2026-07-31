@@ -166,6 +166,21 @@ func (m *MockCommander) OnArgs(key string, output string, err error) {
 	m.Handlers[key] = MockHandler{Output: output, Err: err}
 }
 
+// CallCount reports how many times a command was run. Calls is appended under
+// mu by a Run that may be on any goroutine, so a test driving one commander
+// from two goroutines cannot read the slice directly.
+func (m *MockCommander) CallCount(name string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, call := range m.Calls {
+		if call.Name == name {
+			n++
+		}
+	}
+	return n
+}
+
 func (m *MockCommander) Run(ctx context.Context, dir string, name string, args ...string) (string, error) {
 	m.mu.Lock()
 	m.Calls = append(m.Calls, MockCall{Dir: dir, Name: name, Args: args})

@@ -315,6 +315,44 @@ func newDoneToggleCommander(sessions ...string) (*fetch.MockCommander, *toggleSt
 	return cmd, st
 }
 
+// primeDoneToggle brings a newDoneToggleCommander server to the state its
+// callers assume: every session seeded at Done. It takes two Snapshots because
+// the first one has no PR data yet, which makes each session pending, and
+// Detect deliberately neither seeds nor reports a pending session.
+// RefreshRemote in between is the fetch the collector's workers would do,
+// driven synchronously so the sequence does not race a goroutine.
+func primeDoneToggle(ctx context.Context, s *Server) {
+	s.poll(ctx)
+	s.Collector.RefreshRemote(ctx)
+	s.poll(ctx)
+}
+
+// waitForSeeded blocks until the daemon has published a snapshot in which
+// every session's PR has resolved. It is the Run-driven counterpart to
+// primeDoneToggle: Detect neither seeds nor reports a pending session, so a
+// bell flipped before this point produces no event and the seed the session
+// eventually takes would record the flipped state as its baseline.
+//
+// Reading s.latest under s.mu is also what orders the session writes against
+// this goroutine.
+func waitForSeeded(t *testing.T, s *Server, want int) {
+	t.Helper()
+	waitForCondition(t, 5*time.Second, func() bool {
+		s.mu.Lock()
+		latest := s.latest
+		s.mu.Unlock()
+		if latest == nil || len(latest.Sessions) < want {
+			return false
+		}
+		for _, sess := range latest.Sessions {
+			if sess.PRPending {
+				return false
+			}
+		}
+		return true
+	})
+}
+
 // doneGate blocks the first New == session.Done Run call for each session
 // named in gateFirst until release closes; every other call - a non-Done
 // transition for that same session, a later Done for it, or any call for a
@@ -400,7 +438,7 @@ func TestRepeatDoneForSameSessionIsSkippedWhileFirstCleanupRuns(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s.poll(ctx) // primes: alpha done
+	primeDoneToggle(ctx, s) // primes: alpha done
 
 	toggle.setBell("alpha", true)
 	s.poll(ctx) // alpha done -> attention: non-Done, dispatches
@@ -448,7 +486,7 @@ func TestDoneForDifferentSessionIsNotSkipped(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s.poll(ctx) // primes: alpha done, beta done
+	primeDoneToggle(ctx, s) // primes: alpha done, beta done
 
 	toggle.setBell("alpha", true)
 	s.poll(ctx) // alpha done -> attention: dispatches
@@ -490,7 +528,7 @@ func TestDoneDispatchesAfterPriorCleanupCompletes(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s.poll(ctx) // primes: alpha done
+	primeDoneToggle(ctx, s) // primes: alpha done
 
 	toggle.setBell("alpha", true)
 	s.poll(ctx) // alpha done -> attention: dispatches
@@ -536,7 +574,7 @@ func TestNonDoneEventsDispatchWhileACleanupIsInFlight(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s.poll(ctx) // primes: alpha done
+	primeDoneToggle(ctx, s) // primes: alpha done
 
 	toggle.setBell("alpha", true)
 	s.poll(ctx) // event 1: done -> attention, non-Done, dispatches (the "notify hook")
@@ -600,6 +638,7 @@ func TestShutdownTerminatesWithManyInFlightEffects(t *testing.T) {
 		close(done)
 	}()
 	waitForSocket(t, s.SocketPath)
+	waitForSeeded(t, s, n)
 
 	for _, name := range names {
 		toggle.setBell(name, true)
