@@ -522,9 +522,6 @@ func (m Model) View() string {
 		return m.panelView()
 	}
 
-	// Status bar
-	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth(), 0)
-
 	notif := m.activeNotification()
 
 	// Table
@@ -532,25 +529,28 @@ func (m Model) View() string {
 	jobLine := view.RenderJobLine(m.jobs, m.width)
 	tableHeight := m.tableHeight(jobLine != "")
 
-	// tableHeight above is the combined budget for the table and the queue
-	// section together - it is everything left after the status bar, footer,
-	// detail panel and job line. minTableRows is what the table keeps for
-	// itself before the queue gets to grow: without a floor here, a long
-	// queue can push the table to its own 1-row minimum and still not be
-	// short enough, because nothing then bounds the queue's own height and
-	// the two together can still exceed m.height.
-	const minTableRows = 3
+	// queueRowBudget is the single source of truth for how much of the queue
+	// fits: rowCount (via drawnQueueRows) must land on exactly the same
+	// maxRows, or the cursor can reach a row this never draws.
 	var queueSection string
-	if len(m.queue) > 0 {
-		if budget := tableHeight - minTableRows; budget >= 2 {
-			queueSection = view.RenderQueue(m.queue, m.queueHidden, m.queueCursor(), m.width, budget-1, time.Now())
-		}
+	if maxRows, ok := m.queueRowBudget(tableHeight); ok && len(m.queue) > 0 {
+		queueSection = view.RenderQueue(m.queue, m.queueHidden, m.queueCursor(), m.width, maxRows, time.Now())
 	}
 	if queueSection != "" {
 		tableHeight -= lipgloss.Height(queueSection)
 	}
 	tableHeight = max(1, tableHeight)
 	staleThreshold := m.cfg.GetSettingInt("stale_threshold")
+
+	// Status bar. The badge is 0 when the QUEUE section itself is on screen -
+	// its own header already carries the count - and surfaces len(m.queue)
+	// only when the terminal has no room to draw the section at all, which
+	// would otherwise look identical to an empty queue.
+	queueBadge := 0
+	if queueSection == "" && len(m.queue) > 0 {
+		queueBadge = len(m.queue)
+	}
+	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth(), queueBadge)
 	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight, notif)
 
 	// Detail panel
@@ -1650,12 +1650,47 @@ func (m Model) visibleSessions() []*session.Session {
 // fold: they either displace sessions or are invisible), so the cursor must
 // not be able to reach them there either - a panel visitor would otherwise
 // see the highlight vanish for two presses and enter would fire a detached
-// dispatch of an item they cannot see.
+// dispatch of an item they cannot see. The dashboard has the same problem in
+// miniature: View() truncates the queue section to what fits, so the cursor
+// space stops at drawnQueueRows rather than len(m.queue) - a cursor past that
+// point would highlight nothing and let enter dispatch an item never shown.
 func (m Model) rowCount() int {
 	if m.panelMode {
 		return len(m.visibleSessions())
 	}
-	return len(m.visibleSessions()) + len(m.queue)
+	return len(m.visibleSessions()) + m.drawnQueueRows()
+}
+
+// queueRowBudget turns the table-height budget into the maxRows argument
+// view.RenderQueue expects, and whether the queue section fits at all.
+// View and drawnQueueRows both go through this so the section actually drawn
+// and the cursor's ceiling can never drift apart - tableHeight must be
+// whatever the caller already computed via m.tableHeight, since the table
+// keeps minTableRows for itself before the queue gets any of what is left.
+func (m Model) queueRowBudget(tableHeight int) (maxRows int, ok bool) {
+	const minTableRows = 3
+	budget := tableHeight - minTableRows
+	if budget < 2 {
+		return 0, false
+	}
+	return budget - 1, true
+}
+
+// drawnQueueRows is how many queue items View actually renders as selectable
+// rows - it excludes the header and the "... +N more" summary line, matching
+// view.QueueRowsShown so this can never disagree with what RenderQueue draws.
+// Zero in panel mode, when the queue is empty, and whenever the terminal has
+// no room to show the section at all.
+func (m Model) drawnQueueRows() int {
+	if m.panelMode || len(m.queue) == 0 {
+		return 0
+	}
+	jobLine := view.RenderJobLine(m.jobs, m.width)
+	maxRows, ok := m.queueRowBudget(m.tableHeight(jobLine != ""))
+	if !ok {
+		return 0
+	}
+	return view.QueueRowsShown(len(m.queue), maxRows)
 }
 
 // queueCursor is the cursor's index into m.queue, or -1 when it is on a

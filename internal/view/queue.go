@@ -12,6 +12,21 @@ import (
 // pathological repo name from eating the title.
 const queueLabelWidth = 20
 
+// QueueRowsShown returns how many of itemCount items RenderQueue draws as
+// item rows once capped at maxRows - the header and the "... +N more" line
+// are not counted. Model.drawnQueueRows calls this too, which is what keeps
+// the cursor's ceiling from disagreeing with what RenderQueue actually draws.
+func QueueRowsShown(itemCount, maxRows int) int {
+	if maxRows > 0 && itemCount > maxRows {
+		visible := maxRows - 1
+		if visible < 0 {
+			visible = 0
+		}
+		return visible
+	}
+	return itemCount
+}
+
 // RenderQueue renders the work-waiting section below the session table.
 // cursor is an index into items, or -1 when the cursor is on a session row -
 // the Model owns the single cursor and does that translation, so this never
@@ -25,7 +40,8 @@ const queueLabelWidth = 20
 // maxRows <= 0 means no cap. Items beyond it collapse into one "... +N more"
 // row rather than growing the section past what the caller budgeted, which is
 // what keeps the whole dashboard within m.height - RenderQueue has no other
-// way to know the terminal has a bottom edge.
+// way to know the terminal has a bottom edge. QueueRowsShown above is the
+// row-count half of that arithmetic, shared so it stays in sync.
 func RenderQueue(items []session.QueueItem, hidden, cursor, width, maxRows int, now time.Time) string {
 	if len(items) == 0 {
 		return ""
@@ -38,15 +54,12 @@ func RenderQueue(items []session.QueueItem, hidden, cursor, width, maxRows int, 
 
 	lines := []string{FaintOnBar().Render(header)}
 
+	n := QueueRowsShown(len(items), maxRows)
 	shown := items
 	overflow := 0
-	if maxRows > 0 && len(items) > maxRows {
-		visible := maxRows - 1
-		if visible < 0 {
-			visible = 0
-		}
-		shown = items[:visible]
-		overflow = len(items) - visible
+	if n < len(items) {
+		shown = items[:n]
+		overflow = len(items) - n
 	}
 
 	for i, it := range shown {

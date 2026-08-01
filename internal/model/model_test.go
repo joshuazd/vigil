@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
@@ -349,6 +351,109 @@ func TestDashboardViewFitsItsHeightAcrossQueueLengths(t *testing.T) {
 			t.Errorf("height=%d queue=%d detailOpen=%v: rendered %d lines, overflow +%d",
 				c.height, c.queueLen, c.detailOpen, len(lines), len(lines)-c.height)
 		}
+	}
+}
+
+// TestCursorNeverOutrunsTheDrawnQueueRows is the reviewer's finding made
+// executable: rowCount() used to span all of m.queue while View() drew only
+// a fraction of it (truncating to a "... +N more" line), so a cursor could
+// land on a queue row the frame draws no marker for at all - j walked the
+// highlight off the bottom into nothing, and enter there fired an
+// unconfirmed detached dispatch of an item the user could not see.
+//
+// The four heights are the reviewer's own measurement, taken with 8
+// sessions, a 20-item queue and the detail panel open (the dashboard
+// default): 13/8/5/0 queue rows drawn at heights 40/30/24/12. Those counts
+// are pinned directly, and then every cursor value rowCount() admits is
+// swept: the property that actually matters is that each one leaves a
+// visible marker somewhere in the frame.
+//
+// The marker check forces the ANSI color profile and compares against a
+// cursor=-1 baseline rendered from the same model, because CursorStyle is a
+// Background-only style: with lipgloss's default no-color profile (true in
+// any non-tty test process) it renders as plain, unstyled text, and a
+// cursor-highlighted session row can be byte-identical to a non-highlighted
+// one. Forcing ANSI makes CursorStyle emit a real SGR wrap, and diffing
+// against the -1 baseline (which selectedSession() and queueCursor() both
+// treat the same as any cursor past the end of the queue's drawn rows,
+// since neither special-cases -1) isolates exactly the cursor's own effect
+// on the frame from anything else height or content might change.
+func TestCursorNeverOutrunsTheDrawnQueueRows(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(old)
+
+	cases := []struct {
+		height    int
+		wantDrawn int
+	}{
+		{40, 13},
+		{30, 8},
+		{24, 5},
+		{12, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("height=%d", tc.height), func(t *testing.T) {
+			m := newTestModel()
+			m.width, m.height = 120, tc.height
+			m.detailOpen = true
+			m.sessions = make([]*session.Session, 8)
+			for i := range m.sessions {
+				m.sessions[i] = &session.Session{
+					Name:     fmt.Sprintf("session-%d", i),
+					PanePath: fmt.Sprintf("/repo/session-%d", i),
+				}
+			}
+			m.queue = make([]session.QueueItem, 20)
+			for i := range m.queue {
+				m.queue[i] = session.QueueItem{
+					Kind:  session.QueueStory,
+					ID:    fmt.Sprintf("%d", i),
+					Title: fmt.Sprintf("item %d", i),
+				}
+			}
+
+			if got := m.drawnQueueRows(); got != tc.wantDrawn {
+				t.Fatalf("drawnQueueRows() = %d, want %d", got, tc.wantDrawn)
+			}
+			if want := len(m.sessions) + tc.wantDrawn; m.rowCount() != want {
+				t.Fatalf("rowCount() = %d, want %d (sessions + drawn queue rows)", m.rowCount(), want)
+			}
+
+			baseline := m
+			baseline.cursor = -1
+			baselineFrame := baseline.View()
+
+			for c := 0; c < m.rowCount(); c++ {
+				mc := m
+				mc.cursor = c
+				if mc.View() == baselineFrame {
+					t.Errorf("cursor=%d: no cursor marker anywhere in the frame", c)
+				}
+			}
+		})
+	}
+}
+
+// TestDashboardShowsTheQueueBadgeWhenTooShortToDrawTheSection is the other
+// half of the reviewer's finding: at height 12 the QUEUE section draws
+// nothing at all (drawnQueueRows() == 0 above), and until now View() passed
+// a literal 0 for the status bar's queue count regardless, so a short
+// dashboard with a real queue looked identical to an empty one. It should
+// look like panelView's badge does, which is why the assertion mirrors
+// TestPanelShowsTheBadgeAndNoQueueRows above.
+func TestDashboardShowsTheQueueBadgeWhenTooShortToDrawTheSection(t *testing.T) {
+	m := modelWithQueue(t)
+	m.detailOpen = true
+	m.height = 12
+
+	out := m.View()
+	if !strings.Contains(out, "⚡2") {
+		t.Errorf("short dashboard missing the queue badge:\n%s", out)
+	}
+	if strings.Contains(out, "QUEUE") {
+		t.Errorf("short dashboard rendered a QUEUE section it has no room for:\n%s", out)
 	}
 }
 
