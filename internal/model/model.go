@@ -1033,6 +1033,11 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		// populates Queue on the same successful call that populates
 		// Sessions, so a nil Sessions means a nil Queue that must not
 		// overwrite what is already on screen.
+		// Jobs is assigned before applySnapshot for the same reason Queue is
+		// below: applySnapshot's cursor clamp reads drawnQueueRows, which
+		// depends on m.jobs, and must see the job set this snapshot settles
+		// on rather than the previous tick's.
+		m.jobs = msg.Jobs
 		if msg.Sessions != nil {
 			// Queue is assigned before applySnapshot so its cursor clamp sees
 			// the row count both sides of the snapshot actually settle on,
@@ -1041,7 +1046,6 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 			m.queueHidden = msg.QueueHidden
 			m.applySnapshot(msg.Sessions)
 		}
-		m.jobs = msg.Jobs
 		m.daemonBin = msg.DaemonBin
 		m.checkStateTransitions()
 		var cmds []tea.Cmd
@@ -1071,8 +1075,8 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	m.lastSnapshot = time.Now()
 	m.queue = msg.Queue
 	m.queueHidden = msg.QueueHidden
-	m.applySnapshot(msg.Sessions)
 	m.jobs = msg.Jobs
+	m.applySnapshot(msg.Sessions)
 	m.daemonBin = msg.DaemonBin
 
 	m.checkStateTransitions()
@@ -1709,7 +1713,7 @@ func (m Model) queueCursor() int {
 // queueDispatchTarget reports what enter should dispatch, if anything.
 func (m Model) queueDispatchTarget() (input string, detached bool, ok bool) {
 	i := m.queueCursor()
-	if i < 0 {
+	if i < 0 || i >= m.drawnQueueRows() {
 		return "", false, false
 	}
 	return m.queue[i].Input, true, true

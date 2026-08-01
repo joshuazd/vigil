@@ -9,8 +9,6 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 
 	"github.com/jzinkduda/vigil/internal/protocol"
 	"github.com/jzinkduda/vigil/internal/session"
@@ -270,6 +268,113 @@ func TestEnterOnAQueueRowDispatchesDetached(t *testing.T) {
 	}
 }
 
+// TestQueueCursorReclampsWhenJobsShrinkTheDrawnRows is the regression from
+// d4c0391 made executable: rowCount()'s clamp in applySnapshot depends on
+// m.jobs (via drawnQueueRows -> tableHeight -> RenderJobLine), but both
+// handleSnapshot branches used to assign m.jobs after calling applySnapshot,
+// so the clamp ran against the previous tick's job set.
+//
+// At height 24 with 8 sessions and a 20-item queue, drawnQueueRows() is 5
+// with no jobs and 4 once a job line takes a row (mirroring
+// TestCursorNeverOutrunsTheDrawnQueueRows's own height-24 case). The cursor
+// starts at 12, the last drawn row before the job arrives. A correctly
+// ordered clamp reclamps it to 11 (8 sessions + 4 drawn rows - 1) in the same
+// call that installs the job, so queueDispatchTarget() must dispatch queue
+// item 3 - the new last drawn row - not report no target and not dispatch
+// the stale item 4.
+func TestQueueCursorReclampsWhenJobsShrinkTheDrawnRows(t *testing.T) {
+	m := newTestModel()
+	m.daemonConn = &fakeConn{}
+	m.width, m.height = 120, 24
+	m.detailOpen = true
+	m.sessions = make([]*session.Session, 8)
+	for i := range m.sessions {
+		m.sessions[i] = &session.Session{
+			Name:     fmt.Sprintf("session-%d", i),
+			PanePath: fmt.Sprintf("/repo/session-%d", i),
+		}
+	}
+	m.queue = make([]session.QueueItem, 20)
+	for i := range m.queue {
+		m.queue[i] = session.QueueItem{
+			Kind:  session.QueueStory,
+			ID:    fmt.Sprintf("%d", i),
+			Title: fmt.Sprintf("item %d", i),
+			Input: fmt.Sprintf("sc-%d", i),
+		}
+	}
+	if got := m.drawnQueueRows(); got != 5 {
+		t.Fatalf("precondition: drawnQueueRows() = %d, want 5 with no jobs", got)
+	}
+	m.cursor = len(m.sessions) + m.drawnQueueRows() - 1 // 12
+
+	jobs := []protocol.Job{{ID: "j1", Input: "sc-1", State: protocol.JobRunning}}
+	next, _ := m.handleSnapshot(SnapshotMsg{
+		Epoch:    m.epoch,
+		Local:    false,
+		Sessions: m.sessions,
+		Queue:    m.queue,
+		Jobs:     jobs,
+	})
+	got := next.(Model)
+
+	if drawn := got.drawnQueueRows(); drawn != 4 {
+		t.Fatalf("precondition: drawnQueueRows() with the job line = %d, want 4", drawn)
+	}
+	input, _, ok := got.queueDispatchTarget()
+	if !ok {
+		t.Fatal("queueDispatchTarget() reported no target after the reclamp: the cursor was left stranded past the drawn rows")
+	}
+	if input != "sc-3" {
+		t.Errorf("queueDispatchTarget() = %q, want sc-3 (the reclamped cursor's row)", input)
+	}
+}
+
+// TestQueueDispatchTargetIsBoundedByDrawnRowsAfterGeometryChanges covers the
+// second route to the same failure: a geometry change (here, closing the
+// detail panel) shrinks drawnQueueRows() without any clamp running at all,
+// since only applySnapshot's clamp exists and no snapshot arrives on a key
+// press. queueDispatchTarget() must fail closed on its own rather than rely
+// on a clamp having run - measured at dashboard height 40, 8 sessions and a
+// 20-item queue: detail open gives drawnQueueRows() 13 (cursor 27 sits on
+// the last drawn row, matching TestCursorNeverOutrunsTheDrawnQueueRows),
+// detail closed gives drawnQueueRows() 20, so the same cursor is left seven
+// rows past the drawn section with nothing to reclamp it.
+func TestQueueDispatchTargetIsBoundedByDrawnRowsAfterGeometryChanges(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 120, 40
+	m.detailOpen = false
+	m.sessions = make([]*session.Session, 8)
+	for i := range m.sessions {
+		m.sessions[i] = &session.Session{
+			Name:     fmt.Sprintf("session-%d", i),
+			PanePath: fmt.Sprintf("/repo/session-%d", i),
+		}
+	}
+	m.queue = make([]session.QueueItem, 20)
+	for i := range m.queue {
+		m.queue[i] = session.QueueItem{
+			Kind:  session.QueueStory,
+			ID:    fmt.Sprintf("%d", i),
+			Title: fmt.Sprintf("item %d", i),
+			Input: fmt.Sprintf("sc-%d", i),
+		}
+	}
+	if got := m.drawnQueueRows(); got != 20 {
+		t.Fatalf("precondition: drawnQueueRows() with detail closed = %d, want 20", got)
+	}
+	m.cursor = len(m.sessions) + m.drawnQueueRows() - 1 // 27, the last drawn row
+
+	m.detailOpen = true
+	if got := m.drawnQueueRows(); got != 13 {
+		t.Fatalf("precondition: drawnQueueRows() with detail open = %d, want 13", got)
+	}
+
+	if _, _, ok := m.queueDispatchTarget(); ok {
+		t.Error("queueDispatchTarget() reported a target for a row the detail toggle pushed out of the drawn section")
+	}
+}
+
 // TestDashboardViewFitsItsHeightWithQueue pins the height arithmetic: without
 // `tableHeight -= lipgloss.Height(queueSection)`, the table keeps its
 // pre-queue height and the queue section is added on top, so the dashboard
@@ -368,21 +473,14 @@ func TestDashboardViewFitsItsHeightAcrossQueueLengths(t *testing.T) {
 // swept: the property that actually matters is that each one leaves a
 // visible marker somewhere in the frame.
 //
-// The marker check forces the ANSI color profile and compares against a
-// cursor=-1 baseline rendered from the same model, because CursorStyle is a
-// Background-only style: with lipgloss's default no-color profile (true in
-// any non-tty test process) it renders as plain, unstyled text, and a
-// cursor-highlighted session row can be byte-identical to a non-highlighted
-// one. Forcing ANSI makes CursorStyle emit a real SGR wrap, and diffing
-// against the -1 baseline (which selectedSession() and queueCursor() both
-// treat the same as any cursor past the end of the queue's drawn rows,
-// since neither special-cases -1) isolates exactly the cursor's own effect
-// on the frame from anything else height or content might change.
+// The marker check compares against a cursor=-1 baseline rendered from the
+// same model (which selectedSession() and queueCursor() both treat the same
+// as any cursor past the end of the queue's drawn rows, since neither
+// special-cases -1), isolating exactly the cursor's own effect on the frame
+// from anything else height or content might change. A queue row's marker is
+// the literal text "> ", which survives lipgloss's default no-color test
+// profile, so no color profile needs forcing.
 func TestCursorNeverOutrunsTheDrawnQueueRows(t *testing.T) {
-	old := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.ANSI)
-	defer lipgloss.SetColorProfile(old)
-
 	cases := []struct {
 		height    int
 		wantDrawn int
