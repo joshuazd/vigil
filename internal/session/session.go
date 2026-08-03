@@ -123,8 +123,9 @@ type Session struct {
 	// ID is tmux's #{session_id}. It exists for one reason: #{session_created}
 	// is whole seconds, so two sessions created in the same second tie, and
 	// the tmux keybindings in ~/dotfiles order sessions by session_id. Sorting
-	// (Created, ID) is the same total order as their pure-ID sort, because
-	// session ids are issued in increasing order. 0 means either the field
+	// (Created, ID) is the same total order as their pure-ID sort as long as
+	// created is monotonic in id, which holds unless the wall clock steps
+	// backwards between two creations. 0 means either the field
 	// was absent/unparseable or this is genuinely the first session tmux ever
 	// created ($0) - the comparator is correct either way, since 0 sorts
 	// first and a real $0 is genuinely the oldest session.

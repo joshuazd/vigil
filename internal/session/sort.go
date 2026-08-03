@@ -38,8 +38,11 @@ func SortSessions(sessions []*Session, mode SortMode) {
 		// ListSessions' alphabetical order - while ~/dotfiles' M-j/M-k order by
 		// session_id, which is why they disagreed. Session ids are issued in
 		// increasing order, so (Created, ID) is the same total order as pure
-		// ID, and unlike pure ID it degrades to Created when ID is 0 rather
-		// than hoisting every cache-hydrated session to the front.
+		// ID whenever created is monotonic in id - which is not guaranteed: a
+		// wall clock stepping backwards between two creations makes the two
+		// orders disagree for that pair. Unlike pure ID it degrades to Created
+		// when ID is 0 rather than hoisting every cache-hydrated session to
+		// the front.
 		sortBy(sessions, func(a, b *Session) bool {
 			if a.Created != b.Created {
 				return a.Created < b.Created

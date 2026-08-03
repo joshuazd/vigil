@@ -66,7 +66,7 @@ Before designing anything for complaint 1. All figures from this machine, 2026-0
 
 | gap | measured |
 |---|---|
-| `slow poll` lines in the entire daemon log | **0** |
+| `slow poll` lines in the entire daemon log | ~~**0**~~ **WRONG. Eight - see below** |
 | `tmux display-popup -E` startup, 3 runs | 0.01-0.02s |
 | `git-worktree-cleanup` invoke → session gone from `tmux list-sessions` | 0.272s |
 | tmux drops the session → daemon snapshot drops the row | 0.968s |
@@ -76,15 +76,31 @@ The removal measurement connected to the daemon socket directly, streamed snapsh
 killed a throwaway session, and timestamped both the disappearance from
 `tmux list-sessions` and the first snapshot lacking the row.
 
-Two conclusions:
+**Corrected 2026-08-03: the first row was false when this file was written, and one of the
+conclusions below is withdrawn because of it.** The daemon log is opened `O_APPEND` and
+never truncated (`internal/daemon/spawn.go:26`); it runs continuously from 09:33:58 to
+16:19:13 on 2026-08-03 and contains **eight** `slow poll` lines - six of them 1.0-1.6s at
+the freshly dispatched `pr-35108` worktree, and one at **11.1s total, 11.085s in git** at
+14:30:27, seven minutes before this file was written (14:37:19).
 
-- **0.968s is the floor for a 1s cadence, so vigil is at its limit and is not the lag.**
-- **`fillGit` gating publication is dead as a hypothesis.** Zero `slow poll` lines means
-  no poll ever exceeded `tmux_interval`. This is consistent with the 2026-08-03 demotion
-  note in `CLAUDE.md` and inconsistent with the 2026-07-31 measurement; it is a third
-  data point for the conditional reading that note already recommends.
-- `kill_tmux_session` runs early in cleanup's `main` (`git-worktree-cleanup:206`), before
-  any worktree removal, so the kill is not waiting on git.
+Three conclusions:
+
+- **0.968s is the floor for a 1s cadence, so vigil is at its limit on that path and is not
+  the lag.** This one stands; it rests on the fourth row, not the first.
+- ~~**`fillGit` gating publication is dead as a hypothesis.**~~ **Withdrawn.** There is no
+  third data point for `CLAUDE.md`'s 2026-08-03 demotion, and an 11-second poll inside a
+  1-second cadence is a live mechanism for the reported symptom: publication is blocked for
+  the whole of it, so a killed session stays on screen. Six of the eight lines match the
+  cold-worktree first-`status` exposure that note names as its remaining unexplained
+  suspect. Note also that `logSlowPoll`'s rate limit is a one-minute *window*, so eight
+  lines means at least eight distinct minutes containing a slow poll, not eight slow polls.
+- `kill_tmux_session` runs early in cleanup's `main` (`git-worktree-cleanup:218` after part
+  C's stamps landed; `:206` before), before any worktree removal, so the kill is not
+  waiting on git.
+
+The lesson, recorded in the handoff: **a number in a spec is verified only by re-running
+the command that produced it.** This one survived a design review, a plan, seven task
+briefs and seven per-task reviews, because no per-task diff owned it.
 
 The components sum to roughly 1.3s worst case. That does not account for "a few seconds",
 so a cause remains unconfirmed and part C exists to find it. The leading untested
@@ -135,12 +151,21 @@ with no vigil installed.
   return a.ID < b.ID
   ```
 
-  **Not pure `ID`.** Because `session_created` is monotonic in `session_id`, comparing
-  `Created` first and `ID` second yields provably the same total order as the bindings'
+  **Not pure `ID`.** Because `session_created` is monotonic in `session_id` in practice,
+  comparing `Created` first and `ID` second yields the same total order as the bindings'
   pure-`ID` sort, while degrading to exactly today's behavior when `ID` is 0 - the case
   of a session hydrated from a cache file written before this change, which self-heals on
   the first poll. A pure-`ID` comparator would order every such session ahead of every
   real one until that poll landed.
+
+  **Corrected 2026-08-03: this was written as "provably the same total order" and that is
+  false.** The equivalence rests on the monotonicity assumption and that assumption fails
+  under clock skew: if the wall clock moves backwards between two session creations while
+  tmux's id counter keeps climbing, `(Created, ID)` and pure `ID` disagree for that pair -
+  t=100/`$5` and t=99/`$6` sort `$5, $6` by id and `$6, $5` by `(Created, ID)` - and
+  vigil's rows disagree with `M-j`'s walk. The exposure is pre-existing, since `Created`
+  was already the primary key, but it is a real hole and nothing detects it. See
+  `docs/superpowers/2026-08-03-session-hopping-handoff.md`.
 
   The mode keeps the name `created`. It still means creation order; it is now exact
   rather than second-granular.
@@ -206,9 +231,19 @@ latent defects in them along the way:
   resolve `SC-223477` against `SC-2234770`. This is the same load-bearing-prefix hazard
   already documented for `session.QueueItem.SessionPrefix()`'s trailing space. All
   switches become `switch-client -t "=$name"`.
-- **`cut -d: -f2` truncates a name containing a colon.** A story title with a colon
-  currently produces a target tmux cannot resolve. The delimiter becomes `|` with
+- **`cut -d: -f2` truncates a name containing a colon.** The delimiter becomes `|` with
   `-f2-`.
+
+  **Corrected 2026-08-03: this originally claimed the fix makes a colon-named session
+  resolvable, and it does not.** `cut -d'|' -f2-` fixes **extraction** only. A colon-named
+  session is untargetable by name on *any* tmux build, because `:` is tmux's own
+  session:window target separator: on a fresh, non-sanitizing server
+  `has-session -t '=a.b:c[d+e]'` fails with `can't find session: a.b`, and the `=` prefix
+  does not change that. The value of the fix is that the old code would have **silently
+  switched to a different real session named `a.b`**, where the new code attempts the true
+  full name and fails loudly - the same trade as defect 2. Scope is also narrower than
+  stated: `lib/tmux.sh`'s `session_name_from_title` already strips `:` and `.` at creation
+  (lines 110-111), so this can only reach a session a human named by hand.
 
 `.tmux.conf` changes:
 
@@ -231,6 +266,13 @@ free of any index-resolution logic, and `gh pr view --web` in the pane's own dir
 needs no vigil data. The `{ ...; } ||` grouping is so a failed `cd` also reports rather
 than silently doing nothing; the message is then slightly wrong for that case, which is
 accepted over a second error branch.
+
+**Corrected 2026-08-03: that fallback is not unconditional.** A literal double quote in
+`#{pane_current_path}` - not a single quote, which is inert inside `sh`'s double quotes -
+makes the expanded string an `sh` parse error, and a parse error swallows **both** sides of
+the `||`, so the `no PR for this branch` message never appears either. The user gets the
+shell's `unexpected EOF while looking for matching '"'` in a tmux view-mode overlay
+instead. Accepted risk: no worktree path in this toolchain contains a `"`.
 
 The one ordering dependency between parts: **`M-<n>` only matches the panel's index
 column once part A lands.** Before that, indices drift on tied creation seconds exactly

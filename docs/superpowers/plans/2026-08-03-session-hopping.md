@@ -8,8 +8,8 @@ path so its latency can be diagnosed, and fix the `notify` hook default that has
 produced a single successful fire.
 
 **Architecture:** Four independent changes. vigil's `SortCreated` gains `session_id` as a
-tie-break so its order provably equals the pure-`session_id` order tmux bindings can
-compute unaided; the bindings move into one `tmux-hop` script in `~/dotfiles` with no
+tie-break so its order equals the pure-`session_id` order tmux bindings can
+compute unaided (**"provably" was wrong - see Step 1's correction**); the bindings move into one `tmux-hop` script in `~/dotfiles` with no
 vigil dependency of any kind; the daemon gains one log line recording when a session left
 its list, paired with temporary timestamps in the dotfiles cleanup path; and the default
 `notify` hook is rewritten into the only quoting form that survives `ExpandHook`.
@@ -347,8 +347,11 @@ insertion sort, so the tie falls through to the order `ListSessions` emitted, wh
 alphabetical by name. Same primary key, different tie-break.
 
 The comparator becomes `(Created, ID)` lexicographic rather than pure `ID`. Because
-`session_created` is monotonic in `session_id`, `(Created, ID)` yields provably the same
-total order as pure `ID`, while degrading to exactly today's behavior when `ID` is 0 —
+`session_created` is monotonic in `session_id` **in practice** (**corrected 2026-08-03:
+this brief said "provably" and that is false - the two orders diverge if the wall clock
+moves backwards between two creations while tmux's id counter climbs**), `(Created, ID)`
+yields the same total order as pure `ID`, while degrading to exactly today's behavior when
+`ID` is 0 —
 the case of a session hydrated from a cache file written before this change. A pure-`ID`
 comparator would sort every such session ahead of every real one until the first poll
 landed. Do not "simplify" this to `return a.ID < b.ID`.
@@ -1038,8 +1041,18 @@ ordering bug, and this script must not reproduce any of them:
 2. `switch-client -t "$name"` is **not an exact match**. Without a `=` prefix tmux may
    resolve `SC-223477` against `SC-2234770`. This is the same load-bearing-prefix hazard
    already documented for `session.QueueItem.SessionPrefix()`'s trailing space in vigil.
-3. `cut -d: -f2` **truncates a name containing a colon**. A story title with a colon
-   currently yields a target tmux cannot resolve.
+3. `cut -d: -f2` **truncates a name containing a colon**.
+
+   **Corrected 2026-08-03 - this brief overstated the fix.** `cut -d'|' -f2-` fixes
+   **extraction** only. A colon-named session is untargetable by name on *any* tmux build,
+   because `:` is tmux's own session:window target separator - on a fresh, non-sanitizing
+   server, `has-session -t '=a.b:c[d+e]'` fails with `can't find session: a.b`, and `=`
+   does not change that. The value of the fix is that the old code would have silently
+   switched to a **different real session** named `a.b`, where the new code attempts the
+   true full name and fails loudly. Scope is also narrower: `lib/tmux.sh`'s
+   `session_name_from_title` already strips `:` and `.` at creation (lines 110-111), so
+   only a hand-named session can reach this. See
+   `docs/superpowers/2026-08-03-session-hopping-handoff.md`.
 
 Ordering is by `session_id`, numerically, which tmux issues in increasing order and never
 reuses. That is a total order with no ties, which is why there is no tie-break rule here
@@ -1242,7 +1255,10 @@ Then, by hand from a tmux client:
 - From `hop-prefix`, confirm `tmux-hop next` lands somewhere real and that switching to
   `hop-prefix` never lands on `hop-prefix-longer`. This is defect 2.
 - Confirm the session named `hop.test:one "quoted"` is reachable — it exercises the regex
-  metacharacter (defect 1) and the colon (defect 3) at once.
+  metacharacter (defect 1) and the colon (defect 3) at once. **Corrected: a colon-named
+  session is not reachable by `-t` on any tmux build (see defect 3 above), so the
+  observable outcome for the colon half is that it fails loudly with tmux's own
+  `can't find session:` rather than switching to the wrong session.**
 
 Clean up:
 
@@ -1355,6 +1371,12 @@ Then, by hand:
 - `M-o` in a session with a PR opens it in a browser.
 - `M-o` in a session with no PR shows `no PR for this branch` in the tmux status line
   rather than doing nothing.
+
+  **Corrected 2026-08-03: that fallback is not unconditional.** A literal double quote in
+  `#{pane_current_path}` - not a single quote, which is inert inside `sh`'s double quotes -
+  makes the expanded command an `sh` parse error, and a parse error swallows both sides of
+  the `||`, so the message never appears either. Do not describe the `{ ...; } ||` grouping
+  as a guarantee anywhere.
 
 - [ ] **Step 4: Confirm no vigil dependency**
 
