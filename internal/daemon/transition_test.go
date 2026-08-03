@@ -43,7 +43,7 @@ func bellSwitch() *fetch.MockCommander {
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
 		"tmux": func(_ context.Context, _ string, args []string) (string, error) {
 			if len(args) > 1 && args[1] == "-a" && args[0] == "list-panes" {
-				return "1700000000|alpha|/tmp/alpha", nil
+				return "1700000000|$1|alpha|/tmp/alpha", nil
 			}
 			if len(args) > 0 && args[0] == "list-windows" {
 				mu.Lock()
@@ -269,7 +269,7 @@ func newToggleCommander(sessions ...string) (*fetch.MockCommander, *toggleState)
 			if len(args) > 1 && args[0] == "list-panes" && args[1] == "-a" {
 				lines := make([]string, len(sessions))
 				for i, name := range sessions {
-					lines[i] = fmt.Sprintf("1700000000|%s|/tmp/%s", name, name)
+					lines[i] = fmt.Sprintf("1700000000|$%d|%s|/tmp/%s", i+1, name, name)
 				}
 				return strings.Join(lines, "\n"), nil
 			}

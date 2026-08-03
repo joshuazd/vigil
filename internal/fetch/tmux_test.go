@@ -9,7 +9,7 @@ import (
 
 func TestListSessions(t *testing.T) {
 	mock := NewMockCommander()
-	mock.On("tmux", "1000|alpha|/home/alpha\n1000|alpha|/home/alpha/pane2\n999|beta|/home/beta", nil)
+	mock.On("tmux", "1000|$1|alpha|/home/alpha\n1000|$1|alpha|/home/alpha/pane2\n999|$2|beta|/home/beta", nil)
 
 	sessions, err := ListSessions(context.Background(), mock)
 	if err != nil {
@@ -29,7 +29,7 @@ func TestListSessions(t *testing.T) {
 
 func TestListSessionsDeduplicates(t *testing.T) {
 	mock := NewMockCommander()
-	mock.On("tmux", "1000|session1|/path1\n1000|session1|/path2", nil)
+	mock.On("tmux", "1000|$1|session1|/path1\n1000|$1|session1|/path2", nil)
 
 	sessions, err := ListSessions(context.Background(), mock)
 	if err != nil {
@@ -51,9 +51,9 @@ func TestListSessionsDeduplicates(t *testing.T) {
 func TestListSessionsIgnoresAPanelPaneInAnotherDirectory(t *testing.T) {
 	mock := NewMockCommander()
 	mock.On("tmux", strings.Join([]string{
-		"1000|SC-198799 Fix NoMethodError in|/Users/x/portal|0||1",
-		"1000|SC-198799 Fix NoMethodError in|/Users/x/sc-198799|1|1|",
-		"1000|SC-198799 Fix NoMethodError in|/Users/x/sc-198799|1||",
+		"1000|$1|SC-198799 Fix NoMethodError in|/Users/x/portal|0||1",
+		"1000|$1|SC-198799 Fix NoMethodError in|/Users/x/sc-198799|1|1|",
+		"1000|$1|SC-198799 Fix NoMethodError in|/Users/x/sc-198799|1||",
 	}, "\n"), nil)
 
 	sessions, err := ListSessions(context.Background(), mock)
@@ -74,8 +74,8 @@ func TestListSessionsIgnoresAPanelPaneInAnotherDirectory(t *testing.T) {
 func TestListSessionsPrefersTheClaudePaneOverTheActiveOne(t *testing.T) {
 	mock := NewMockCommander()
 	mock.On("tmux", strings.Join([]string{
-		"1000|alpha|/work/nit|1||",
-		"1000|alpha|/work/claude|0|1|",
+		"1000|$1|alpha|/work/nit|1||",
+		"1000|$1|alpha|/work/claude|0|1|",
 	}, "\n"), nil)
 
 	sessions, err := ListSessions(context.Background(), mock)
@@ -92,8 +92,8 @@ func TestListSessionsPrefersTheClaudePaneOverTheActiveOne(t *testing.T) {
 func TestListSessionsNeverPrefersAPanelEvenWhenActive(t *testing.T) {
 	mock := NewMockCommander()
 	mock.On("tmux", strings.Join([]string{
-		"1000|alpha|/aaa-panel|1||1",
-		"1000|alpha|/zzz-work|0||",
+		"1000|$1|alpha|/aaa-panel|1||1",
+		"1000|$1|alpha|/zzz-work|0||",
 	}, "\n"), nil)
 
 	sessions, err := ListSessions(context.Background(), mock)
@@ -110,8 +110,8 @@ func TestListSessionsNeverPrefersAPanelEvenWhenActive(t *testing.T) {
 func TestListSessionsFallsBackToTheActivePane(t *testing.T) {
 	mock := NewMockCommander()
 	mock.On("tmux", strings.Join([]string{
-		"1000|alpha|/aaa-idle|0||",
-		"1000|alpha|/zzz-active|1||",
+		"1000|$1|alpha|/aaa-idle|0||",
+		"1000|$1|alpha|/zzz-active|1||",
 	}, "\n"), nil)
 
 	sessions, err := ListSessions(context.Background(), mock)
@@ -127,7 +127,7 @@ func TestListSessionsFallsBackToTheActivePane(t *testing.T) {
 // an empty one, or it would look like a session with no working directory.
 func TestListSessionsFallsBackToAPanelWhenThatIsAll(t *testing.T) {
 	mock := NewMockCommander()
-	mock.On("tmux", "1000|alpha|/only-panel|1||1", nil)
+	mock.On("tmux", "1000|$1|alpha|/only-panel|1||1", nil)
 
 	sessions, err := ListSessions(context.Background(), mock)
 	if err != nil {
@@ -135,6 +135,71 @@ func TestListSessionsFallsBackToAPanelWhenThatIsAll(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].PanePath != "/only-panel" {
 		t.Errorf("got %+v, want the panel path", sessions)
+	}
+}
+
+func TestListSessionsParsesTheSessionID(t *testing.T) {
+	mock := NewMockCommander()
+	mock.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1000|$7|alpha|/home/alpha", nil)
+
+	sessions, err := ListSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].ID != 7 {
+		t.Errorf("got ID %d, want 7", sessions[0].ID)
+	}
+	if sessions[0].Name != "alpha" {
+		t.Errorf("got name %q, want alpha", sessions[0].Name)
+	}
+	if sessions[0].PanePath != "/home/alpha" {
+		t.Errorf("got path %q, want /home/alpha", sessions[0].PanePath)
+	}
+}
+
+// The pipe-in-path rule, re-pinned against the new field count. A path
+// containing a pipe must not shift the three trailing flags, and the ID must
+// still be read from the field before the name.
+func TestListSessionsWithAPipeInThePathStillReadsTheIDAndFlags(t *testing.T) {
+	mock := NewMockCommander()
+	mock.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1000|$12|gamma|/home/we|rd/path|1|1|", nil)
+
+	sessions, err := ListSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].ID != 12 {
+		t.Errorf("got ID %d, want 12", sessions[0].ID)
+	}
+	if sessions[0].PanePath != "/home/we|rd/path" {
+		t.Errorf("got path %q, want /home/we|rd/path", sessions[0].PanePath)
+	}
+}
+
+// A line with no ID field at all yields ID 0 rather than a dropped session.
+// Task 2's comparator relies on 0 meaning "unknown", so this pins the value.
+func TestListSessionsWithAnUnparseableIDYieldsZero(t *testing.T) {
+	mock := NewMockCommander()
+	mock.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1000|notanid|alpha|/home/alpha", nil)
+
+	sessions, err := ListSessions(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].ID != 0 {
+		t.Errorf("got ID %d, want 0", sessions[0].ID)
 	}
 }
 

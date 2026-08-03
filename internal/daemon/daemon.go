@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -60,6 +61,13 @@ type Server struct {
 	clients []*client
 	writers sync.WaitGroup
 
+	// prevSessions is the previous poll's session names, for logDroppedSessions.
+	// Owned by Run's goroutine like clients: poll is synchronous per tick and
+	// nothing else touches it, which is the same argument that leaves the
+	// collector's gitMemo unguarded. Only ever the last *successful* poll's set,
+	// because a failing poll returns before logDroppedSessions is reached.
+	prevSessions map[string]bool
+
 	// pendingEffects tracks in-flight effect goroutines so shutdown waits for
 	// them before Run returns.
 	pendingEffects sync.WaitGroup
@@ -98,7 +106,11 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 	if interval <= 0 {
 		interval = defaultInterval
 	}
-	logger := log.New(os.Stderr, "vigil: ", log.LstdFlags)
+	// Lmicroseconds because this log is read against millisecond-stamped shell
+	// instrumentation to size sub-second gaps: the kill-session-to-session-dropped
+	// gap was measured at 0.968s, which whole seconds cannot resolve, and several
+	// drops in one poll otherwise share an indistinguishable timestamp.
+	logger := log.New(os.Stderr, "vigil: ", log.LstdFlags|log.Lmicroseconds)
 	srv := &Server{
 		Collector:  collect.New(cfg, cmd),
 		Interval:   interval,
@@ -275,6 +287,7 @@ func (s *Server) poll(ctx context.Context) {
 		s.pollFailing = false
 		s.logf("poll recovered")
 	}
+	s.logDroppedSessions(sessions)
 	queue, queueHidden := s.Collector.Queue(sessions)
 	snap := &protocol.Snapshot{
 		Version:     protocol.Version,
@@ -417,6 +430,42 @@ func (s *Server) logSlowPoll(elapsed time.Duration) {
 	s.logf("slow poll: %s total, %s in git, slowest %s at %s",
 		elapsed.Round(time.Millisecond), g.Total.Round(time.Millisecond),
 		g.Slowest.Round(time.Millisecond), g.SlowestPath)
+}
+
+// logDroppedSessions records each session that was in the previous poll and is
+// not in this one. Daemon-only and not user-visible, for the same reason as
+// logSlowPoll: a session going away is not a failure, and a self-polling client
+// has no log. Unlike logSlowPoll this needs no rate limit - it is edge-triggered
+// by something the user did, so one line per event is the right volume.
+//
+// The first successful poll seeds and reports nothing, and needs no guard to do
+// so: ranging a nil prevSessions is a zero-iteration loop. A guard would be a
+// second thing that has to stay true with no test able to tell it apart from its
+// absence - the same reason view.TableWindow dropped its min(cursor, count-1)
+// clamp.
+//
+// Callers must invoke this only after poll's err != nil return. A failing
+// Snapshot yields no sessions, so calling it above that return reports every
+// known session as dropped on every failed poll.
+//
+// Names are sorted because map iteration order is random and a diagnostic log
+// read against timestamps should not reorder between runs.
+func (s *Server) logDroppedSessions(sessions []*session.Session) {
+	current := make(map[string]bool, len(sessions))
+	for _, sess := range sessions {
+		current[sess.Name] = true
+	}
+	var dropped []string
+	for name := range s.prevSessions {
+		if !current[name] {
+			dropped = append(dropped, name)
+		}
+	}
+	sort.Strings(dropped)
+	for _, name := range dropped {
+		s.logf("session dropped: %s", name)
+	}
+	s.prevSessions = current
 }
 
 // now is the clock logSlowPoll's rate limit reads. Nil outside tests.

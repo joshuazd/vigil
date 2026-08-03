@@ -105,11 +105,13 @@ Actions are shell command templates with `{placeholder}` variables, automaticall
 | `dispatch` | `{input}`, `{flags}` | *(none — must be configured)* |
 | `merge` | `{branch}`, `{git_root}` | `gh pr merge {branch} --squash --delete-branch` |
 | `approve` | `{branch}`, `{git_root}` | `gh pr review {branch} --approve` |
-| `notify` | `{session}`, `{old_state}`, `{new_state}` | `tmux display-message "vigil: {session} → {new_state}"` |
+| `notify` | `{session}`, `{old_state}`, `{new_state}` | `tmux display-message -d 5000 "vigil: "{session}" → "{new_state}` |
 
 The built-in cleanup kills the tmux session, then removes the git worktree if the session directory is one. For non-worktree sessions, it just kills the session. Override with a hook for custom behavior.
 
 The default merge uses `--squash --delete-branch`. Override `[hooks] merge` for a different strategy. Set any hook to `""` to disable it.
+
+The default `notify` hook's quoting looks wrong and is not. Each placeholder is substituted as one shell-quoted word, so a placeholder left *inside* a larger double-quoted string lands as `'...'` within `"..."` - and a session name containing a double quote closes that string early, splitting the message into two arguments, which `tmux display-message` refuses with `too many arguments (need at most 1)`. Closing the literal before each placeholder and reopening after it lets the shell concatenate the pieces into the single argument tmux wants. Do not rewrite it as `tmux display-message "vigil: {session} → {new_state}"`; that form has never worked.
 
 Hook bodies must not contain `${VAR}`. A braced shell expansion collides with the `{placeholder}` syntax: `${VAR}` is read as the placeholder `{VAR}`, which is not a known variable, and the hook fails with `unknown placeholder in hook template` before `sh` ever sees it. Use `$VAR` instead. This applies to every hook, not just `dispatch`.
 

@@ -33,8 +33,21 @@ func AllSortModes() []SortMode {
 func SortSessions(sessions []*Session, mode SortMode) {
 	switch mode {
 	case SortCreated:
+		// (Created, ID), not ID alone. #{session_created} is whole seconds, so
+		// ties are common and used to fall through the stable sort to
+		// ListSessions' alphabetical order - while ~/dotfiles' M-j/M-k order by
+		// session_id, which is why they disagreed. Session ids are issued in
+		// increasing order, so (Created, ID) is the same total order as pure
+		// ID whenever created is monotonic in id - which is not guaranteed: a
+		// wall clock stepping backwards between two creations makes the two
+		// orders disagree for that pair. Unlike pure ID it degrades to Created
+		// when ID is 0 rather than hoisting every cache-hydrated session to
+		// the front.
 		sortBy(sessions, func(a, b *Session) bool {
-			return a.Created < b.Created
+			if a.Created != b.Created {
+				return a.Created < b.Created
+			}
+			return a.ID < b.ID
 		})
 	case SortState:
 		sortBy(sessions, func(a, b *Session) bool {

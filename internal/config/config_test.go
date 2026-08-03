@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -521,5 +522,88 @@ func TestRunHookStillTrimsAndMergesAfterTheRefactor(t *testing.T) {
 	}
 	if out != "out\nerr" {
 		t.Errorf("got %q, want \"out\\nerr\"", out)
+	}
+}
+
+// The default notify hook had never fired successfully: ExpandHook quotes each
+// placeholder into its own shell word, the old default wrapped them in its own
+// double quotes, and session names contain literal double quotes that closed
+// that string early. tmux display-message then got two arguments and refused.
+//
+// The assertion runs the expanded string through a shell and counts the
+// arguments it reduces to. Asserting on the expanded string itself would pass
+// with the quoting still wrong, which is how this shipped in the first place.
+func TestDefaultNotifyHookExpandsToOneShellArgument(t *testing.T) {
+	cfg := &Config{}
+	template := cfg.GetHook("notify")
+	if template == "" {
+		t.Fatal("no default notify hook")
+	}
+
+	const name = `SC-223374 Add bulk "Report Investigation" action`
+	expanded, err := ExpandHook(template, map[string]string{
+		"session":   name,
+		"new_state": "approved",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace the tmux invocation with a printf that reports each argument it
+	// received on its own line, then count the lines.
+	script := strings.Replace(expanded, "tmux display-message -d 5000 ", `printf '%s\n' `, 1)
+	if script == expanded {
+		t.Fatalf("could not find the tmux prefix to substitute in %q", expanded)
+	}
+
+	out, err := exec.Command("sh", "-c", script).Output()
+	if err != nil {
+		t.Fatalf("running %q: %v", script, err)
+	}
+	args := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(args) != 1 {
+		t.Fatalf("expanded to %d shell arguments, want 1: %q (from %q)", len(args), args, expanded)
+	}
+	want := "vigil: " + name + " → approved"
+	if args[0] != want {
+		t.Errorf("got argument %q, want %q", args[0], want)
+	}
+}
+
+// shellQuote's single-quote escaping ('\'' idiom) is the untested half of the
+// same defect class: a session name containing a single quote must also
+// reduce to exactly one shell argument, not split or inject syntax.
+func TestDefaultNotifyHookExpandsToOneShellArgumentWithASingleQuote(t *testing.T) {
+	cfg := &Config{}
+	template := cfg.GetHook("notify")
+	if template == "" {
+		t.Fatal("no default notify hook")
+	}
+
+	const name = `it's broken`
+	expanded, err := ExpandHook(template, map[string]string{
+		"session":   name,
+		"new_state": "approved",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	script := strings.Replace(expanded, "tmux display-message -d 5000 ", `printf '%s\n' `, 1)
+	if script == expanded {
+		t.Fatalf("could not find the tmux prefix to substitute in %q", expanded)
+	}
+
+	out, err := exec.Command("sh", "-c", script).Output()
+	if err != nil {
+		t.Fatalf("running %q: %v", script, err)
+	}
+	args := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(args) != 1 {
+		t.Fatalf("expanded to %d shell arguments, want 1: %q (from %q)", len(args), args, expanded)
+	}
+	want := "vigil: " + name + " → approved"
+	if args[0] != want {
+		t.Errorf("got argument %q, want %q", args[0], want)
 	}
 }

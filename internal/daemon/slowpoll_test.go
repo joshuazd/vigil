@@ -20,8 +20,8 @@ import (
 func slowPollServer(t *testing.T, delay time.Duration, buf *bytes.Buffer) *Server {
 	t.Helper()
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
-		"1700000000|fast|/tmp/fast\n1700000001|slow|/tmp/slow", nil)
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|fast|/tmp/fast\n1700000001|$2|slow|/tmp/slow", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
 	cmd.HandlerFuncs = make(map[string]func(ctx context.Context, dir string, args []string) (string, error))
 	cmd.HandlerFuncs["git rev-parse --show-toplevel"] = func(ctx context.Context, dir string, args []string) (string, error) {

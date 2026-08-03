@@ -54,7 +54,16 @@ var settingDefaults = map[string]settingDef{
 var hookDefaults = map[string]string{
 	"merge":   "gh pr merge {branch} --squash --delete-branch",
 	"approve": "gh pr review {branch} --approve",
-	"notify":  `tmux display-message -d 5000 "vigil: {session} → {new_state}"`,
+	// notify's quoting looks wrong and is not. ExpandHook substitutes each
+	// placeholder as one shell-quoted word, so a placeholder inside a larger
+	// double-quoted string lands as '...' within "..." - and a session name
+	// containing a double quote (dotfiles' session_name_from_title produces
+	// them) closes that string early, splitting the message into two arguments
+	// that tmux display-message refuses. Closing the literal before each
+	// placeholder and reopening after lets the shell concatenate the pieces
+	// into the single argument tmux wants. Do not rewrite this as
+	// "vigil: {session} → {new_state}"; that form has never worked.
+	"notify": `tmux display-message -d 5000 "vigil: "{session}" → "{new_state}`,
 }
 
 // Config holds the loaded TOML configuration.

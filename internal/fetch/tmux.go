@@ -14,6 +14,14 @@ type RawSession struct {
 	Name     string
 	PanePath string
 	Created  int64
+
+	// ID is #{session_id} with its leading '$' stripped. tmux never reuses a
+	// session id and issues them in increasing order, so it is a total order
+	// equal to creation order - which is what the tmux keybindings in
+	// ~/dotfiles sort by, and why Session.ID exists. 0 means either the field
+	// was absent/unparseable or this is genuinely tmux's first-ever session
+	// ($0); the total order is correct either way.
+	ID int
 }
 
 // Pane preference for representing a session's working directory. Lower wins.
@@ -48,7 +56,7 @@ func panePreference(isClaude, isPanel, isActive bool) int {
 // name, each carrying the path of the pane that best represents its work.
 func ListSessions(ctx context.Context, cmd Commander) ([]RawSession, error) {
 	out, err := cmd.Run(ctx, "", "tmux", "list-panes", "-a",
-		"-F", "#{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}")
+		"-F", "#{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}")
 	if err != nil {
 		return nil, err
 	}
@@ -66,22 +74,22 @@ func ListSessions(ctx context.Context, cmd Commander) ([]RawSession, error) {
 		// otherwise swallow the flags that follow it, and the flags are what
 		// this function now depends on.
 		parts := strings.Split(line, "|")
-		if len(parts) < 3 {
+		if len(parts) < 4 {
 			continue
 		}
-		name := parts[1]
+		name := parts[2]
 		// Flags are the last three fields; the path is everything between the
 		// name and them, rejoined, so a pipe in a path cannot shift them.
 		flagStart := len(parts) - 3
 		var path string
 		var isActive, isClaude, isPanel bool
-		if flagStart > 2 {
-			path = strings.Join(parts[2:flagStart], "|")
+		if flagStart > 3 {
+			path = strings.Join(parts[3:flagStart], "|")
 			isActive = parts[flagStart] == "1"
 			isClaude = parts[flagStart+1] == "1"
 			isPanel = parts[flagStart+2] == "1"
 		} else {
-			path = strings.Join(parts[2:], "|")
+			path = strings.Join(parts[3:], "|")
 		}
 
 		pref := panePreference(isClaude, isPanel, isActive)
@@ -93,12 +101,14 @@ func ListSessions(ctx context.Context, cmd Commander) ([]RawSession, error) {
 			continue
 		}
 		created, _ := strconv.ParseInt(parts[0], 10, 64)
+		id, _ := strconv.Atoi(strings.TrimPrefix(parts[1], "$"))
 		index[name] = len(sessions)
 		prefs[name] = pref
 		sessions = append(sessions, RawSession{
 			Name:     name,
 			PanePath: path,
 			Created:  created,
+			ID:       id,
 		})
 	}
 	return sessions, nil
