@@ -10,6 +10,28 @@ import (
 	"github.com/jzinkduda/vigil/internal/fetch"
 )
 
+// Snapshot must carry the id through from RawSession, or SortSessions has
+// nothing to break ties with and the fix is inert on the real path.
+func TestSnapshotCarriesTheSessionID(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$5|alpha|/tmp/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.On("git", "", nil)
+
+	c := New(&config.Config{}, cmd)
+	sessions, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].ID != 5 {
+		t.Errorf("got ID %d, want 5", sessions[0].ID)
+	}
+}
+
 func TestSnapshotPopulatesSessionsWithGitState(t *testing.T) {
 	cmd := fetch.NewMockCommander()
 	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",

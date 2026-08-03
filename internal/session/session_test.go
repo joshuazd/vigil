@@ -247,3 +247,57 @@ func TestAlphaSortOrder(t *testing.T) {
 	}
 }
 
+// The bug this fixes. Two sessions created in the same second tie on Created,
+// and the stable insertion sort then preserved whatever order ListSessions
+// emitted. The tmux keybindings order by session_id. Input is deliberately in
+// the wrong id order, so a comparator that ignores ID leaves it untouched and
+// this test fails.
+func TestSortCreatedBreaksATieByID(t *testing.T) {
+	sessions := []*Session{
+		{Name: "zulu", Created: 1000, ID: 9},
+		{Name: "alpha", Created: 1000, ID: 4},
+	}
+
+	SortSessions(sessions, SortCreated)
+
+	if sessions[0].ID != 4 {
+		t.Errorf("got ID %d first, want 4", sessions[0].ID)
+	}
+	if sessions[1].ID != 9 {
+		t.Errorf("got ID %d second, want 9", sessions[1].ID)
+	}
+}
+
+// Created still dominates: a later-created session with a lower ID must not
+// jump ahead. This is what makes the comparator (Created, ID) rather than ID,
+// and it is the assertion a pure-ID comparator fails.
+func TestSortCreatedStillOrdersByCreatedFirst(t *testing.T) {
+	sessions := []*Session{
+		{Name: "later", Created: 2000, ID: 1},
+		{Name: "earlier", Created: 1000, ID: 9},
+	}
+
+	SortSessions(sessions, SortCreated)
+
+	if sessions[0].Name != "earlier" {
+		t.Errorf("got %q first, want earlier", sessions[0].Name)
+	}
+}
+
+// A session hydrated from a cache file written before ID existed has ID 0.
+// It must not be hoisted ahead of every real session; the order degrades to
+// Created, which is what shipped before this change and self-heals on the
+// first poll.
+func TestSortCreatedWithAZeroIDFallsBackToCreated(t *testing.T) {
+	sessions := []*Session{
+		{Name: "fromCache", Created: 3000, ID: 0},
+		{Name: "live", Created: 1000, ID: 7},
+	}
+
+	SortSessions(sessions, SortCreated)
+
+	if sessions[0].Name != "live" {
+		t.Errorf("got %q first, want live", sessions[0].Name)
+	}
+}
+

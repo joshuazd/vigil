@@ -18,8 +18,9 @@ type RawSession struct {
 	// ID is #{session_id} with its leading '$' stripped. tmux never reuses a
 	// session id and issues them in increasing order, so it is a total order
 	// equal to creation order - which is what the tmux keybindings in
-	// ~/dotfiles sort by, and why Session.ID exists. 0 means the field was
-	// absent or unparseable.
+	// ~/dotfiles sort by, and why Session.ID exists. 0 means either the field
+	// was absent/unparseable or this is genuinely tmux's first-ever session
+	// ($0); the total order is correct either way.
 	ID int
 }
 

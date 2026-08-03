@@ -208,6 +208,7 @@ func (c *Collector) Snapshot(ctx context.Context) ([]*session.Session, error) {
 			Name:     r.Name,
 			PanePath: r.PanePath,
 			Created:  r.Created,
+			ID:       r.ID,
 			HasBell:  bells[r.Name],
 		}
 	}
