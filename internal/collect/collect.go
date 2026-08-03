@@ -48,6 +48,13 @@ type Collector struct {
 	// it stays that way because git is local subprocesses, not the network.
 	gitMemo map[string]gitMemoEntry
 
+	// gitStats is the last fillGit measurement, owned by the same goroutine as
+	// gitMemo and for the same reason. Reset at the top of every Snapshot so a
+	// Snapshot that fails before fillGit reports zero rather than the previous
+	// poll's numbers - a stale measurement attached to a fresh failure is worse
+	// than none.
+	gitStats GitStats
+
 	// prs owns PR data. Snapshot posts its working set and reads it; the
 	// fetching happens on the poller's own worker goroutine.
 	prs *prPoller
@@ -66,6 +73,33 @@ type gitMemoEntry struct {
 	status    session.GitStatus
 	fetchedAt time.Time
 }
+
+// dueGit carries a session through fillGit's fan-out alongside the time its
+// own fetch took. Each goroutine owns exactly one of these, which is how the
+// per-path timing is collected without a lock; the join in runParallel is what
+// makes reading them afterwards safe.
+type dueGit struct {
+	s    *session.Session
+	took time.Duration
+}
+
+// GitStats reports what the last fillGit cost. Total is the fan-out's wall
+// time, which is the part of Snapshot that blocks publication; Slowest and
+// SlowestPath name the single worst pane path, because on a monorepo one
+// worktree is usually all of it.
+//
+// Zero when the last Snapshot found every session's git state memoized, since
+// then fillGit issued no subprocesses at all.
+type GitStats struct {
+	Total       time.Duration
+	Slowest     time.Duration
+	SlowestPath string
+}
+
+// GitStats returns the last fillGit measurement. It is goroutine-owned like
+// gitMemo: only the goroutine that called Snapshot may read it, and only once
+// Snapshot has returned.
+func (c *Collector) GitStats() GitStats { return c.gitStats }
 
 func New(cfg *config.Config, cmd fetch.Commander) *Collector {
 	workers := cfg.GetSettingInt("git_workers")
@@ -159,6 +193,8 @@ func (c *Collector) Invalidate() {
 }
 
 func (c *Collector) Snapshot(ctx context.Context) ([]*session.Session, error) {
+	c.gitStats = GitStats{}
+
 	raw, err := fetch.ListSessions(ctx, c.Cmd)
 	if err != nil {
 		return nil, err
@@ -207,7 +243,7 @@ func runParallel[T any](items []T, workers int, do func(T)) {
 func (c *Collector) fillGit(ctx context.Context, sessions []*session.Session) {
 	now := c.now()
 
-	var due []*session.Session
+	var due []*dueGit
 	memo := make(map[string]gitMemoEntry, len(sessions))
 	for _, s := range sessions {
 		if prev, ok := c.gitMemo[s.PanePath]; ok && now.Sub(prev.fetchedAt) < c.GitInterval {
@@ -215,17 +251,31 @@ func (c *Collector) fillGit(ctx context.Context, sessions []*session.Session) {
 			memo[s.PanePath] = prev
 			continue
 		}
-		due = append(due, s)
+		due = append(due, &dueGit{s: s})
 	}
 
-	runParallel(due, c.GitWorkers, func(s *session.Session) {
-		s.Git = fetch.FetchGitStatus(ctx, c.Cmd, s.PanePath)
+	if len(due) == 0 {
+		c.gitMemo = memo
+		return
+	}
+
+	start := time.Now()
+	runParallel(due, c.GitWorkers, func(d *dueGit) {
+		fetchStart := time.Now()
+		d.s.Git = fetch.FetchGitStatus(ctx, c.Cmd, d.s.PanePath)
+		d.took = time.Since(fetchStart)
 	})
 
-	for _, s := range due {
-		memo[s.PanePath] = gitMemoEntry{status: s.Git, fetchedAt: now}
+	stats := GitStats{Total: time.Since(start)}
+	for _, d := range due {
+		memo[d.s.PanePath] = gitMemoEntry{status: d.s.Git, fetchedAt: now}
+		if d.took > stats.Slowest {
+			stats.Slowest = d.took
+			stats.SlowestPath = d.s.PanePath
+		}
 	}
 	c.gitMemo = memo
+	c.gitStats = stats
 }
 
 type branchRoot struct {

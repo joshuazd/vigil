@@ -1,7 +1,34 @@
 # Dirty counts off the publication path
 
-Written 2026-08-03. This is the first item on CLAUDE.md's "What is open" list, and the
-measurement below changes why it is worth doing.
+Written 2026-08-03 against what was then the first item on CLAUDE.md's "What is open" list.
+
+## Status: not implemented, and that was the conclusion
+
+**Only the "Instrumentation" section below shipped.** The `dirtyPoller`, the `scheduler`
+rename and the `FetchGitStatus` split were all designed, approved, and then deliberately not
+built.
+
+The reason is the "The problem, re-measured" section, which is the part of this document worth
+reading. Re-measuring the claim the work rested on gave 0.138s cold and 0.009s warm against the
+~3.0-3.5s on record, with the git memo skipping every poll. On those numbers the change saves
+~100ms of a 174ms cold poll and nothing at all on a warm one, and the one un-ruled-out trigger -
+a fresh worktree's first `status` - is a one-or-two-poll hiccup after a dispatch rather than the
+sustained ~3s cadence the item claimed. That is not worth a fourth poller, a scheduler rename, a
+stats accessor and ten tests.
+
+What shipped instead was the instrumentation: `Collector.GitStats()` and a rate-limited
+`slow poll` line in `daemon.poll`, so the next person to suspect this reads a number off the
+machine where it happens instead of re-deriving all of this a third time. Verified end to end
+against a real daemon with a deliberately slowed `git` on the `PATH`:
+
+```
+vigil: slow poll: 4.019s total, 4.01s in git, slowest 4.01s at /Users/joshua.zink-duda/sc-223374
+```
+
+**If a `slow poll` line does show up in anger, this design is ready to implement as written.**
+Everything below the problem section is unchanged from the approved version - treat it as a
+plan on the shelf, not as a description of the code. Nothing in it has been built, so where it
+and the code disagree, the code is right by default.
 
 ## The problem, re-measured
 
@@ -213,16 +240,30 @@ they turn on stops being true.
 The 2026-07-31 number could not be checked against anything, which is why this spec had to
 re-derive it from scratch. That should not happen twice.
 
-`fillGit` records its wall time and its slowest pane path - pane path, not root, because
-`gitMemo` is keyed by pane path and that is what `fillGit` iterates. `dirtyPoller` records its
-last pass duration under `mu`. `Collector.PollStats()` returns both. `daemon.poll` times
-`Snapshot` and, when the total exceeds `s.Interval`, logs the total, the meta portion, the
-slowest pane path and the last dirty-pass duration through `s.logf`.
+**This is the only section that was implemented.** It is described as shipped; the rest of the
+document is not.
 
-`PollStats` inherits `Snapshot`'s threading rule: the `fillGit` half is goroutine-owned and
-unguarded, like `gitMemo`, so only the goroutine that called `Snapshot` may read it, and only
-after `Snapshot` has returned. The dirty-pass half is read under `mu` and is safe from
-anywhere. `daemon.poll` satisfies both by calling it inline immediately after `Snapshot`.
+`fillGit` records its wall time and its slowest pane path - pane path, not root, because
+`gitMemo` is keyed by pane path and that is what `fillGit` iterates. `Collector.GitStats()`
+returns them. `daemon.poll` times `Snapshot` and, when the total exceeds `s.Interval`, logs the
+total, the git portion, the slowest duration and the pane path that owned it through `s.logf`.
+
+Had the `dirtyPoller` been built, its last pass duration would belong here too, since a pass
+exceeding `git_interval` means the counts are staler than intended even though it no longer
+blocks publication.
+
+`GitStats` inherits `Snapshot`'s threading rule: it is goroutine-owned and unguarded, like
+`gitMemo`, so only the goroutine that called `Snapshot` may read it, and only after `Snapshot`
+has returned. `daemon.poll` satisfies that by calling it inline immediately after `Snapshot`.
+
+Two contract details that a test caught rather than the design:
+
+- It is reset at the top of every `Snapshot`, so a `Snapshot` that fails before `fillGit` runs
+  reports zero rather than the previous poll's numbers. A stale measurement attached to a fresh
+  failure is worse than none.
+- It stays zero when every path was memoized, because `fillGit` then issues no subprocesses at
+  all. The first draft recorded `time.Since` around an empty fan-out and reported 416ns, which
+  made "zero means no work" false; `TestGitStatsAreZeroWhenEveryPathIsMemoized` failed on it.
 
 Rate-limited to one line a minute. `pollFailing`'s edge-triggered log-once shape is wrong
 here: a genuinely slow machine would emit one line and then go quiet for hours, and what a

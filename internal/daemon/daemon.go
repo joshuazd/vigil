@@ -26,6 +26,10 @@ var ErrAlreadyRunning = errors.New("daemon already running")
 
 const defaultInterval = 1 * time.Second
 
+// slowPollLogInterval bounds how often a slow poll is reported. See
+// logSlowPoll for why this is a rate limit rather than an edge trigger.
+const slowPollLogInterval = 1 * time.Minute
+
 type Server struct {
 	Collector  *collect.Collector
 	Interval   time.Duration
@@ -72,9 +76,13 @@ type Server struct {
 	effectsMu       sync.Mutex
 	inFlightEffects map[string]struct{}
 
-	// pollFailing is only read and written from poll, which Run only ever
-	// calls from its own goroutine, so it needs no mutex.
-	pollFailing bool
+	// pollFailing and lastSlowPollLog are only read and written from poll,
+	// which Run only ever calls from its own goroutine, so they need no mutex.
+	pollFailing     bool
+	lastSlowPollLog time.Time
+
+	// clock is nil outside tests; see now.
+	clock func() time.Time
 
 	// jobs is the dispatch queue. Nil disables submission, which is what a
 	// Server literal in a test gets unless it builds one.
@@ -246,7 +254,10 @@ func (s *Server) poll(ctx context.Context) {
 		jobList = s.jobs.snapshot()
 	}
 
+	start := time.Now()
 	sessions, err := s.Collector.Snapshot(ctx)
+	s.logSlowPoll(time.Since(start))
+
 	if err != nil {
 		if !s.pollFailing {
 			s.pollFailing = true
@@ -377,6 +388,43 @@ func (s *Server) handleRequest(req *protocol.Request) {
 	// id in a snapshot, and on a cold daemon the next tick is behind a first
 	// poll that runs git and gh across every session.
 	s.publishJobs(s.jobs.snapshot())
+}
+
+// logSlowPoll records a poll that took longer than a tick, along with what
+// inside it was slow.
+//
+// It exists because the one measurement anybody ever had of this - fillGit at
+// ~3s, 99.7% of Snapshot, recorded 2026-07-31 - could not be checked against
+// anything, and a 2026-08-03 re-measurement on the same machine got 0.138s
+// cold and 0.009s warm. Deciding whether that gap is a fixed problem or a
+// dormant one needs a number from the machine where it happens, not another
+// from-scratch re-derivation.
+//
+// Rate-limited rather than edge-triggered like pollFailing: a genuinely slow
+// machine would emit one line on the way in and then go quiet for hours, and a
+// diagnosis wants a series. Once a minute gives that without a line per tick.
+func (s *Server) logSlowPoll(elapsed time.Duration) {
+	if elapsed <= s.Interval {
+		return
+	}
+	now := s.now()
+	if !s.lastSlowPollLog.IsZero() && now.Sub(s.lastSlowPollLog) < slowPollLogInterval {
+		return
+	}
+	s.lastSlowPollLog = now
+
+	g := s.Collector.GitStats()
+	s.logf("slow poll: %s total, %s in git, slowest %s at %s",
+		elapsed.Round(time.Millisecond), g.Total.Round(time.Millisecond),
+		g.Slowest.Round(time.Millisecond), g.SlowestPath)
+}
+
+// now is the clock logSlowPoll's rate limit reads. Nil outside tests.
+func (s *Server) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
 }
 
 // logf guards s.Log so a zero-valued Server built directly (e.g. in a test)

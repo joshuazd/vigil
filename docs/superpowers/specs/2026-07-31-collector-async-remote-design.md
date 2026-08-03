@@ -40,10 +40,18 @@ Not in scope: `fillGit`, `ListSessions` and `BellFlags` stay synchronous and sta
 `Snapshot`. They are local subprocesses. `fillGit` is also the last lock-free
 goroutine-owned memo in the collector, and moving it would spend that for no latency.
 
-**Superseded on that last point.** The real-machine verification measured `fillGit` at 3.0 to
-3.5 seconds - 99.7% of `Snapshot` - dominated by `git status --porcelain` on active portal
-worktrees. "Not the latency source" is wrong on this machine; see the `fillGit` finding in
-`docs/superpowers/2026-07-31-collector-async-remote-handoff.md`.
+**Superseded on that last point, then partly restored.** The real-machine verification measured
+`fillGit` at 3.0 to 3.5 seconds - 99.7% of `Snapshot` - dominated by `git status --porcelain`
+on active portal worktrees, so "not the latency source" was wrong on this machine; see the
+`fillGit` finding in `docs/superpowers/2026-07-31-collector-async-remote-handoff.md`.
+
+A 2026-08-03 re-measurement on the same machine got **0.138s cold and 0.009s warm, with the
+memo skipping every poll**. The attribution held - `status --porcelain` is still effectively all
+of `fillGit` - but the magnitude did not reproduce, and the gap is not fully explained. So the
+sentence above is right again today and was wrong on 2026-07-31, which makes it conditional on
+the repository rather than either true or false. `git status --porcelain` is the one call that
+can make it wrong, and the daemon now logs a `slow poll` breakdown when it does. Full account:
+`docs/superpowers/specs/2026-08-03-dirty-counts-off-publication-path-design.md`.
 
 ## Architecture
 

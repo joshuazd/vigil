@@ -46,39 +46,50 @@ needs both. Phases 5 and 6 were single-repo, and phase 6's two halves were indep
 
 ## What is open
 
-Roughly in the order they are worth doing. Nothing here is scheduled; the first three are the
+Roughly in the order they are worth doing. Nothing here is scheduled; the first two are the
 ones that make the primary surface behave the way the design claims it already does.
 
 The measurements and file references for each of these live once, in "Key Conventions" below.
 This list is the priority order and the reason for it, not a second copy.
 
-1. **`fillGit` blocks publication, measured rather than suspected**: ~3s per poll, 99.7% of
-   `Snapshot`, and because it exceeds `git_interval` the git memo can never skip, so the real
-   cadence is ~3s rather than the 1s the design assumes. Taking `gh` off the path in `7b89c0e`
-   **relocated** this shape rather than removing it. Ranked first because every other
-   responsiveness complaint is downstream of it.
-2. **The session table has no viewport**, so with a long queue some session rows are
+1. **The session table has no viewport**, so with a long queue some session rows are
    cursor-reachable and undrawn - the same defect the queue already fixed for itself, still
-   present on the surface the design calls primary. Ranked second because it is a correctness
+   present on the surface the design calls primary. Ranked first because it is a correctness
    gap, not a preference, and it is small.
-3. **`queueRowBudget` squeezes the session table to 3 rows** on a tall terminal with a full
+2. **`queueRowBudget` squeezes the session table to 3 rows** on a tall terminal with a full
    queue, inverting the design's premise that the session list is primary. A proportional
    policy would match the intent.
-4. **Stories can starve reviews out of the queue.** Every story sorts ahead of every review and
+3. **Stories can starve reviews out of the queue.** Every story sorts ahead of every review and
    `queue_limit` applies to the merged list, so 20 undeduped stories means zero review requests
    shown - and review requests were the feature's original motivation.
-5. **No surface shows a Shortcut story state, and none shows a branch across all sessions at
+4. **No surface shows a Shortcut story state, and none shows a branch across all sessions at
    once.** Both were `worktree-status` columns, deleted in phase 6. Feature work either way;
    the interim answers are `short story <id>` and the detail panel one session at a time.
-6. **The `{flags}` hook migration warning is effectively invisible.** Both `runTUI` and
+5. **The `{flags}` hook migration warning is effectively invisible.** Both `runTUI` and
    `runPanel` use `tea.WithAltScreen()`, so a panel never shows it and the `prefix v` popup
    destroys it on close. A user whose `config.toml` lacks `{flags}` gets teleported on their
    first queue dispatch and never sees why. A toast is the real fix.
-7. Smaller, each documented in a handoff: 80-column dashboards overflow their height by 1-2
+6. Smaller, each documented in a handoff: 80-column dashboards overflow their height by 1-2
    lines because the footer help line wraps; `getSelf` is Load-then-Run-then-Store rather than
    single-flight (unreachable today, `storyPoller.pass` is serialized by `passMu`); the cursor
    clamp in `applySnapshot` is a bounds check, not identity preservation, so a vanishing
    session can silently retarget the cursor from one queue item to another.
+
+**`fillGit` blocking publication used to be item 1 here and was demoted on 2026-08-03, because
+the measurement it rested on did not reproduce.** The attribution did: `git status --porcelain`
+is effectively the whole of `fillGit`, and no other git call crossed a 30ms threshold across
+five timed polls. The magnitude did not: 0.138s cold and 0.009s warm, with the memo skipping
+every poll, against the ~3.0-3.5s and never-skips recorded on 2026-07-31. The 20x is the
+untracked cache - `-c core.untrackedCache=false` puts portal's `status` at 0.67-0.91s, dead on
+the old figure - but `~/.gitconfig` has set `core.untrackedCache` and `core.fsmonitor` since
+2026-01-02, months before that measurement, so the gap is **not fully explained**. Concurrency
+contention (1 vs 9 simultaneous `status` calls: 0.065s vs 0.067s) and dirty-tree cache
+invalidation (50 writes per iteration, `status` steady at 0.035s) were tested and ruled out.
+Cold worktrees and machine load were not, and the cold-worktree exposure is only the *first*
+`status` in a fresh worktree, so it is a one-or-two-poll hiccup after a dispatch rather than a
+sustained cadence. `docs/superpowers/specs/2026-08-03-dirty-counts-off-publication-path-design.md`
+is the design that was written for it and **deliberately not implemented** - read its problem
+section before re-ranking this, and use the `slow poll` daemon log line as the evidence.
 
 **Two silent-failure modes to know about before debugging anything in this area**, neither of
 them scheduled for a fix: a failed queue fetch is completely silent, so "no assigned stories"
@@ -235,7 +246,7 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - Commander interface for subprocess calls (testable). Every subprocess goes through it, hooks and the browser opener included. The only direct `exec` sites left are `internal/fetch/cmd.go` (the real `Commander`) and `internal/model/client.go` (the daemon spawn), which must be real processes
 - View is pure — pane capture in Update via tea.Cmd, not in View
 - context.Context for cancellation
-- Both the daemon and a self-polling client run one `Collector.Snapshot` per `tmux_interval` (default 1s); git work is gated inside it by the `git_interval` (default 3s) memo, and PR work per branch by the `pr_interval` (default 30s) check inside `prPoller.pass`, off the poll loop. The TUI has no separate tmux/git/PR tick cycles - `fetchTmuxCmd`, `fetchGitCmd`, `fetchPRsCmd` and their messages and ticks are gone. **On a large monorepo the `git_interval` memo never actually skips** - see the `fillGit` bullet below, which is the measured behaviour rather than the intended one
+- Both the daemon and a self-polling client run one `Collector.Snapshot` per `tmux_interval` (default 1s); git work is gated inside it by the `git_interval` (default 3s) memo, and PR work per branch by the `pr_interval` (default 30s) check inside `prPoller.pass`, off the poll loop. The TUI has no separate tmux/git/PR tick cycles - `fetchTmuxCmd`, `fetchGitCmd`, `fetchPRsCmd` and their messages and ticks are gone. **Whether the `git_interval` memo actually skips depends on the repository** - it did not on 2026-07-31 and does on 2026-08-03; see the `fillGit` bullet below for both measurements and for the log line that settles it on any given machine
 - `Collector.Snapshot` is not reentrant: `gitMemo`, the last lock-free memo here, is owned by the calling goroutine (the PR store is mutex-guarded instead, because a worker writes it while `Snapshot` reads). `Collector`'s exported fields and `clock` are read-only once `New` returns, since `prPoller.pass` reads `Cmd`, `PRInterval` and `clock` from its own goroutine. `Model.startPoll` is the only issuer of `collectCmd` and refuses while `pollInFlight`, so at most one `Snapshot` is ever in flight per client. The self-poll chain is a self-rescheduling one-shot `CollectTickMsg`, created at exactly two sites (`Init`'s fallback branch and `handleDaemonLost`) and continued only in the tick handler
 - **Transition side effects belong to the daemon and to nothing else. Ownership is asserted, not inferred.** `Model.checkStateTransitions` detects transitions and renders them - a toast per event, plus `maybeAutoFocus` - and runs no effects at all. Clients hold no `transition.EffectRunner`; `transition.Runner` is constructed only in `internal/daemon`. This replaced a timer (`spawnGrace` / `effectsDisownedUntil` / `daemonSeenSinceArm`) that tried to infer ownership from who owned the poll loop and could only *narrow* the window where two processes owned one event: `handleDaemonLost` started self-polling while the daemon it lost may still have been alive, `firstSnapshotTimeout` could loop a panel through connect/timeout/self-poll, and the per-process `inFlightEffects` could not help across two processes - one `Done` event then meant two `CleanupSession` calls against one worktree. None of that mechanism exists any more; do not reintroduce a client-side effect path
 - The price of asserted ownership, and it is deliberate: **while no daemon is running, the `notify` hook does not fire and nothing is auto-cleaned.** A client self-polling for data is a data path, not an owner. This is why every mode now spawns a daemon when none answers and retries on every failed probe (`spawnDaemonOnce`, floored at `spawnCooldown` 15s per process). Toasts are unaffected - they are per-client, ungated, and fire on both the daemon-fed and self-polling paths
@@ -274,7 +285,8 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - **`gh` exiting non-zero is not always a failure.** `runWithRetry` retries three times with 1s and 2s of backoff, and `gh pr view` on a branch with no PR exits 1 to say so - which cost ~4.5s per poll on every freshly dispatched session, all of it inside a synchronous `Snapshot` that publishes nothing until it returns. `definitiveAnswer` reads gh's stderr off the `*exec.ExitError` and returns immediately for a true answer. It matches on gh's English message, so a gh release that rewords it silently restores the old behaviour
 - **`Collector.Snapshot` does local work only** - tmux, bells, git - then reads the PR store and nudges the remote workers. Nothing it does blocks on the network. Every process that calls it must call `Collector.Start(ctx)` once, or no off-box data is ever fetched; the daemon also calls `Collector.Wait()` before `Run` returns, so it does not release its flock and unlink its socket with a `gh` child alive. `Start`'s context is sticky (`sync.Once`), so the first caller's wins permanently and an already-cancelled one disables the pollers for good
 - **The remote pollers have no ticker, and that is load-bearing.** They are woken only by `Snapshot`'s nudge. A daemon-fed client never calls `Snapshot`, so its workers block for the life of the process and spend no `gh` budget - which is what "one daemon means one `gh` rate-limit budget" actually rests on now. Adding a ticker restores per-panel polling for every open panel, and only `TestRemoteRunsNothingWithoutANudge` and `TestADaemonFedClientSpendsNoGhBudget` would notice - and only for a *fast* ticker. A `time.NewTicker(PRInterval)` at 30s passes both. The doc comment and review are the defence, not the suite
-- **`fillGit` is the publication blocker now, and it is worse than "git is local so it is cheap" suggests.** Measured 2026-07-31 across 9 worktrees: `fillGit` ~3.0-3.5s per poll, 99.7% of `Snapshot`, and `git status --porcelain` is all of it - **0.7s to 1.6s on each active `portal` monorepo worktree**, 0.03s for every other git call. Because `fillGit` >= `git_interval` (3s), the git memo can never skip: the daemon runs `git status` continuously and the real publication cadence is ~3s, not the 1s `tmux_interval` the design assumes, so bell highlighting is up to 3s stale. Pre-existing, identical in `86e1fdc`, not a regression - but it means taking `gh` off the path **relocated** the "one slow thing blocks publication" shape from `gh` to `git` rather than removing it
+- **`fillGit` is where a slow poll comes from, but how slow depends entirely on the worktree's index, not on vigil.** `git status --porcelain` is effectively all of it - measured twice, and this half of the claim held both times: on 2026-08-03, across five timed polls logging every subprocess over 30ms, `rev-parse --show-toplevel`, `branch --show-current`, `rev-parse --verify`, `rev-list --count`, `merge-base` and `log -1` never appeared once. The magnitude is the part that moved. **2026-07-31, 9 worktrees: `fillGit` ~3.0-3.5s per poll, 99.7% of `Snapshot`, 0.7-1.6s per active `portal` worktree, and because `fillGit` >= `git_interval` the memo could never skip. 2026-08-03, 2 worktrees: `fillGit` 0.138s cold, `Snapshot` 0.009s warm, the memo skipping every poll.** The 20x is the untracked cache: `-c core.untrackedCache=false` reproduces 0.67-0.91s on demand, which is how to get the slow path back for debugging. That does not fully explain it - `~/.gitconfig` has set `core.untrackedCache` and `core.fsmonitor` since 2026-01-02 - and concurrency contention and dirty-tree invalidation were both tested and ruled out (see the demotion note under "What is open"). So treat "the memo never skips" as **conditional, not current**: the shape is real, taking `gh` off the path in `7b89c0e` **relocated** rather than removed it, and the remaining suspects are a fresh worktree's first `status` and machine load. **Do not re-derive this from scratch a third time** - the daemon logs `slow poll: <total> total, <git> in git, slowest <d> at <path>` whenever a poll exceeds `tmux_interval`, rate-limited to once a minute
+- **The `slow poll` log line is daemon-only and deliberately not user-visible.** A slow poll is not a failure, and a persistent warning about a 100ms poll is noise; a self-polling client has no log at all. `Collector.GitStats()` is the seam it reads, and it inherits `Snapshot`'s threading rule: the `fillGit` half is goroutine-owned and unguarded like `gitMemo`, so only the goroutine that called `Snapshot` may read it, and only after `Snapshot` returns. It is reset at the top of every `Snapshot` so a poll that fails before `fillGit` reports zero rather than the previous poll's numbers, and it stays zero when every path was memoized, because then `fillGit` issued no subprocesses. The rate limit is a **window, not an edge trigger** like `pollFailing`: a genuinely slow machine would otherwise log once on the way in and go quiet for hours, and a diagnosis wants a series. `TestASlowPollLogsAgainOnceTheRateLimitWindowHasPassed` is the only thing standing between the window and a log-once-forever mutation
 - `session.PRPending` means the branch has no entry in the PR store at all, which is **not** the same as a branch known to have no PR. `transition.Detect` skips a session where `PRPending && PR == nil`: no seed, no event, not recorded in `next`. Without it, async fill turns every daemon start into a burst of `notify` hooks and an `auto_cleanup` run against every already-merged worktree - measured at 6 hooks in one instant with the skip removed, 0 with it. The `PR == nil` half is there because a client fills the last known PR from `prCache` first. It costs at most one `notify` hook per session, at daemon start
 - `Collector.Invalidate` makes remote entries due by **zeroing `fetchedAt` rather than dropping them**. Dropping them would re-mark every branch pending, and a pending session is skipped by `Detect`, so a forced refresh would swallow the transition it was pressed to find. Git comes back inside the next `Snapshot`; remote data comes back a tick later. The git half is still goroutine-owned and unguarded, the remote half is safe from anywhere
 - `Collector.RefreshRemote` runs one pass of every poller synchronously and exists **so tests do not race a goroutine**. Production reaches a pass only through `Start`, so a nudge that never reached a worker leaves every `RefreshRemote`-driven test green; only `TestRunStartsTheRemoteWorkers`, `TestNewStartsTheRemoteWorkers` and `TestADaemonFedClientSpendsNoGhBudget` catch that
