@@ -19,8 +19,8 @@ import (
 
 func collectFixtureCommander() *fetch.MockCommander {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
-		"1700000000|alpha|/tmp/alpha", nil)
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|alpha|/tmp/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|1", nil)
 	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
 	cmd.On("git", "", nil)
@@ -86,8 +86,8 @@ func TestCollectCmdEmitsASnapshotWhenTmuxFails(t *testing.T) {
 func TestBothPathsProduceIdenticalSessions(t *testing.T) {
 	fixture := func() *fetch.MockCommander {
 		cmd := fetch.NewMockCommander()
-		cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
-			"1700000000|alpha|/tmp/alpha\n1700000001|beta|/tmp/beta", nil)
+		cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+			"1700000000|$1|alpha|/tmp/alpha\n1700000001|$2|beta|/tmp/beta", nil)
 		cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|1\nbeta|0", nil)
 		cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
 		cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
@@ -637,8 +637,8 @@ func countGhSearchCalls(cmd *fetch.MockCommander) int {
 // in this package green.
 func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
-		"1700000000|alpha|/tmp/alpha", nil)
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|alpha|/tmp/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
 	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
@@ -698,7 +698,7 @@ func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 // its default (true) instead, which is what actually reaches Collector.Queue.
 func TestCollectCmdReturnsThePopulatedQueue(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
 		"", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
 	cmd.On("gh", `[{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
@@ -822,9 +822,9 @@ func TestReconnectRaceDoesNotDoublePollOrWedge(t *testing.T) {
 	release := make(chan struct{})
 	cmd := fetch.NewMockCommander()
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
-		"tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}": func(context.Context, string, []string) (string, error) {
+		"tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}": func(context.Context, string, []string) (string, error) {
 			<-release
-			return "1700000000|alpha|/tmp/alpha", nil
+			return "1700000000|$1|alpha|/tmp/alpha", nil
 		},
 	}
 	cmd.On("tmux", "", nil)
@@ -1002,8 +1002,8 @@ func TestAFailedForcedPollSchedulesNoTick(t *testing.T) {
 // pr_interval like any other tick".
 func TestRefreshKeyReachesInvalidateEndToEnd(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
-		"1700000000|alpha|/tmp/alpha", nil)
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|alpha|/tmp/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
 	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
@@ -1068,8 +1068,8 @@ func TestNewStartsTheRemoteWorkers(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no socket there, so this client self-polls
 
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
-		"1700000000|alpha|/repo/alpha", nil)
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|alpha|/repo/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
 	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
@@ -1117,8 +1117,8 @@ func TestNewStartsTheRemoteWorkers(t *testing.T) {
 // real path - a client that loses a daemon self-polls and gets one back.
 func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
-		"1700000000|alpha|/repo/alpha", nil)
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|alpha|/repo/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
 	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){

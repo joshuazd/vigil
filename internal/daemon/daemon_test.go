@@ -66,8 +66,8 @@ func startServer(t *testing.T, s *Server) (ctx context.Context, stop func()) {
 func testServer(t *testing.T) *Server {
 	t.Helper()
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
-		"1700000000|alpha|/tmp/alpha", nil)
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|alpha|/tmp/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
 	sockDir := shortTempDir(t)
 	sockPath := filepath.Join(sockDir, "test.sock")
@@ -331,7 +331,7 @@ func (f *flakyCommander) Run(_ context.Context, _ string, name string, args ...s
 		if fail {
 			return "", errors.New("tmux: no server running")
 		}
-		return "1700000000|alpha|/tmp/alpha", nil
+		return "1700000000|$1|alpha|/tmp/alpha", nil
 	}
 	if strings.Contains(full, "list-windows") {
 		return "alpha|0", nil
@@ -833,8 +833,8 @@ func TestNewStampsTheRunningBinary(t *testing.T) {
 // green.
 func TestPollPublishesTheQueue(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
-		"1700000000|alpha|/repo/alpha", nil)
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|alpha|/repo/alpha", nil)
 	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
 	cmd.On("gh", `[{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
 		"updatedAt":"2026-07-31T18:54:14Z","url":"https://github.com/huntresslabs/portal/pull/34967"}]`, nil)
