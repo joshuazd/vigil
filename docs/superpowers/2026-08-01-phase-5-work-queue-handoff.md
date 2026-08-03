@@ -35,6 +35,32 @@ a review off the list is not a context switch.
 Six new settings: `queue_enabled`, `queue_pr_query`, `queue_pr_age_days`, `queue_story_query`,
 `queue_interval`, `queue_limit`.
 
+## Added after the phase merged
+
+Two changes landed on `main` after this document was first written, both in `b48979a`.
+
+**Review rows carry the PR author.** `gh` already returned `author.login`, so this was a
+field, a mapping and a column. It is 16 wide (longest real login observed is 15, GitHub
+allows 39 so it truncates) and is **dropped for the whole section** when the title would fall
+below 24 columns, so a narrow dashboard degrades to titles rather than wrapping. Stories
+render a blank author deliberately: Shortcut carries a requester, but resolving it costs a
+lookup per story and the column exists to answer "whose PR is this".
+
+The column decision and the age width are computed **once per section**, not per row. Per-row
+would put the author on some rows and not others depending on their age string, sliding the
+title column with it.
+
+**`truncateVisible` had an off-by-one, and it was pre-existing.** It returned `maxW`
+characters and *then* appended `…`, so any truncated string was `maxW+1` cells and every
+caller padding to `maxW` overflowed its column by one. This is the cause of the deferred
+minor recorded below as "queue rows can exceed their width at narrow widths" - that finding
+named the symptom, not the mechanism.
+
+Worth noting how it surfaced: the width sweep written for the **new** author column failed at
+width 40, and not because of the author. Four tests already covered `truncateVisible` and
+none of them pinned its width contract, so fixing it broke nothing and would have been
+invisible either way. The width contract is now pinned in `internal/view/detail_test.go`.
+
 ## The `%self%` bug, which is the consequential finding
 
 The shipped default was:

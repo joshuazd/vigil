@@ -21,56 +21,83 @@ them to a synchronous `Snapshot` would have made the session list slower for rea
 unrelated to sessions. The seam phase 5 needs now exists, so phase 5 does not touch
 `Snapshot` at all.
 
-**Phase 5 is next: the work queue.** `vigild` also polls assigned Shortcut stories and
-review-requested PRs; both vigil and the menu bar present a pickable list, and selecting an
-item dispatches it. The same rule as before applies - live on phase 4 first. Phase 4 is the
-phase that makes the daemon run jobs, which is the condition phase 5 inherits.
+**Phase 5 merged 2026-08-03 as `b48979a`, and it is the first phase since phase 1 that is
+single-repo.** `~/dotfiles` was not touched. The PR-author column on review rows landed
+immediately after as part of the same merge.
 
-Concretely, phase 5's data half is: add a `poller` in `internal/collect/remote.go`, pass it
-to `newRemote` in `collect.New`, and read its store wherever the queue renders. Unlike
-`prPoller` it needs no `track`/`fill`, because assigned stories and review-requested PRs are
-global lists rather than per-session data. Weigh the `fillGit` finding in (1) below before
-assuming the session list is fast.
+**Phase 6 is next, and it is deletions**, which makes it the cheapest phase and the one most
+likely to break something quietly. Only after living on phases 0-5:
 
-**Read these three, in this order, before starting phase 5:**
+- `tmux-monitor` (orphaned, superseded by vigil)
+- `gh-review-poll` (superseded by phase 5's queue - but read the note below first)
+- `worktree-status` and its `.tmux.conf` prefix+w / prefix+C-w bindings
+- **`dispatch.1d.sh`, not `dispatch-bar`.** Phase 6's "delete one of the two menu bar
+  implementations" already resolves itself: SwiftBar is not installed, nothing runs the
+  plugin, and the native `dispatch-bar` is live under `com.user.dispatch-bar.plist`
+- The popup tunnel inside `dispatch-from-chrome`
 
-1. **`docs/superpowers/2026-07-31-collector-async-remote-handoff.md`** - the structural fix
-   the poll-latency handoff called for, landed and verified. `Snapshot` is local-only, a
-   `poller` seam owns off-box data, and **phase 5's two pollers are additions to that seam,
-   not stages in `Snapshot`**. Carries the measured proof that the cold-start `notify` burst
-   is prevented (0 hooks against 6 with the detector skip removed), and the finding that
-   changes phase 5's plan: **`fillGit` costs ~3s per poll**, is >= `git_interval`, so the git
-   memo never skips and the real publication cadence is ~3s rather than 1s. The "one slow
-   thing blocks publication" shape moved from `gh` to `git`; it is not gone. Supersedes the
-   poll-latency handoff, which is still worth reading for the `definitiveAnswer` history
-   (`docs/superpowers/2026-07-31-poll-latency-handoff.md`, merged as `6874acf`) and whose
-   "1.5 to 2 seconds" prediction the verification **refutes for cold start**.
-2. **`docs/superpowers/2026-07-30-binary-refresh-handoff.md`** - phase 4's two deferred items,
-   landed 2026-07-31 as `832a86e` and verified on the real machine. `esc` now clears a failed
-   dispatch line for every panel at once, and a client re-execs when its own binary changes.
-   Carries the operational note that **the first install after a change cannot re-exec
-   anything**, because a panel must already be running the feature to notice, and the
-   landmine that the whole re-exec mechanism is **macOS-only**.
-3. **`docs/superpowers/2026-07-30-phase-4-handoff.md`** - what phase 4 verified, what it did
-   **not**, and the landmines. Still the authority on the daemon's job runner and on
-   `ExecCommander.Run`, the non-streaming path used by the `notify` and `cleanup` hooks,
-   which **still** has the grandchild-holds-the-pipe defect that phase 4 fixed in
-   `RunStream`. A hook that backgrounds a process wedges the daemon permanently; shipped
-   defaults do not, which is the only reason it was left. Superseded only on its two deferred
-   items, which are (2) above.
+Before deleting `gh-review-poll`, note that **its `--detached --non-interactive` invocation is
+the only production evidence that the workflow scripts honour `--detached`** - phase 5 never
+ran a real queue dispatch (see the handoff's "What was NOT verified"). Live on a real queue
+dispatch first, then delete it.
 
-**A standing warning about the plans in this directory, now a pattern rather than an
-incident.** Across two plans, **ten** briefs have contained tests that would have passed
-with their subject deleted - six in the phase 3 plan, four in the collector async remote
-plan - and in both cases most were written by the plan's author. All four of the recent
-ones were caught only by per-task review. So: where a brief and the shipped code disagree,
-**the code is right**; and when executing any plan here, watch every test fail before
-writing its subject, and work out what mutation it actually catches. A test that passes
-before its subject exists is a defect in the plan, not a happy accident.
+**Read these two, in this order, before starting phase 6:**
+
+1. **`docs/superpowers/2026-08-01-phase-5-work-queue-handoff.md`** - what shipped, the
+   `%self%` bug that ten per-task reviews missed and only real data caught, the verification
+   numbers, and the landmines. Its **process notes are the most valuable page in this
+   directory**; read them before writing any plan here.
+2. **`docs/superpowers/2026-07-30-phase-4-handoff.md`** - still the authority on the daemon's
+   job runner and on `ExecCommander.Run`, the non-streaming path used by the `notify` and
+   `cleanup` hooks, which **still** has the grandchild-holds-the-pipe defect that phase 4
+   fixed in `RunStream`. A hook that backgrounds a process wedges the daemon permanently;
+   shipped defaults do not, which is the only reason it was left. Superseded on its two
+   deferred items by `docs/superpowers/2026-07-30-binary-refresh-handoff.md`, which also
+   carries the landmine that the whole re-exec mechanism is **macOS-only**.
+
+The collector async remote handoff
+(`docs/superpowers/2026-07-31-collector-async-remote-handoff.md`) is still the authority on
+the `poller` seam and on the **`fillGit` finding: ~3s per poll, >= `git_interval`, so the git
+memo never skips and the real publication cadence is ~3s rather than the 1s `tmux_interval`
+the design assumes.** Phase 5 deliberately did not address it and it is still open - it is the
+obvious candidate for the next structural piece of work, ahead of whatever phase needs a
+responsive session list.
+
+**A standing warning about the plans in this directory. This is now the repository's default
+failure mode, not a pattern.** Across three plans, **nineteen** briefs have contained tests
+that would have passed with their subject deleted - six in the phase 3 plan, four in the
+collector async remote plan, and **nine in the phase 5 plan**. Most were written by the plan's
+author, including tests justified with reasoning that was factually wrong about this codebase.
+Three of phase 5's nine survived **all ten per-task reviews** and were caught only by the
+whole-branch review, all three on the primary render path.
+
+What actually worked, in order of effectiveness:
+
+1. **Mandating a mutation check per test, with the output pasted into the report.** Every test
+   whose brief demanded "delete the subject, watch it fail, restore" came back sound. One
+   implementer caught its own vacuous test this way before reporting.
+2. **Reviewers re-deriving claims instead of reading them.** The reviewer who reimplemented a
+   sort comparator in a standalone program found a key untested; the one who re-ran a 39,900-
+   case overflow sweep found the fix worked and then found the cursor could still outrun it.
+3. **A whole-branch review that explicitly distrusts the suite.** Per-task reviews were good
+   and still missed all three seam gaps, because a task-scoped diff cannot see a seam.
+
+So: where a brief and the shipped code disagree, **the code is right**; watch every test fail
+before writing its subject; and budget a whole-branch review that samples tests nobody flagged.
 
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
 `internal/dispatch`, `internal/view`'s layout, or the launch path in `~/dotfiles`:
 
+- `docs/superpowers/specs/2026-07-31-phase-5-work-queue-design.md` and
+  `docs/superpowers/plans/2026-07-31-phase-5-work-queue.md` - the design and plan for the
+  work queue. The design is **superseded on two points**: its `queue_story_query` default
+  used `%self%`, which nothing substituted until `24079de`; and it claimed `queue_limit`
+  "bounds the rendered height", which is true in item count and was false in rows, fixed in
+  `dca1243`. Its "Rejected alternatives" section is still current and worth reading - it is
+  why the panel has a badge and no rows, and why the menu bar does not present the queue.
+  **Nine of the plan's briefs contained vacuous tests**; the shipped versions are the fixed
+  ones, and the plan's step-1 verification incantation is itself buggy (`HOME=... GH_TOKEN=
+  "$(gh auth token)"` on one line evaluates `HOME` before the token capture).
 - `docs/superpowers/specs/2026-07-31-collector-async-remote-design.md` and
   `docs/superpowers/plans/2026-07-31-collector-async-remote.md` - the design and plan for
   the poller seam. The design is **superseded on one point**, marked inline: it argues
@@ -113,15 +140,15 @@ Go + Bubble Tea TUI. Single static binary.
 - `internal/model/model.go` — Bubble Tea Model/Update/View, polling, state management
 - `internal/model/keys.go` — Keybindings
 - `internal/model/messages.go` — All tea.Msg types
-- `internal/session/` — Session, GitStatus, PRStatus structs, SessionState enum, sorting
-- `internal/view/` — Rendering: table, detail panel, status bar, styles, cell formatters
+- `internal/session/` — Session, GitStatus, PRStatus structs, SessionState enum, sorting. Also `QueueItem` (`queue.go`), whose `SessionPrefix()` encodes the `SC-<id> ` / `PR-<number> ` convention dotfiles' `session_name_from_title` produces. **That trailing space is load-bearing** - without it `SC-223477` matches a session named `SC-2234770`
+- `internal/view/` — Rendering: table, detail panel, status bar, styles, cell formatters, and the queue section (`queue.go`). Pure: `RenderQueue` takes `now` and `maxRows` as parameters rather than reading a clock or guessing a budget. `QueueRowsShown` is shared with `Model.drawnQueueRows` so the cursor's ceiling cannot disagree with what was drawn
 - `internal/fetch/` — Subprocess wrappers: tmux, git, gh CLI, Commander interface
 - `internal/action/` — Merge, approve, cleanup, rebase, draft, dispatch actions
 - `internal/config/` — TOML config loading, hook template expansion and execution. `RunHook` takes a `fetch.Commander` and runs `sh -c 'exec 2>&1; <hook>'`, so hook output includes stderr (which `MergePR` searches for "merged")
 - `internal/cache/` — JSON session cache for instant startup
-- `internal/collect/` - UI-independent session state collection (shared by the daemon and the TUI's self-polling fallback). **`Snapshot` is local-only**: tmux, bell flags and git, then a read of the PR store and a nudge. Off-box data is fetched by pollers on their own goroutines (`remote.go`: the `poller` seam, the `remote` scheduler, `prPoller`) and published by a later `Snapshot`. Phase 5's Shortcut and review-request pollers are siblings of `prPoller`, not stages in `Snapshot`
+- `internal/collect/` - UI-independent session state collection (shared by the daemon and the TUI's self-polling fallback). **`Snapshot` is local-only**: tmux, bell flags and git, then a read of the PR store and a nudge. Off-box data is fetched by pollers on their own goroutines (`remote.go`: the `poller` seam, the `remote` scheduler, `prPoller`) and published by a later `Snapshot`. Phase 5's `storyPoller` and `reviewPoller` (`queue.go`) are siblings of `prPoller`, not stages in `Snapshot`; they share a `queueStore` and have **no `track`/`fill`**, because they hold global lists rather than per-branch data grafted onto sessions. `Collector.Queue(sessions)` is the read side - pure over both stores plus the session list, called once per poll by the daemon and by a self-polling client, never by `Snapshot`
 - `internal/transition/` - state-change detection (`Detector`) and the side effects a change triggers (`Runner`: the `notify` hook and `auto_cleanup`). The two halves have different owners: `Detector` is shared, because every client renders its own toasts and detection must not be implemented twice, while `Runner` is constructed only by the daemon. Effect ownership is **asserted, not inferred** - see the "Key Conventions" bullet
-- `internal/protocol/` - newline-delimited JSON over a unix socket, **bidirectional since phase 4**. The daemon writes `Snapshot`, clients write `Request`; direction alone disambiguates them, so there is no envelope. `Version` stays **1** because `Snapshot.Jobs` is additive - an old panel ignores the key, a new one sees nil against an old daemon. `RequestDecoder.Next` deliberately does not reject an unknown version: the daemon has to see such a request to answer with a refused job, and a drop at the decoder is indistinguishable from a daemon that never read
+- `internal/protocol/` - newline-delimited JSON over a unix socket, **bidirectional since phase 4**. The daemon writes `Snapshot`, clients write `Request`; direction alone disambiguates them, so there is no envelope. `Version` stays **1** because `Snapshot.Jobs`, `Snapshot.Queue`, `Snapshot.QueueHidden` and `Request.Detached` are all additive - an old panel ignores the key, a new one sees nil against an old daemon. An old daemon ignoring `Detached` means a queue dispatch teleports, which is exactly today's behaviour rather than an error. `RequestDecoder.Next` deliberately does not reject an unknown version: the daemon has to see such a request to answer with a refused job, and a drop at the decoder is indistinguishable from a daemon that never read
 - `internal/dispatch/` - the submission client behind `vigil dispatch` and the `d` key. Validates input, generates a job id, dials (spawning a daemon and retrying if none answers), writes one `Request`, and waits for its id to appear in a snapshot. **The snapshot is the ack**; there is no response frame, which is what makes a refusal visible in every panel rather than only to the CLI. Does not import `internal/daemon` - `Options.Spawn` is a func field so `main` does the wiring
 - `internal/daemon/` - `vigil daemon`: runs one `Snapshot` per tick at `tmux_interval` (default 1s) so tmux metadata (including bell flags) is never more than a tick stale; git state is gated inside `Snapshot` on `git_interval` (default 3s), while PR state per branch is fetched off the poll loop by the collector's remote workers and gated on `pr_interval` (default 30s) inside `prPoller.pass`. `Run` calls `Collector.Start` before the ticker and `Collector.Wait` in the shutdown arm. Startup serializes on an flock'd lock file beside the socket (`vigild.sock.lock`), held across the stale-socket removal and the bind, so racing daemons cannot both bind. Every client gets its own writer goroutine and a one-deep latest-wins queue, so a client that stops reading can neither stall the poll loop nor block new connections. `New` wires a `transition.Detector` and a `transition.Runner` (nil disables both, which is what a `Server` literal in a test gets); effects run in one goroutine per event because `poll` is synchronous per tick, and `Run` waits on `pendingEffects` before returning. **Phase 4 added a job runner**: one reader goroutine per connection accepts `Request` frames, and a serialized queue runs one dispatch at a time, because two concurrent `git worktree add` calls in one repository contend on the index lock. Jobs run on their own goroutine - `poll` is synchronous per tick, so a job run there would freeze every panel's stream for the length of a dispatch. `Snapshot.Jobs` is built from a copy taken under the job mutex, since a running job writes `Status` while poll marshals. The **writer stays the sole closer** of a connection: a reader that closed it could pull the socket from under a writer mid-`Encode`
 - `vigil --panel` - the same `Model` with `panelMode` set: compact status bar, width-responsive table, no detail panel and no footer. Since phase 3 a panel is also created for every new tmux session, so this is the common way vigil runs, not the rare one. Spawning is no longer a panel-only behaviour: **every mode starts a daemon if none is running** - panel, dashboard and the `prefix v` popup, which is the dashboard model - at startup and on every failed reconnect probe, because the daemon is the only process that runs transition side effects and a dashboard-only user with `panel_auto = false` would otherwise never see the `notify` hook fire
@@ -163,7 +190,7 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - **`vigil dispatch` exits 0 on acceptance, not success.** The job outlives the CLI, which is the point. A refusal - duplicate input, unknown request version or type, empty input, full queue - is registered as a job in state `JobRefused`, never silently dropped, because the submitting client waits for its id to appear in a snapshot and a drop is indistinguishable from a daemon that never read the frame. `JobRefused` is distinct from `JobFailed` on purpose: refused means never accepted, failed means accepted, ran and lost. Conflating them made the CLI exit non-zero for work the daemon had actually started
 - **`VIGIL_CLIENT` is how a daemon-run job learns which tmux client to act on.** The daemon has no tty, so it resolves the most recently active client per job and exports it into the hook's environment. The shell side uses it for three things: the switch target, the new window's size, and the panel orientation. It is an environment variable rather than a flag because the alternative threads a parameter through five levels, one of which re-quotes into a command string with `printf '%q'` and runs it through `bash -c`. Verified 2026-07-30 on an isolated server: with it, a session comes out 350x90 with a 40-column panel; genuinely headless, 80x24 with a panel at half the window, which is the ~175-column balloon's precondition
 - **A hook's grandchildren can hold its output pipe.** `exec.CommandContext` kills only the direct child, so `cmd.Wait` blocks until every descendant closes the inherited fd. `ExecCommander.RunStream` therefore uses a process group, a `Cancel` that signals the group, and a `WaitDelay` backstop. Without it a hung dispatch was unbounded, blocked every later job, and left `Run` waiting on `pendingEffects` forever - a daemon that never exits, never releases its flock and never unlinks its socket, after which **no daemon can start again at all**. `ExecCommander.Run`, the non-streaming path used by `notify` and `cleanup`, still has this shape; shipped hook defaults do not background anything, which is the only reason it was left
-- **The `dispatch` hook must be `DISPATCH_INLINE=1 dispatch --non-interactive {input}`.** `--detached` skips the teleport, and without `DISPATCH_INLINE` a client-less daemon tries `tmux display-popup`, which has nothing to draw on. `vigil` warns at startup when the configured hook still looks like the old one. Note also that **no hook body may contain `${VAR}`**: `ExpandHook` reads every `{...}` as a placeholder, so a braced shell expansion fails before reaching `sh`. Use `$VAR`
+- **The `dispatch` hook must be `DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}`.** A *literal* `--detached` in the hook skips the teleport for every dispatch, and without `DISPATCH_INLINE` a client-less daemon tries `tmux display-popup`, which has nothing to draw on. `{flags}` expands to `--detached` for a queue selection and to nothing for the `d` key, which is how one hook serves both. **It is the only placeholder `ExpandHook` does not shell-quote** - safe because it carries one of two vigil-chosen constants, and necessary because `shellQuote("")` is `''`, a stray empty argument. `rawPlaceholders` must never be widened. `vigil` warns at startup for both an old-style hook and a missing `{flags}`, but **that warning is effectively invisible where it matters**: both `runTUI` and `runPanel` use `tea.WithAltScreen()`, so a panel never shows it and the `prefix v` popup destroys it on close. A user without `{flags}` gets teleported and never sees why. Note also that **no hook body may contain `${VAR}`**: `ExpandHook` reads every `{...}` as a placeholder, so a braced shell expansion fails before reaching `sh`. Use `$VAR`
 - Cache interop with previous Python version (same JSON format)
 - The TUI dials the daemon socket on startup and consumes its broadcast snapshots when reachable; it falls back to self-polling if the daemon is never reached, does not send a first snapshot within a bounded wait, or is lost mid-session
 - Both paths are permanently supported and must **render** identically: git/PR data, sort order, toasts. They no longer behave identically in effects, and that is the point - the self-polling path runs none, so a `notify` hook is a claim about a daemon being up, not about a client having seen a transition. The one exception to "the `notify` hook fires once per real transition" survives inside the daemon: a repeat `Done` arriving while that session's cleanup is still in flight is skipped along with its hook (measured at 5 invocations for 7 transitions with the first effect blocked; toasts were 7 of 7 on both paths, and still are)
@@ -190,3 +217,13 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - `session.PRPending` means the branch has no entry in the PR store at all, which is **not** the same as a branch known to have no PR. `transition.Detect` skips a session where `PRPending && PR == nil`: no seed, no event, not recorded in `next`. Without it, async fill turns every daemon start into a burst of `notify` hooks and an `auto_cleanup` run against every already-merged worktree - measured at 6 hooks in one instant with the skip removed, 0 with it. The `PR == nil` half is there because a client fills the last known PR from `prCache` first. It costs at most one `notify` hook per session, at daemon start
 - `Collector.Invalidate` makes remote entries due by **zeroing `fetchedAt` rather than dropping them**. Dropping them would re-mark every branch pending, and a pending session is skipped by `Detect`, so a forced refresh would swallow the transition it was pressed to find. Git comes back inside the next `Snapshot`; remote data comes back a tick later. The git half is still goroutine-owned and unguarded, the remote half is safe from anywhere
 - `Collector.RefreshRemote` runs one pass of every poller synchronously and exists **so tests do not race a goroutine**. Production reaches a pass only through `Start`, so a nudge that never reached a worker leaves every `RefreshRemote`-driven test green; only `TestRunStartsTheRemoteWorkers`, `TestNewStartsTheRemoteWorkers` and `TestADaemonFedClientSpendsNoGhBudget` catch that
+- **The work queue is dashboard-only. The panel gets a `⚡N` badge and zero rows**, because a panel is 152x9 on this machine with five sessions already in it. `Model.rowCount` returns just the session count in panel mode and `queueCursor` returns -1, so a panel's cursor cannot reach a queue row at all - without that, `enter` would fire a detached dispatch of an item the panel never drew. The dashboard has the same guard by a different route: `rowCount` ends at `drawnQueueRows()`, and `queueDispatchTarget` bounds on it again so it fails closed even if a clamp has not run
+- **`drawnQueueRows()` and `View()`'s queue budget must stay one function.** Both call `queueRowBudget(tableHeight)` and `view.QueueRowsShown`. If they ever each compute the budget separately they will drift, and the drift is exactly the bug: the cursor reaching a row that was truncated away. This was shipped broken once and caught by measurement, not by reading
+- **`lipgloss.Height("")` returns 1, not 0.** The `queueSection != ""` guard before subtracting it from `tableHeight` is why an empty queue does not silently cost the session table a row
+- **The status bar budgets width with `lipgloss.Width`, not `visibleLen`.** `⚡` is one rune and two terminal cells, so a rune count under-budgets and the bar wraps, pushing every table row down - measured at widths 12, 25 and 34. `job.go:11-18` had already diagnosed this class once for the job line; nothing guarded the status bar until `eb6bbeb`. Do not revert it to a rune count, and prefer `lipgloss.Width` for any new width arithmetic
+- **`truncateVisible(s, maxW)` returns at most `maxW` cells, ellipsis included.** It used to return `maxW` characters and *then* append `…`, so every caller padding to `maxW` overflowed its column by one. Four tests covered that helper and none pinned its width; the fix came out of a caller's width sweep
+- **`%self%` in `queue_story_query` is substituted by vigil, not by `short`.** It is a `short search` feature, and vigil uses `short api`, a raw passthrough that templates nothing. `fetch.SearchStories` resolves it through `short api /member`, cached in a package-level `sync.Map` following the `nwoCache` precedent, looked up only when the query contains it, and **erroring rather than issuing a query with a literal or empty owner** - a broken query returns zero stories silently and forever. This shipped broken and was caught only by running against the real API
+- **Queue dedup hides an item when a live session covers it**, by name prefix (`SC-<id> ` / `PR-<number> `) or, for reviews only, by `PR.Number`. The name key is a **cross-repository convention with a test on this side only**: if dotfiles' `session_name_from_title` changes format, dedup degrades silently and the queue advertises work already in flight. The `PR.Number` backstop covers reviews; stories would be fully exposed
+- **A failed queue fetch is completely silent** - no log, no toast. "No assigned stories" and "Shortcut is unreachable" render identically. Consistent with `prPoller`, which does not log a failed `gh` either, and the reason `short` is deliberately absent from `main.go`'s `startupDependencies`. First diagnostic step is to run the poller's exact command by hand
+- **`queueRowBudget` gives the queue everything above `minTableRows = 3`.** With many sessions and a full queue the session table is squeezed to 3 rows even on a tall terminal, which inverts the design's premise that the session list is primary. A proportional policy would match the intent better; this is open
+- **The session table has no viewport.** `RenderTable` drops sessions past `height` with no scroll, so with a long queue some session rows are cursor-reachable and undrawn - the same defect class the queue fixed for itself. `enter` on a session is non-destructive and `m`/`x` confirm first, which is the only reason it was not blocking
