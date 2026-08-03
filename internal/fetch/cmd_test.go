@@ -114,6 +114,95 @@ func TestRunStreamKillsAGrandchildHoldingThePipe(t *testing.T) {
 	}
 }
 
+// leakedDescendant exits 0 immediately and leaves a child holding the stdout it
+// inherited. cmd.Output() collects into buffers, so os/exec copies through a
+// goroutine that ends only at EOF - which needs every writer closed, not just
+// the direct child. This is the RunStream defect phase 4 fixed, on the path
+// notify and cleanup take.
+const leakedDescendant = "exec 2>&1; sleep 10 & echo started"
+
+// descendantBound is what a bounded Run is allowed to take: the wait delay plus
+// slack. Well under the descendant's own 10s, so a Run with no delay set fails
+// this rather than passing slowly.
+const descendantBound = waitDelay + 500*time.Millisecond
+
+func TestRunIsBoundedByADescendantHoldingThePipe(t *testing.T) {
+	c := &ExecCommander{}
+	start := time.Now()
+	_, _ = c.Run(context.Background(), "", "sh", "-c", leakedDescendant)
+	if elapsed := time.Since(start); elapsed > descendantBound {
+		t.Fatalf("returned after %v, want the wait delay to bound it", elapsed)
+	}
+}
+
+// The bound above is worth nothing if it converts every such hook into a
+// failure: a command that exited 0 while a descendant held its pipe succeeded
+// with truncated output. MergePR reads a hook's output to decide whether the PR
+// merged, so a spurious error there reports a merge that happened as one that
+// did not.
+func TestRunReportsACleanExitDespiteALeakedDescendant(t *testing.T) {
+	c := &ExecCommander{}
+	out, err := c.Run(context.Background(), "", "sh", "-c", leakedDescendant)
+	if err != nil {
+		t.Errorf("got %v, want nil for a command that exited 0", err)
+	}
+	if out != "started" {
+		t.Errorf("got output %q, want the output it produced before the delay", out)
+	}
+}
+
+// The other half of that mapping: only a clean exit is forgiven. A killed
+// command must still be an error, or a hook timeout becomes silence. The bound
+// is the second claim - a cancellation must not spend the wait delay before
+// reporting, and killBound is under it so one that did fails here.
+func TestRunStillReportsAKilledCommandAsAnError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	c := &ExecCommander{}
+	start := time.Now()
+	_, err := c.Run(ctx, "", "sh", "-c", "sleep 10")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("got nil, want a kill error")
+	}
+	if elapsed > killBound {
+		t.Errorf("returned after %v, want the deadline rather than the wait delay to bound it", elapsed)
+	}
+}
+
+// os/exec reports the exit status rather than the delay for a process that
+// failed, so exitedCleanly's ProcessState check has no live path to reach it
+// through Run - it is a backstop against that precedence changing, and a
+// backstop nothing exercises is a guard this repository has shipped broken
+// before. This reaches the helper directly with the pairing os/exec does not
+// currently produce.
+func TestExitedCleanlyKeepsTheErrorWhenTheProcessFailed(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 3")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("want a populated failing ProcessState to test with")
+	}
+	if err := exitedCleanly(cmd, exec.ErrWaitDelay); !errors.Is(err, exec.ErrWaitDelay) {
+		t.Errorf("got %v, want the error kept for a process that exited non-zero", err)
+	}
+}
+
+// RunStream has the delay already, so it is bounded; what it does not have is
+// the distinction above. A dispatch hook that exits 0 and leaves a worker
+// behind reports ErrWaitDelay, and the job runner turns any error into a failed
+// job - a refusal toast in every panel for a dispatch that worked.
+func TestRunStreamReportsACleanExitDespiteALeakedDescendant(t *testing.T) {
+	c := &ExecCommander{}
+	var lines []string
+	err := c.RunStream(context.Background(), "", nil, "sh",
+		[]string{"-c", leakedDescendant}, func(l string) { lines = append(lines, l) })
+	if err != nil {
+		t.Errorf("got %v, want nil for a command that exited 0", err)
+	}
+	if !reflect.DeepEqual(lines, []string{"started"}) {
+		t.Errorf("got %q, want the line it produced before the delay", lines)
+	}
+}
+
 // kill(-1) signals every process the caller owns, and vigild runs as that
 // user, so a cancellation that negated a pid it had not checked would take the
 // daemon down with the hook. Nothing is signalled at all without a process to

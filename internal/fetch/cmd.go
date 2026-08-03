@@ -51,17 +51,41 @@ func (c *ExecCommander) Run(ctx context.Context, dir string, name string, args .
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.WaitDelay = waitDelay
 	out, err := cmd.Output()
-	return strings.TrimRight(string(out), "\n\r"), err
+	return strings.TrimRight(string(out), "\n\r"), exitedCleanly(cmd, err)
 }
 
-// streamWaitDelay bounds how long Wait may block after cancellation. Both
-// output streams are an io.PipeWriter, so os/exec copies through a goroutine
-// that ends only when every descendant holding the inherited fd closes it.
-// The process group kill below is what normally releases it; this is the
-// backstop for a descendant that escaped the group (its own setsid), and
-// without a non-zero delay Wait has no bound at all.
-const streamWaitDelay = 2 * time.Second
+// exitedCleanly maps ErrWaitDelay to success for a process that exited 0. The
+// delay above bounds the wait; without this it also turns every hook that
+// leaves a descendant behind into a failure it is not, and the output collected
+// before the delay is discarded with it. MergePR decides from a hook's output
+// whether the PR merged, so a spurious error there reports a merge that
+// happened as one that did not.
+//
+// Only a clean exit is forgiven: a killed or failing command keeps its error,
+// which is what a hook timeout depends on. Measured 2026-08-03, os/exec gives
+// the exit status precedence over the delay, so ErrWaitDelay does not surface
+// for one at all - exit 3 with a leaked descendant reports "exit status 3" and
+// a killed one "signal: killed". The ProcessState check is therefore a backstop
+// against that precedence changing rather than a live path; it fails closed,
+// and TestExitedCleanlyKeepsTheErrorWhenTheProcessFailed is what pins it.
+func exitedCleanly(cmd *exec.Cmd, err error) error {
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		return nil
+	}
+	return err
+}
+
+// waitDelay bounds how long Wait may block on output that outlives the process
+// it was collecting. Every path here reads into something os/exec must copy
+// through a goroutine - an io.PipeWriter for RunStream, Output's buffers for
+// Run - and that goroutine ends only when every descendant holding the
+// inherited fd closes it. RunStream's process group kill is what normally
+// releases it after a cancellation; this is the backstop for a descendant that
+// escaped the group (its own setsid) or outlived a clean exit, and without a
+// non-zero delay Wait has no bound at all.
+const waitDelay = 2 * time.Second
 
 func (c *ExecCommander) RunStream(ctx context.Context, dir string, env []string, name string, args []string, onLine func(string)) error {
 	cmd := exec.CommandContext(ctx, name, args...)
@@ -79,7 +103,7 @@ func (c *ExecCommander) RunStream(ctx context.Context, dir string, env []string,
 	// job goroutine, so the daemon could not be shut down either.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
-	cmd.WaitDelay = streamWaitDelay
+	cmd.WaitDelay = waitDelay
 
 	pr, pw := io.Pipe()
 	// One pipe for both streams: hooks run under `sh -c 'exec 2>&1; ...'`
@@ -110,7 +134,7 @@ func (c *ExecCommander) RunStream(ctx context.Context, dir string, env []string,
 	_ = pw.Close()
 	<-scanned
 	_ = pr.Close()
-	return waitErr
+	return exitedCleanly(cmd, waitErr)
 }
 
 // killProcessGroup signals the child's whole process group, which Setpgid

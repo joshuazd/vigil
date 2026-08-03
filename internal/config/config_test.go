@@ -314,6 +314,38 @@ func TestRunHookCapturesStderrWhenTheHookFails(t *testing.T) {
 	}
 }
 
+// TestRunHookIsBoundedByAHookThatBackgroundsWork is the seam the ExecCommander
+// wait delay exists for, at the level the consequence lives: the notify and
+// cleanup hooks. The hook exits 0 immediately and leaves a descendant holding
+// the output it inherited, so Wait had no bound at all - the daemon runs these
+// effects on goroutines it waits for in Run, so one such hook meant a daemon
+// that never returned, never released its flock and never unlinked its socket,
+// after which no daemon could start again.
+//
+// The hook timeout does not help and that is the point: the direct child has
+// already exited, so there is nothing for cancellation to kill. Both claims are
+// asserted, because a bound that reports a successful hook as failed would put
+// the same false failure into MergePR's output check.
+func TestRunHookIsBoundedByAHookThatBackgroundsWork(t *testing.T) {
+	cfg := &Config{Hooks: map[string]any{"notify": "sleep 30 & echo notified"}}
+
+	start := time.Now()
+	out, err := cfg.RunHook(context.Background(), &fetch.ExecCommander{}, "notify",
+		map[string]string{}, "", 5*time.Second)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Errorf("got %v, want nil for a hook that exited 0", err)
+	}
+	if !strings.Contains(out, "notified") {
+		t.Errorf("got %q, want the output the hook produced before the delay", out)
+	}
+	// Above ExecCommander's own delay, far below the descendant's 30s.
+	if elapsed > 4*time.Second {
+		t.Errorf("returned after %v, want the wait delay to bound it", elapsed)
+	}
+}
+
 // TestRunHookStderrOrderingSurvivesACompoundHook covers why the redirect is
 // `exec 2>&1;` and not a trailing " 2>&1": a trailing redirect would attach to
 // the last clause only, so an earlier clause's stderr would be lost.
