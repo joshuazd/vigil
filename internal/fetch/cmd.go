@@ -181,6 +181,22 @@ func (m *MockCommander) CallCount(name string) int {
 	return n
 }
 
+// CallCountFunc reports how many recorded calls satisfy match. Same locking
+// as CallCount: a caller that needs to distinguish calls by Args or Dir (two
+// commands sharing one binary name) still cannot range over Calls directly
+// while another goroutine may be appending to it.
+func (m *MockCommander) CallCountFunc(match func(MockCall) bool) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, call := range m.Calls {
+		if match(call) {
+			n++
+		}
+	}
+	return n
+}
+
 func (m *MockCommander) Run(ctx context.Context, dir string, name string, args ...string) (string, error) {
 	m.mu.Lock()
 	m.Calls = append(m.Calls, MockCall{Dir: dir, Name: name, Args: args})

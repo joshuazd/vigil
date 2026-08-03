@@ -1600,11 +1600,11 @@ and in the loop body replace the substitution line:
 		result = result[:start] + sub + result[end+1:]
 ```
 
-Update `hookDefaults` - there is no `dispatch` default today, so add one:
-
-```go
-	"dispatch": "DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}",
-```
+**Do not add a `dispatch` entry to `hookDefaults`.** There is none today, and a machine
+with no dispatch hook configured currently refuses to dispatch. Shipping a default would
+quietly turn that refusal into an attempt to run a `dispatch` script that may not exist -
+an unrelated behaviour change riding along on a queue phase. The README carries the hook to
+copy, as it already does.
 
 - [ ] **Step 4: Add `Request.Detached` and plumb it**
 
@@ -2058,11 +2058,25 @@ func TestPanelShowsTheBadgeAndNoQueueRows(t *testing.T) {
 	}
 }
 
-func TestApplySnapshotStoresTheQueue(t *testing.T) {
+// TestHandleSnapshotStoresTheQueue goes through handleSnapshot, which is where
+// the assignment lives. An earlier draft of this test called applySnapshot,
+// which never touches the queue - it would have passed with the subject
+// deleted, which is the exact defect class this repo has hit ten times.
+func TestHandleSnapshotStoresTheQueue(t *testing.T) {
 	m := newTestModel(t)
-	m.applySnapshot(nil)
-	if m.queue != nil {
-		t.Errorf("queue = %v after a snapshot with none, want nil", m.queue)
+	items := []session.QueueItem{{Kind: session.QueueStory, ID: "1", Title: "x", Input: "sc-1"}}
+
+	next, _ := m.handleSnapshot(SnapshotMsg{Epoch: m.epoch, Local: true, Queue: items, QueueHidden: 2})
+	got := next.(Model)
+
+	if len(got.queue) != 1 {
+		t.Fatalf("queue has %d items, want 1", len(got.queue))
+	}
+	if got.queue[0].ID != "1" {
+		t.Errorf("queue[0].ID = %q, want 1", got.queue[0].ID)
+	}
+	if got.queueHidden != 2 {
+		t.Errorf("queueHidden = %d, want 2", got.queueHidden)
 	}
 }
 ```
@@ -2210,13 +2224,17 @@ In `View`, after the `table :=` line:
 	queueSection := view.RenderQueue(m.queue, m.queueHidden, m.queueCursor(), m.width, time.Now())
 ```
 
-add it to `parts` after `table` (before `jobLine`), and subtract its height when computing `tableHeight` so the footer still pins to the bottom:
+add it to `parts` after `table` (before `jobLine`) only when non-empty, and subtract its height when computing `tableHeight` so the footer still pins to the bottom:
 
 ```go
-	tableHeight := m.tableHeight(jobLine != "") - lipgloss.Height(queueSection)
+	tableHeight := m.tableHeight(jobLine != "")
+	if queueSection != "" {
+		tableHeight -= lipgloss.Height(queueSection)
+	}
+	tableHeight = max(1, tableHeight)
 ```
 
-Guard `tableHeight` at a minimum of 1.
+The emptiness guard is load-bearing: `lipgloss.Height("")` returns **1**, not 0, so an unconditional subtraction would shrink the session table by a row on every machine with an empty queue.
 
 Pass `0` as the new `RenderStatusBar` argument in `View` (the section already reports it) and `len(m.queue)` in `panelView`.
 

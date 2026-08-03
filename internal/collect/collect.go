@@ -2,6 +2,8 @@ package collect
 
 import (
 	"context"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -11,13 +13,15 @@ import (
 )
 
 const (
-	defaultGitWorkers  = 8
-	defaultGitInterval = 3 * time.Second
-	defaultPRInterval  = 30 * time.Second
+	defaultGitWorkers    = 8
+	defaultGitInterval   = 3 * time.Second
+	defaultPRInterval    = 30 * time.Second
+	defaultQueueInterval = 60 * time.Second
+	defaultQueueLimit    = 20
 )
 
 type Collector struct {
-	// These four and clock are read-only once New returns. prPoller.pass reads
+	// These eight and clock are read-only once New returns. prPoller.pass reads
 	// Cmd, PRInterval and clock from its own worker goroutine while Snapshot
 	// runs on another, so a writer after construction is a data race - and one
 	// -race would surface only if a test happened to interleave the two. A
@@ -27,6 +31,12 @@ type Collector struct {
 	GitWorkers  int
 	GitInterval time.Duration
 	PRInterval  time.Duration
+
+	QueueInterval   time.Duration
+	QueuePRQuery    string
+	QueueStoryQuery string
+	QueuePRAgeDays  int
+	QueueLimit      int
 
 	// clock is nil outside tests; see now.
 	clock func() time.Time
@@ -41,6 +51,12 @@ type Collector struct {
 	// prs owns PR data. Snapshot posts its working set and reads it; the
 	// fetching happens on the poller's own worker goroutine.
 	prs *prPoller
+
+	// stories and reviews are nil when queue_enabled is false. Nil rather
+	// than constructed-and-skipped: there is then no code path that can spend
+	// budget by accident.
+	stories *storyPoller
+	reviews *reviewPoller
 
 	// remote schedules prs and, from phase 5 on, its siblings.
 	remote *remote
@@ -64,9 +80,35 @@ func New(cfg *config.Config, cmd fetch.Commander) *Collector {
 	if prInterval <= 0 {
 		prInterval = defaultPRInterval
 	}
-	c := &Collector{Cmd: cmd, GitWorkers: workers, GitInterval: gitInterval, PRInterval: prInterval}
+	queueInterval := cfg.GetSettingDuration("queue_interval")
+	if queueInterval <= 0 {
+		queueInterval = defaultQueueInterval
+	}
+	queueLimit := cfg.GetSettingInt("queue_limit")
+	if queueLimit <= 0 {
+		queueLimit = defaultQueueLimit
+	}
+
+	c := &Collector{
+		Cmd:             cmd,
+		GitWorkers:      workers,
+		GitInterval:     gitInterval,
+		PRInterval:      prInterval,
+		QueueInterval:   queueInterval,
+		QueuePRQuery:    cfg.GetSetting("queue_pr_query"),
+		QueueStoryQuery: cfg.GetSetting("queue_story_query"),
+		QueuePRAgeDays:  cfg.GetSettingInt("queue_pr_age_days"),
+		QueueLimit:      queueLimit,
+	}
 	c.prs = newPRPoller(c)
-	c.remote = newRemote(c.prs)
+
+	pollers := []poller{c.prs}
+	if cfg.GetSettingBool("queue_enabled") {
+		c.stories = newStoryPoller(c)
+		c.reviews = newReviewPoller(c)
+		pollers = append(pollers, c.stories, c.reviews)
+	}
+	c.remote = newRemote(pollers...)
 	return c
 }
 
@@ -209,4 +251,63 @@ func groupByBranchRoot(sessions []*session.Session) []*branchRoot {
 		branches = append(branches, br)
 	}
 	return branches
+}
+
+// Queue merges the two queue stores, drops anything a live tmux session
+// already covers, sorts and caps. hidden is what this call removed, which is
+// the only number vigil can honestly report: the queries filter server-side
+// and vigil cannot see what they dropped.
+//
+// Pure over the stores plus sessions. Snapshot does not call it; the daemon
+// and the self-polling client each call it once per poll, and a daemon-fed
+// client never calls it at all.
+func (c *Collector) Queue(sessions []*session.Session) ([]session.QueueItem, int) {
+	if c.stories == nil && c.reviews == nil {
+		return nil, 0
+	}
+
+	var all []session.QueueItem
+	if c.stories != nil {
+		all = append(all, c.stories.list()...)
+	}
+	if c.reviews != nil {
+		all = append(all, c.reviews.list()...)
+	}
+
+	items := make([]session.QueueItem, 0, len(all))
+	hidden := 0
+	for _, it := range all {
+		if coveredBySession(it, sessions) {
+			hidden++
+			continue
+		}
+		items = append(items, it)
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Kind != items[j].Kind {
+			return items[i].Kind == session.QueueStory
+		}
+		return items[i].UpdatedAt > items[j].UpdatedAt
+	})
+
+	if c.QueueLimit > 0 && len(items) > c.QueueLimit {
+		items = items[:c.QueueLimit]
+	}
+	if len(items) == 0 {
+		return nil, hidden
+	}
+	return items, hidden
+}
+
+func coveredBySession(it session.QueueItem, sessions []*session.Session) bool {
+	for _, s := range sessions {
+		if it.MatchesSessionName(s.Name) {
+			return true
+		}
+		if it.Kind == session.QueueReview && s.PR != nil && strconv.Itoa(s.PR.Number) == it.ID {
+			return true
+		}
+	}
+	return false
 }

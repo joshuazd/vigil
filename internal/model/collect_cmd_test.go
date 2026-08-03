@@ -610,6 +610,25 @@ func countCalls(cmd *fetch.MockCommander, name string) int {
 	return n
 }
 
+// countGhPrCalls and countGhSearchCalls distinguish prPoller's "gh pr view"
+// from reviewPoller's "gh search prs" - both are the "gh" binary, so
+// CallCount("gh") alone cannot tell them apart. Unlike countCalls above,
+// these go through CallCountFunc rather than ranging over cmd.Calls
+// directly: they are read while collect.Collector's remote workers may still
+// be running on their own goroutines, and cmd.Calls is only safe to read
+// under MockCommander's own lock in that case.
+func countGhPrCalls(cmd *fetch.MockCommander) int {
+	return cmd.CallCountFunc(func(c fetch.MockCall) bool {
+		return c.Name == "gh" && len(c.Args) > 0 && c.Args[0] == "pr"
+	})
+}
+
+func countGhSearchCalls(cmd *fetch.MockCommander) int {
+	return cmd.CallCountFunc(func(c fetch.MockCall) bool {
+		return c.Name == "gh" && len(c.Args) > 0 && c.Args[0] == "search"
+	})
+}
+
 // TestStartPollForceReachesInvalidateEndToEnd pins the wiring, not just the
 // primitive: internal/collect's own TestInvalidateForcesARefetchOfGitAndPR
 // proves Collector.Invalidate works, but nothing before this test exercised
@@ -634,7 +653,10 @@ func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 
 	m := newTestModel()
 	m.cmd = cmd
-	m.collector = collect.New(&config.Config{}, cmd)
+	// queue_enabled: false, since this fixture's bare "gh" handler would
+	// otherwise also answer reviewPoller's search and inflate the counts
+	// below, which are about prPoller alone.
+	m.collector = collect.New(&config.Config{Settings: map[string]any{"queue_enabled": "false"}}, cmd)
 
 	ctx := context.Background()
 
@@ -664,6 +686,38 @@ func TestStartPollForceReachesInvalidateEndToEnd(t *testing.T) {
 	m.collector.RefreshRemote(ctx)
 	if got := countCalls(cmd, "gh"); got != 2 {
 		t.Errorf("got %d gh calls after a forced poll, want 2 (force should have made every entry due)", got)
+	}
+}
+
+// TestCollectCmdReturnsThePopulatedQueue is the third of the three
+// deletion-silent sites the whole-branch review named: `queue, hidden :=
+// collector.Queue(sessions)` inside collectCmd. TestStartPollForceReaches
+// InvalidateEndToEnd above builds a fixture of the same shape but sets
+// queue_enabled: "false" to keep prPoller's gh call count isolated from the
+// queue pollers' own gh/short calls - this one needs queue_enabled left at
+// its default (true) instead, which is what actually reaches Collector.Queue.
+func TestCollectCmdReturnsThePopulatedQueue(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.On("gh", `[{"number":34967,"repository":{"name":"portal"},"title":"Timeline tab",
+		"updatedAt":"2026-07-31T18:54:14Z","url":"https://github.com/huntresslabs/portal/pull/34967"}]`, nil)
+	cmd.On("short", `{"data":[]}`, nil)
+
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+
+	m.collector.RefreshRemote(context.Background())
+
+	msg := m.collectCmd(false)()
+	snap, ok := msg.(SnapshotMsg)
+	if !ok {
+		t.Fatalf("collectCmd returned %T, want SnapshotMsg", msg)
+	}
+	if len(snap.Queue) != 1 || snap.Queue[0].ID != "34967" {
+		t.Fatalf("Queue = %+v, want one item with ID 34967", snap.Queue)
 	}
 }
 
@@ -964,7 +1018,10 @@ func TestRefreshKeyReachesInvalidateEndToEnd(t *testing.T) {
 
 	m := newTestModel()
 	m.cmd = cmd
-	m.collector = collect.New(&config.Config{}, cmd)
+	// queue_enabled: false, since this fixture's bare "gh" handler would
+	// otherwise also answer reviewPoller's search and inflate the counts
+	// below, which are about prPoller alone.
+	m.collector = collect.New(&config.Config{Settings: map[string]any{"queue_enabled": "false"}}, cmd)
 
 	ctx := context.Background()
 
@@ -1054,10 +1111,10 @@ func TestNewStartsTheRemoteWorkers(t *testing.T) {
 // Two things give it teeth against exactly that, and both are load-bearing.
 // The self-poll before the daemon attaches is one: the PR store has no working
 // set until a Snapshot tracks one, and a pass over an empty working set spends
-// nothing whether a ticker or a nudge woke it. Zeroing PRInterval is the
-// other: at the default 30s a woken pass would find nothing due and spend
-// nothing either. It is also the real path - a client that loses a daemon
-// self-polls and gets one back.
+// nothing whether a ticker or a nudge woke it. Zeroing PRInterval and
+// QueueInterval is the other: at their defaults (30s, 60s) a woken pass would
+// find nothing due and spend nothing either. Zeroing PRInterval is also the
+// real path - a client that loses a daemon self-polls and gets one back.
 func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 	cmd := fetch.NewMockCommander()
 	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
@@ -1078,6 +1135,11 @@ func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 	m.cmd = cmd
 	m.collector = collect.New(&config.Config{}, cmd)
 	m.collector.PRInterval = 0
+	// Zeroed for the same reason as PRInterval: at the default 60s a woken
+	// storyPoller/reviewPoller pass would find nothing due and spend nothing,
+	// which would let a ticker through undetected on the short assertion
+	// below - begin would say "not due" regardless of who woke it.
+	m.collector.QueueInterval = 0
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1086,25 +1148,41 @@ func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 	if _, err := m.collector.Snapshot(ctx); err != nil {
 		t.Fatalf("the self-polling snapshot failed: %v", err)
 	}
+	// Waits for prPoller's call, reviewPoller's call and storyPoller's call
+	// separately, not just a nonzero gh count: three workers wake off the
+	// same nudge and finish in whatever order the scheduler picks, and gh is
+	// shared by two of them. Without distinguishing prPoller's "gh pr view"
+	// from reviewPoller's "gh search prs", a prior test's warmed nwoCache
+	// (see below) could let prPoller alone spend two gh calls - fetchReviewThreads
+	// would then also run - satisfying a plain CallCount("gh") >= 2 before
+	// reviewPoller ever ran, so the assertions below would pass for the wrong
+	// reason and any real problem would surface as a false "only Snapshot may
+	// wake a poller" failure after the daemon attaches instead.
 	deadline := time.After(3 * time.Second)
-	for cmd.CallCount("gh") == 0 {
+	for countGhPrCalls(cmd) < 1 || countGhSearchCalls(cmd) < 1 || cmd.CallCount("short") < 1 {
 		select {
 		case <-deadline:
-			t.Fatal("the self-polling client never spent a gh call: this fixture cannot detect a ticker")
+			t.Fatalf("the self-polling client never finished: gh pr=%d gh search=%d short=%d, this fixture cannot detect a ticker",
+				countGhPrCalls(cmd), countGhSearchCalls(cmd), cmd.CallCount("short"))
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 	// Hardcoded, not latched off the count so far: fetch.nwoCache is a
 	// package-level sync.Map keyed by git root, shared across every test in
 	// the binary. This fixture's getNWO has no "git remote get-url origin"
-	// handler, so fetchReviewThreads bails before its graphql call and one
-	// gh call is the only one a pass over /repo/alpha can ever spend here -
-	// but only as long as nothing else in the binary warms that cache entry
-	// first. Latching off cmd.CallCount would silently stop catching a
-	// ticker regression the day some other test did.
-	const selfPolled = 1
-	if got := cmd.CallCount("gh"); got != selfPolled {
-		t.Fatalf("got %d gh calls from the self-polling client, want %d", got, selfPolled)
+	// handler, so fetchReviewThreads bails before its graphql call, leaving
+	// prPoller's "gh pr view" and reviewPoller's "gh search prs" as the only
+	// two gh calls a pass over /repo/alpha can ever spend here - but only as
+	// long as nothing else in the binary warms that cache entry first.
+	// Latching off cmd.CallCount would silently stop catching a ticker
+	// regression the day some other test did.
+	const selfPolledGh = 2
+	const selfPolledShort = 1
+	if got := cmd.CallCount("gh"); got != selfPolledGh {
+		t.Fatalf("got %d gh calls from the self-polling client, want %d", got, selfPolledGh)
+	}
+	if got := cmd.CallCount("short"); got != selfPolledShort {
+		t.Fatalf("got %d short calls from the self-polling client, want %d", got, selfPolledShort)
 	}
 
 	m.daemonConn = &fakeConn{}
@@ -1115,7 +1193,10 @@ func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 
 	// CallCount, not countCalls: the workers are live, so a ticker would have
 	// this assertion race the append it exists to catch.
-	if got := cmd.CallCount("gh"); got != selfPolled {
-		t.Errorf("got %d gh calls once a daemon was feeding this client, want %d: only Snapshot may wake a poller", got, selfPolled)
+	if got := cmd.CallCount("gh"); got != selfPolledGh {
+		t.Errorf("got %d gh calls once a daemon was feeding this client, want %d: only Snapshot may wake a poller", got, selfPolledGh)
+	}
+	if got := cmd.CallCount("short"); got != selfPolledShort {
+		t.Errorf("got %d short calls once a daemon was feeding this client, want %d: only Snapshot may wake a poller", got, selfPolledShort)
 	}
 }

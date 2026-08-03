@@ -78,6 +78,14 @@ type Snapshot struct {
 	// version 1. A client that predates it ignores the key, and a client
 	// that expects it sees nil against a daemon that does not send it.
 	Jobs []Job `json:"jobs,omitempty"`
+	// Queue is work waiting to be started: assigned stories and
+	// review-requested PRs, already deduped against live sessions. Additive
+	// for the same reason Jobs is, and Version stays 1.
+	Queue []session.QueueItem `json:"queue,omitempty"`
+	// QueueHidden counts items suppressed because a session already covers
+	// them. Only what vigil itself dropped; the queries filter server-side
+	// and their removals are not visible from here.
+	QueueHidden int `json:"queue_hidden,omitempty"`
 	// DaemonBin is the stamp the daemon took of its own image at startup.
 	// Additive for the same reason Jobs is, but the key is always written:
 	// encoding/json never treats a struct as empty, so omitempty would be a
@@ -134,6 +142,10 @@ type Request struct {
 	ID      string `json:"id"`
 	Input   string `json:"input"`
 	Cwd     string `json:"cwd"`
+	// Detached asks the workflow scripts to skip the teleport. Additive, so
+	// an old daemon ignores it and dispatches attached - degrading to exactly
+	// today's behaviour rather than erroring.
+	Detached bool `json:"detached,omitempty"`
 }
 
 // Job is one dispatch, as the daemon sees it. Status is the last line the job

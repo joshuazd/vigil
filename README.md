@@ -84,6 +84,9 @@ stale_threshold = 86400       # Rebase age warning threshold (seconds, default 2
 notifications_enabled = true  # Toast + hook on session state changes
 auto_cleanup = false          # Auto-cleanup sessions when PR merges
 dispatch_timeout = 300        # Seconds before a running dispatch job is killed
+queue_enabled = true          # Poll for work queue (stories and review-requested PRs)
+queue_interval = 60           # Seconds between queue polls
+queue_limit = 20              # Max items per queue section
 
 [hooks]
 cleanup = "tmux kill-session -t {session} && git worktree remove {path}"
@@ -99,7 +102,7 @@ Actions are shell command templates with `{placeholder}` variables, automaticall
 | Hook | Variables | Default |
 |------|-----------|---------|
 | `cleanup` | `{session}`, `{path}`, `{branch}`, `{git_root}` | Built-in (see below) |
-| `dispatch` | `{input}` | *(none — must be configured)* |
+| `dispatch` | `{input}`, `{flags}` | *(none — must be configured)* |
 | `merge` | `{branch}`, `{git_root}` | `gh pr merge {branch} --squash --delete-branch` |
 | `approve` | `{branch}`, `{git_root}` | `gh pr review {branch} --approve` |
 | `notify` | `{session}`, `{old_state}`, `{new_state}` | `tmux display-message "vigil: {session} → {new_state}"` |
@@ -109,6 +112,17 @@ The built-in cleanup kills the tmux session, then removes the git worktree if th
 The default merge uses `--squash --delete-branch`. Override `[hooks] merge` for a different strategy. Set any hook to `""` to disable it.
 
 Hook bodies must not contain `${VAR}`. A braced shell expansion collides with the `{placeholder}` syntax: `${VAR}` is read as the placeholder `{VAR}`, which is not a known variable, and the hook fails with `unknown placeholder in hook template` before `sh` ever sees it. Use `$VAR` instead. This applies to every hook, not just `dispatch`.
+
+### Work queue settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `queue_enabled` | `true` | Poll for assigned stories and review-requested PRs. `false` constructs no pollers at all. |
+| `queue_pr_query` | `review-requested:@me -is:draft` | Passed to `gh search prs` after `--`, split on whitespace. A qualifier containing a space is not supported. |
+| `queue_pr_age_days` | `14` | Appended as `updated:>=<date>`, recomputed each poll. GitHub search has no relative dates, which is why this is a separate setting rather than part of the query. `0` disables the window. |
+| `queue_story_query` | `owner:%self% !is:done !is:archived` | Passed to `short api /search/stories?query=`. `%self%` is substituted with your Shortcut mention name (looked up via `short api /member` and cached) before the query is sent - `short api` does no templating of its own, unlike `short search`. Names no workflow state on purpose: state names are workspace-specific. |
+| `queue_interval` | `60` | Seconds between queue polls. |
+| `queue_limit` | `20` | Caps each fetch and the merged list. |
 
 ### Dispatch
 
@@ -121,24 +135,26 @@ The hook runs **inside the daemon**, which has no terminal:
 dispatch_timeout = 300        # Seconds before a running dispatch is killed
 
 [hooks]
-dispatch = "DISPATCH_INLINE=1 dispatch --non-interactive {input}"
+dispatch = "DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}"
 ```
+
+> `{flags}` expands to `--detached` when the dispatch came from the work queue and to nothing otherwise. It is the one placeholder vigil does not shell-quote, because it carries a vigil-chosen constant rather than external data. A hook without it still works - queue selections just teleport - and vigil warns at startup.
 
 What that means for the hook you write:
 
 - **No popup, no tty.** A hook that opens `tmux display-popup -E` has no client to draw on and will hang until `dispatch_timeout` kills it. Run the work inline instead. If you use the `dispatch` script from `~/dotfiles`, `DISPATCH_INLINE=1` is what selects that branch, and the older `DISPATCH_IN_POPUP` is gone.
-- **Do not pass `--detached`.** The teleport at the end of a dispatch is the feature; `--detached` skips it, leaving the new session created but unswitched.
+- **Do not hardcode `--detached`.** Use `{flags}` instead: vigil supplies `--detached` itself for queue-originated dispatches, where the user is mid-edit and should not be teleported away. A hook with a literal `--detached` skips the teleport for every dispatch, including ones started by hand from the TUI.
 - **`VIGIL_CLIENT` is exported into the hook.** It names the most recently active tmux client, resolved per job rather than per submission, and is how a client-less daemon can still pick a switch target, a window size, and a panel orientation. It is empty when no client is attached, and a hook must treat that as "nobody is watching" rather than an error.
 - **`dispatch_timeout` (default 300s, `VIGIL_DISPATCH_TIMEOUT`) bounds the job.** On expiry the hook's whole process group is killed, backgrounded grandchildren included, and the job reports the timeout rather than its last output line.
 - **Jobs run one at a time.** Two concurrent `git worktree add` calls in one repository contend on the index lock, so submissions queue; a duplicate of an in-flight input is refused rather than queued.
 
-If your `dispatch` hook still passes `--detached` or still names `DISPATCH_IN_POPUP`, vigil prints a warning at startup naming this section.
+If your `dispatch` hook still passes a literal `--detached` or still names `DISPATCH_IN_POPUP`, vigil prints a warning at startup naming this section. If it is otherwise fine but has no `{flags}` placeholder, vigil warns separately that queue selections will teleport.
 
 ### Environment variable overrides
 
 Environment variables override TOML settings for quick testing:
 
-`VIGIL_TMUX_INTERVAL`, `VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`, `VIGIL_AUTO_CLEANUP`, `VIGIL_AUTO_FOCUS`, `VIGIL_PANEL_AUTO`, `VIGIL_DISPATCH_TIMEOUT`
+`VIGIL_TMUX_INTERVAL`, `VIGIL_GIT_INTERVAL`, `VIGIL_PR_INTERVAL`, `VIGIL_CACHE_TTL`, `VIGIL_LOG_LEVEL`, `VIGIL_GIT_WORKERS`, `VIGIL_CAPTURE_WINDOW`, `VIGIL_STALE_THRESHOLD`, `VIGIL_NOTIFICATIONS`, `VIGIL_AUTO_CLEANUP`, `VIGIL_AUTO_FOCUS`, `VIGIL_PANEL_AUTO`, `VIGIL_DISPATCH_TIMEOUT`, `VIGIL_QUEUE_ENABLED`, `VIGIL_QUEUE_PR_QUERY`, `VIGIL_QUEUE_PR_AGE_DAYS`, `VIGIL_QUEUE_STORY_QUERY`, `VIGIL_QUEUE_INTERVAL`, `VIGIL_QUEUE_LIMIT`
 
 ## Development
 

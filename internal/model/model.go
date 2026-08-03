@@ -50,6 +50,11 @@ type Model struct {
 	sessions []*session.Session
 	prCache  map[string]*session.PRStatus
 
+	// queue is work waiting to be started: assigned stories and
+	// review-requested PRs. Populated on both paths by handleSnapshot.
+	queue       []session.QueueItem
+	queueHidden int
+
 	// reviewComments caches review comment bodies fetched on demand, keyed by
 	// branch, the way pane capture already works: only the detail panel's
 	// comments mode reads them, and only for the selected session.
@@ -517,16 +522,35 @@ func (m Model) View() string {
 		return m.panelView()
 	}
 
-	// Status bar
-	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth())
-
 	notif := m.activeNotification()
 
 	// Table
 	visible := m.visibleSessions()
 	jobLine := view.RenderJobLine(m.jobs, m.width)
 	tableHeight := m.tableHeight(jobLine != "")
+
+	// queueRowBudget is the single source of truth for how much of the queue
+	// fits: rowCount (via drawnQueueRows) must land on exactly the same
+	// maxRows, or the cursor can reach a row this never draws.
+	var queueSection string
+	if maxRows, ok := m.queueRowBudget(tableHeight); ok && len(m.queue) > 0 {
+		queueSection = view.RenderQueue(m.queue, m.queueHidden, m.queueCursor(), m.width, maxRows, time.Now())
+	}
+	if queueSection != "" {
+		tableHeight -= lipgloss.Height(queueSection)
+	}
+	tableHeight = max(1, tableHeight)
 	staleThreshold := m.cfg.GetSettingInt("stale_threshold")
+
+	// Status bar. The badge is 0 when the QUEUE section itself is on screen -
+	// its own header already carries the count - and surfaces len(m.queue)
+	// only when the terminal has no room to draw the section at all, which
+	// would otherwise look identical to an empty queue.
+	queueBadge := 0
+	if queueSection == "" && len(m.queue) > 0 {
+		queueBadge = len(m.queue)
+	}
+	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth(), queueBadge)
 	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight, notif)
 
 	// Detail panel
@@ -553,6 +577,9 @@ func (m Model) View() string {
 
 	// Compose — pin footer to bottom by padding with blank lines
 	parts := []string{statusBar, table}
+	if queueSection != "" {
+		parts = append(parts, queueSection)
+	}
 	if jobLine != "" {
 		parts = append(parts, jobLine)
 	}
@@ -589,7 +616,7 @@ func (m Model) panelView() string {
 	if jobLine != "" {
 		rows = max(1, m.height-2)
 	}
-	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth())
+	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth(), len(m.queue))
 	table := view.RenderTable(
 		m.visibleSessions(),
 		m.cursor,
@@ -638,18 +665,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Down):
 		m.lastManualNav = time.Now()
-		visible := m.visibleSessions()
-		if len(visible) > 0 {
-			m.cursor = (m.cursor + 1) % len(visible)
+		if n := m.rowCount(); n > 0 {
+			m.cursor = (m.cursor + 1) % n
 		}
 		m.resetDetailModeIfSessionChanged()
 		return m, m.refreshDetailCmd()
 
 	case key.Matches(msg, keys.Up):
 		m.lastManualNav = time.Now()
-		visible := m.visibleSessions()
-		if len(visible) > 0 {
-			m.cursor = (m.cursor - 1 + len(visible)) % len(visible)
+		if n := m.rowCount(); n > 0 {
+			m.cursor = (m.cursor - 1 + n) % n
 		}
 		m.resetDetailModeIfSessionChanged()
 		return m, m.refreshDetailCmd()
@@ -739,9 +764,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selected[s.Name] = true
 			}
 			// Move cursor down
-			visible := m.visibleSessions()
-			if len(visible) > 0 {
-				m.cursor = (m.cursor + 1) % len(visible)
+			if n := m.rowCount(); n > 0 {
+				m.cursor = (m.cursor + 1) % n
 			}
 		}
 		return m, nil
@@ -784,7 +808,7 @@ func (m Model) handleDispatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		input := m.dispatchInput.Value()
 		m.dispatchActive = false
 		m.dispatchInput.SetValue("")
-		return m, m.dispatchCmd(input)
+		return m, m.dispatchCmd(input, false)
 	case tea.KeyEsc:
 		m.dispatchActive = false
 		m.dispatchInput.SetValue("")
@@ -808,6 +832,9 @@ func (m Model) exitsAfterAction() bool {
 }
 
 func (m Model) handleSelect() (tea.Model, tea.Cmd) {
+	if input, detached, ok := m.queueDispatchTarget(); ok {
+		return m, m.dispatchCmd(input, detached)
+	}
 	s := m.selectedSession()
 	if s == nil {
 		return m, nil
@@ -1002,11 +1029,23 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		}
 
 		// A failed poll carries no sessions. Leave state alone rather than
-		// blanking the table.
+		// blanking the table - the queue included, since collectCmd only
+		// populates Queue on the same successful call that populates
+		// Sessions, so a nil Sessions means a nil Queue that must not
+		// overwrite what is already on screen.
+		// Jobs is assigned before applySnapshot for the same reason Queue is
+		// below: applySnapshot's cursor clamp reads drawnQueueRows, which
+		// depends on m.jobs, and must see the job set this snapshot settles
+		// on rather than the previous tick's.
+		m.jobs = msg.Jobs
 		if msg.Sessions != nil {
+			// Queue is assigned before applySnapshot so its cursor clamp sees
+			// the row count both sides of the snapshot actually settle on,
+			// not the queue length from before this poll.
+			m.queue = msg.Queue
+			m.queueHidden = msg.QueueHidden
 			m.applySnapshot(msg.Sessions)
 		}
-		m.jobs = msg.Jobs
 		m.daemonBin = msg.DaemonBin
 		m.checkStateTransitions()
 		var cmds []tea.Cmd
@@ -1034,8 +1073,10 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		m.daemonReady = true
 	}
 	m.lastSnapshot = time.Now()
-	m.applySnapshot(msg.Sessions)
+	m.queue = msg.Queue
+	m.queueHidden = msg.QueueHidden
 	m.jobs = msg.Jobs
+	m.applySnapshot(msg.Sessions)
 	m.daemonBin = msg.DaemonBin
 
 	m.checkStateTransitions()
@@ -1055,6 +1096,14 @@ func (m *Model) applySnapshot(sessions []*session.Session) {
 	m.warmCaches()
 	session.SortSessions(m.sessions, m.sortMode)
 	m.placeCursor()
+	// A session leaving between polls (auto_cleanup, most often) can leave
+	// the cursor pointing past the end of the new session+queue space. Left
+	// alone, enter would dispatch whatever queue row the cursor's old
+	// absolute position now happens to land on - never confirmed, unlike
+	// every session action a stale cursor could otherwise mis-target.
+	if n := m.rowCount(); n > 0 && m.cursor >= n {
+		m.cursor = n - 1
+	}
 
 	if m.cachePath == "" {
 		return
@@ -1362,7 +1411,7 @@ func (m Model) toggleDraftCmd(s *session.Session) tea.Cmd {
 	}
 }
 
-func (m Model) dispatchCmd(input string) tea.Cmd {
+func (m Model) dispatchCmd(input string, detached bool) tea.Cmd {
 	// Only a plain string is captured here. Resolving it into a cwd runs
 	// fetch.MainWorktree - a git subprocess under ExecCommander's 10s default
 	// timeout - and that has to happen inside the returned tea.Cmd, off the
@@ -1380,6 +1429,7 @@ func (m Model) dispatchCmd(input string) tea.Cmd {
 			SocketPath: protocol.SocketPath(),
 			Spawn:      spawnDaemon,
 			AckTimeout: dispatch.DefaultAckTimeout,
+			Detached:   detached,
 		}); err != nil {
 			return ActionResultMsg{Action: "dispatch", OK: false, Message: err.Error()}
 		}
@@ -1593,6 +1643,80 @@ func (m Model) visibleSessions() []*session.Session {
 		}
 	}
 	return filtered
+}
+
+// rowCount is the number of selectable rows: sessions first, then queue
+// items. The cursor indexes this space, and selectedSession's existing bounds
+// check against visibleSessions is what makes every session action a no-op on
+// a queue row - no new guard, and batchSessions cannot reach one at all.
+//
+// panelView never renders queue rows (the design rejected rows below the
+// fold: they either displace sessions or are invisible), so the cursor must
+// not be able to reach them there either - a panel visitor would otherwise
+// see the highlight vanish for two presses and enter would fire a detached
+// dispatch of an item they cannot see. The dashboard has the same problem in
+// miniature: View() truncates the queue section to what fits, so the cursor
+// space stops at drawnQueueRows rather than len(m.queue) - a cursor past that
+// point would highlight nothing and let enter dispatch an item never shown.
+func (m Model) rowCount() int {
+	if m.panelMode {
+		return len(m.visibleSessions())
+	}
+	return len(m.visibleSessions()) + m.drawnQueueRows()
+}
+
+// queueRowBudget turns the table-height budget into the maxRows argument
+// view.RenderQueue expects, and whether the queue section fits at all.
+// View and drawnQueueRows both go through this so the section actually drawn
+// and the cursor's ceiling can never drift apart - tableHeight must be
+// whatever the caller already computed via m.tableHeight, since the table
+// keeps minTableRows for itself before the queue gets any of what is left.
+func (m Model) queueRowBudget(tableHeight int) (maxRows int, ok bool) {
+	const minTableRows = 3
+	budget := tableHeight - minTableRows
+	if budget < 2 {
+		return 0, false
+	}
+	return budget - 1, true
+}
+
+// drawnQueueRows is how many queue items View actually renders as selectable
+// rows - it excludes the header and the "... +N more" summary line, matching
+// view.QueueRowsShown so this can never disagree with what RenderQueue draws.
+// Zero in panel mode, when the queue is empty, and whenever the terminal has
+// no room to show the section at all.
+func (m Model) drawnQueueRows() int {
+	if m.panelMode || len(m.queue) == 0 {
+		return 0
+	}
+	jobLine := view.RenderJobLine(m.jobs, m.width)
+	maxRows, ok := m.queueRowBudget(m.tableHeight(jobLine != ""))
+	if !ok {
+		return 0
+	}
+	return view.QueueRowsShown(len(m.queue), maxRows)
+}
+
+// queueCursor is the cursor's index into m.queue, or -1 when it is on a
+// session row or this is a panel, which never shows queue rows at all.
+func (m Model) queueCursor() int {
+	if m.panelMode {
+		return -1
+	}
+	i := m.cursor - len(m.visibleSessions())
+	if i < 0 || i >= len(m.queue) {
+		return -1
+	}
+	return i
+}
+
+// queueDispatchTarget reports what enter should dispatch, if anything.
+func (m Model) queueDispatchTarget() (input string, detached bool, ok bool) {
+	i := m.queueCursor()
+	if i < 0 || i >= m.drawnQueueRows() {
+		return "", false, false
+	}
+	return m.queue[i].Input, true, true
 }
 
 func (m Model) selectedSession() *session.Session {

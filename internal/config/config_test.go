@@ -129,6 +129,42 @@ func TestExpandUnknownPlaceholderErrors(t *testing.T) {
 	}
 }
 
+// TestExpandHookLeavesFlagsUnquoted pins the one placeholder that skips
+// shellQuote. Quoted, an empty {flags} becomes an empty quoted argument and
+// passes a stray argument to the hook.
+func TestExpandHookLeavesFlagsUnquoted(t *testing.T) {
+	tmpl := "dispatch --non-interactive {flags} {input}"
+
+	got, err := ExpandHook(tmpl, map[string]string{"flags": "--detached", "input": "sc-1"})
+	if err != nil {
+		t.Fatalf("ExpandHook: %v", err)
+	}
+	if !strings.Contains(got, " --detached ") {
+		t.Errorf("expanded = %q, want an unquoted --detached", got)
+	}
+
+	empty, err := ExpandHook(tmpl, map[string]string{"flags": "", "input": "sc-1"})
+	if err != nil {
+		t.Fatalf("ExpandHook: %v", err)
+	}
+	if strings.Contains(empty, "''") {
+		t.Errorf("expanded = %q, want no empty quoted argument", empty)
+	}
+}
+
+// TestExpandHookStillQuotesEverythingElse is the safety half. {flags} is safe
+// unquoted because vigil chooses it from two constants; every other
+// placeholder carries a value from tmux, git, gh or the user.
+func TestExpandHookStillQuotesEverythingElse(t *testing.T) {
+	got, err := ExpandHook("dispatch {input}", map[string]string{"input": "; rm -rf /"})
+	if err != nil {
+		t.Fatalf("ExpandHook: %v", err)
+	}
+	if !strings.Contains(got, `'; rm -rf /'`) {
+		t.Errorf("expanded = %q, want the input shell-quoted", got)
+	}
+}
+
 // --- GetSetting tests ---
 
 func TestGetSettingDefault(t *testing.T) {
@@ -417,6 +453,26 @@ func TestDispatchTimeoutDefaultsTo300s(t *testing.T) {
 	}
 	if !IsSetting("dispatch_timeout") {
 		t.Error("dispatch_timeout is not a known setting")
+	}
+}
+
+func TestQueueSettingDefaults(t *testing.T) {
+	cfg := &Config{}
+	tests := []struct{ key, want string }{
+		{"queue_enabled", "true"},
+		{"queue_pr_query", "review-requested:@me -is:draft"},
+		{"queue_pr_age_days", "14"},
+		{"queue_story_query", "owner:%self% !is:done !is:archived"},
+		{"queue_interval", "60"},
+		{"queue_limit", "20"},
+	}
+	for _, tt := range tests {
+		if got := cfg.GetSetting(tt.key); got != tt.want {
+			t.Errorf("GetSetting(%q) = %q, want %q", tt.key, got, tt.want)
+		}
+		if !IsSetting(tt.key) {
+			t.Errorf("IsSetting(%q) = false, want true", tt.key)
+		}
 	}
 }
 

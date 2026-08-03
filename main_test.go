@@ -169,10 +169,12 @@ func TestDispatchParsesAsItsOwnCommand(t *testing.T) {
 }
 
 // The hook the design specifies is DISPATCH_INLINE=1 dispatch
-// --non-interactive {input}. A hook that still passes --detached skips the
-// teleport that is the whole point of a dispatch, and one still keyed on
-// DISPATCH_IN_POPUP runs tmux display-popup -E from a daemon with no client,
-// which cannot draw. Neither says anything on the way past, so vigil does.
+// --non-interactive {flags} {input}. A hook that still passes --detached
+// skips the teleport that is the whole point of a dispatch, and one still
+// keyed on DISPATCH_IN_POPUP runs tmux display-popup -E from a daemon with no
+// client, which cannot draw. Neither says anything on the way past, so vigil
+// does - and names the hook with {flags}, not the pre-queue one, so a user
+// who migrates off this warning is not immediately told to migrate again.
 func TestAnUnmigratedDispatchHookIsWarnedAbout(t *testing.T) {
 	for _, hook := range []string{
 		"dispatch --detached --non-interactive {input}",
@@ -181,20 +183,37 @@ func TestAnUnmigratedDispatchHookIsWarnedAbout(t *testing.T) {
 		cfg := &config.Config{Hooks: map[string]any{"dispatch": hook}}
 		var stderr bytes.Buffer
 		warnAboutAnUnmigratedDispatchHook(cfg, &stderr)
-		if !strings.Contains(stderr.String(), "DISPATCH_INLINE=1 dispatch --non-interactive {input}") {
+		if !strings.Contains(stderr.String(), "DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}") {
 			t.Errorf("hook %q got %q, want the migrated hook named", hook, stderr.String())
 		}
 	}
 }
 
+// TestAMigratedDispatchHookIsNotWarnedAbout pins the fully-migrated hook -
+// DISPATCH_INLINE, no --detached, and {flags} - against both warnings this
+// function can emit: neither the phase-4 stale-flag check nor the {flags}
+// check added in this task has anything to say about it.
 func TestAMigratedDispatchHookIsNotWarnedAbout(t *testing.T) {
 	cfg := &config.Config{Hooks: map[string]any{
-		"dispatch": "DISPATCH_INLINE=1 dispatch --non-interactive {input}",
+		"dispatch": "DISPATCH_INLINE=1 dispatch --non-interactive {flags} {input}",
 	}}
 	var stderr bytes.Buffer
 	warnAboutAnUnmigratedDispatchHook(cfg, &stderr)
 	if stderr.String() != "" {
 		t.Errorf("got %q, want silence", stderr.String())
+	}
+}
+
+func TestWarnsWhenTheDispatchHookHasNoFlagsPlaceholder(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := &config.Config{Hooks: map[string]any{
+		"dispatch": "DISPATCH_INLINE=1 dispatch --non-interactive {input}",
+	}}
+
+	warnAboutAnUnmigratedDispatchHook(cfg, &buf)
+
+	if !strings.Contains(buf.String(), "{flags}") {
+		t.Errorf("stderr = %q, want a warning naming {flags}", buf.String())
 	}
 }
 
@@ -321,4 +340,16 @@ func TestRestartIfRequestedIgnoresANonModel(t *testing.T) {
 // production while every test above keeps passing against the fake.
 func TestTheRealModelSatisfiesRestartRequester(t *testing.T) {
 	var _ restartRequester = model.Model{}
+}
+
+// TestShortIsNotAStartupDependency pins the deliberate asymmetry: vigil must
+// keep working for anyone without Shortcut installed. A missing short leaves
+// the story half of the queue empty, which is a degraded feature; adding it to
+// this list would make it a refusal to start.
+func TestShortIsNotAStartupDependency(t *testing.T) {
+	for _, dep := range startupDependencies {
+		if dep == "short" {
+			t.Fatal("short must not be a startup dependency: vigil has to run without Shortcut")
+		}
+	}
 }

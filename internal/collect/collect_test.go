@@ -130,7 +130,7 @@ func TestSnapshotDeduplicatesPRFetchesByBranchAndGitRoot(t *testing.T) {
 	}
 	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
 
-	c := New(&config.Config{}, cmd)
+	c := New(noQueueConfig(), cmd)
 	ctx := context.Background()
 	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("first Snapshot: %v", err)
@@ -183,6 +183,14 @@ func singleBranchCommander() *fetch.MockCommander {
 	return cmd
 }
 
+// noQueueConfig disables the queue pollers so a bare cmd.On("gh", ...)
+// fixture, matching every gh invocation, is not also answering
+// reviewPoller's "gh search prs" and inflating a gh call count these tests
+// assert exactly.
+func noQueueConfig() *config.Config {
+	return &config.Config{Settings: map[string]any{"queue_enabled": "false"}}
+}
+
 func countGhCalls(cmd *fetch.MockCommander) int {
 	n := 0
 	for _, call := range cmd.Calls {
@@ -198,7 +206,7 @@ func TestSnapshotSkipsPRFetchWithinPRInterval(t *testing.T) {
 	cmd.On("gh", `{"number": 42, "state": "MERGED"}`, nil)
 
 	ctx := context.Background()
-	c := New(&config.Config{}, cmd)
+	c := New(noQueueConfig(), cmd)
 	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("first Snapshot: %v", err)
 	}
@@ -229,7 +237,7 @@ func TestSnapshotRefetchesPRAfterPRInterval(t *testing.T) {
 	cmd.On("gh", `{"number": 42, "state": "MERGED"}`, nil)
 
 	now := time.Unix(1700000000, 0)
-	c := New(&config.Config{}, cmd)
+	c := New(noQueueConfig(), cmd)
 	c.clock = func() time.Time { return now }
 
 	ctx := context.Background()
@@ -361,7 +369,7 @@ func TestInvalidateForcesARefetchOfGitAndPR(t *testing.T) {
 	cmd.On("gh", `{"number": 42, "state": "MERGED"}`, nil)
 
 	ctx := context.Background()
-	c := New(&config.Config{}, cmd)
+	c := New(noQueueConfig(), cmd)
 	if _, err := c.Snapshot(ctx); err != nil {
 		t.Fatalf("first Snapshot: %v", err)
 	}

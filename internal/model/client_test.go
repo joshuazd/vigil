@@ -234,6 +234,38 @@ func TestListenDaemonEmitsSnapshotMsg(t *testing.T) {
 	}
 }
 
+// TestListenDaemonCarriesTheQueue pins the third of the three deletion-silent
+// sites the whole-branch review found: `Queue: snap.Queue, QueueHidden:
+// snap.QueueHidden` in listenDaemonCmd's SnapshotMsg literal. Model-level
+// tests that build a SnapshotMsg by hand (TestHandleSnapshotStoresTheQueue
+// and its daemon-fed sibling) never exercise this line at all, since they
+// skip decoding a protocol.Snapshot entirely - only a test that goes through
+// the decoder, like this one, can catch it.
+func TestListenDaemonCarriesTheQueue(t *testing.T) {
+	conn := serveOneSnapshot(t, &protocol.Snapshot{
+		Version:  protocol.Version,
+		Sessions: []*session.Session{{Name: "alpha"}},
+		Queue: []session.QueueItem{
+			{Kind: session.QueueStory, ID: "223480", Title: "Backfill", Input: "sc-223480"},
+		},
+		QueueHidden: 2,
+	})
+
+	cmd := fetch.NewMockCommander()
+	msg := listenDaemonCmd(protocol.NewDecoder(conn), context.Background(), cmd, "", 0)()
+	snap, ok := msg.(SnapshotMsg)
+	if !ok {
+		t.Fatalf("got %T, want SnapshotMsg", msg)
+	}
+
+	if len(snap.Queue) != 1 || snap.Queue[0].ID != "223480" {
+		t.Fatalf("Queue = %+v, want one item with ID 223480", snap.Queue)
+	}
+	if snap.QueueHidden != 2 {
+		t.Errorf("QueueHidden = %d, want 2", snap.QueueHidden)
+	}
+}
+
 func TestListenDaemonResolvesPerClientFlags(t *testing.T) {
 	conn := serveOneSnapshot(t, &protocol.Snapshot{
 		Version: protocol.Version,

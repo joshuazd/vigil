@@ -418,6 +418,50 @@ func TestTheJobHookReceivesTheClientAndTheCwd(t *testing.T) {
 	}
 }
 
+// TestDetachedJobPassesTheFlag and its sibling are what stop the daemon
+// silently teleporting a queue selection.
+func TestDetachedJobPassesTheFlag(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		detached bool
+		want     string
+	}{
+		{"detached", true, "--detached"},
+		{"attached", false, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := newRecordingStream()
+			cfg := &config.Config{Hooks: map[string]any{
+				"dispatch": "echo {flags} {input}",
+			}}
+			j := newJobs(cfg, stream, fetch.NewMockCommander(), func(string, ...any) {})
+
+			j.submit(&protocol.Request{
+				Version:  protocol.Version,
+				Type:     protocol.RequestDispatch,
+				ID:       "job1",
+				Input:    "sc-1",
+				Detached: tt.detached,
+			})
+			j.run(context.Background(), "job1")
+
+			script := stream.lastScript()
+			if tt.want == "" {
+				if !strings.Contains(script, "sc-1") {
+					t.Errorf("script = %q, want it to contain the input", script)
+				}
+				if strings.Contains(script, "--detached") {
+					t.Errorf("script = %q, want no --detached", script)
+				}
+				return
+			}
+			if !strings.Contains(script, tt.want) {
+				t.Errorf("script = %q, want it to contain %q", script, tt.want)
+			}
+		})
+	}
+}
+
 func TestNoAttachedClientMeansAnEmptyVigilClient(t *testing.T) {
 	stream := &recordingStream{released: make(chan struct{})}
 	close(stream.released)
@@ -498,16 +542,38 @@ type recordingStream struct {
 	mu       sync.Mutex
 	dir      string
 	env      []string
+	args     []string
 	released chan struct{}
+}
+
+// newRecordingStream returns a stream whose RunStream returns immediately,
+// for tests that call run synchronously rather than through work's goroutine.
+func newRecordingStream() *recordingStream {
+	stream := &recordingStream{released: make(chan struct{})}
+	close(stream.released)
+	return stream
 }
 
 func (r *recordingStream) RunStream(ctx context.Context, dir string, env []string, name string, args []string, onLine func(string)) error {
 	r.mu.Lock()
 	r.dir = dir
 	r.env = append([]string(nil), env...)
+	r.args = append([]string(nil), args...)
 	r.mu.Unlock()
 	<-r.released
 	return nil
+}
+
+// lastScript returns the shell script body from the most recent RunStream
+// call. hookArgv builds ["sh", "-c", "exec 2>&1; <hook>"], so the script is
+// the final argv element.
+func (r *recordingStream) lastScript() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.args) == 0 {
+		return ""
+	}
+	return r.args[len(r.args)-1]
 }
 
 func containsEnv(env []string, want string) bool {
