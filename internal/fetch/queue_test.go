@@ -10,14 +10,18 @@ import (
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
+// The author block matches real gh output, which nests the login under an
+// object alongside id/type/url rather than returning a bare string.
 const ghSearchOutput = `[
   {"number":34967,"repository":{"name":"portal","nameWithOwner":"huntresslabs/portal"},
    "title":"Partner facing incident report Timeline tab",
    "updatedAt":"2026-07-31T18:54:14Z",
+   "author":{"id":"MDQ6VXNlcjkxMTU1NTE2","is_bot":false,"login":"octocat","type":"User"},
    "url":"https://github.com/huntresslabs/portal/pull/34967"},
   {"number":205,"repository":{"name":"soc-workflows","nameWithOwner":"huntresslabs/soc-workflows"},
    "title":"Resurrect test_variety_of_tasks",
    "updatedAt":"2026-07-09T10:00:00Z",
+   "author":{"id":"MDQ6VXNlcjEyMw==","is_bot":false,"login":"contributor-xyz","type":"User"},
    "url":"https://github.com/huntresslabs/soc-workflows/pull/205"}
 ]`
 
@@ -40,6 +44,7 @@ func TestSearchReviewRequestsParsesItems(t *testing.T) {
 		Title:     "Partner facing incident report Timeline tab",
 		Input:     "https://github.com/huntresslabs/portal/pull/34967",
 		Repo:      "portal",
+		Author:    "octocat",
 		UpdatedAt: time.Date(2026, 7, 31, 18, 54, 14, 0, time.UTC).Unix(),
 	}
 	if items[0] != want {
@@ -362,5 +367,46 @@ func TestSearchStoriesReturnsErrorOnFailure(t *testing.T) {
 
 	if _, err := SearchStories(context.Background(), cmd, "owner:someone", 20); err == nil {
 		t.Fatal("want an error when short fails, got nil")
+	}
+}
+
+// TestSearchReviewRequestsCapturesTheAuthor pins that the PR author reaches
+// the queue item. Two halves, because either alone is weak: the argv must
+// actually request the field, and the response must be mapped onto Author.
+// Requesting it without mapping renders every row blank; mapping without
+// requesting it makes gh omit the key and yields the same blank.
+func TestSearchReviewRequestsCapturesTheAuthor(t *testing.T) {
+	cmd := NewMockCommander()
+	cmd.On("gh", ghSearchOutput, nil)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+
+	items, err := SearchReviewRequests(context.Background(), cmd, "review-requested:@me", 14, 20, now)
+	if err != nil {
+		t.Fatalf("SearchReviewRequests: %v", err)
+	}
+	if items[0].Author != "octocat" {
+		t.Errorf("items[0].Author = %q, want octocat", items[0].Author)
+	}
+
+	joined := strings.Join(cmd.Calls[0].Args, " ")
+	if !strings.Contains(joined, "author") {
+		t.Errorf("argv does not request the author field: %v", cmd.Calls[0].Args)
+	}
+}
+
+// TestSearchStoriesLeavesAuthorEmpty is the negative half. Shortcut's search
+// carries a requester, but resolving it costs another lookup per story and
+// the queue's author column exists to answer "whose PR am I reviewing".
+// Stories therefore render a blank author on purpose.
+func TestSearchStoriesLeavesAuthorEmpty(t *testing.T) {
+	cmd := NewMockCommander()
+	cmd.On("short", shortAPIOutput, nil)
+
+	items, err := SearchStories(context.Background(), cmd, "owner:someone", 20)
+	if err != nil {
+		t.Fatalf("SearchStories: %v", err)
+	}
+	if items[0].Author != "" {
+		t.Errorf("items[0].Author = %q, want empty", items[0].Author)
 	}
 }

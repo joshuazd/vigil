@@ -85,7 +85,7 @@ func SearchReviewRequests(ctx context.Context, cmd Commander, query string, ageD
 		"search", "prs",
 		"--state=open",
 		"--limit", strconv.Itoa(limit),
-		"--json", "number,repository,title,url,updatedAt",
+		"--json", "number,repository,title,url,updatedAt,author",
 		"--",
 	}
 	args = append(args, strings.Fields(query)...)
@@ -106,6 +106,9 @@ func SearchReviewRequests(ctx context.Context, cmd Commander, query string, ageD
 		Repository struct {
 			Name string `json:"name"`
 		} `json:"repository"`
+		Author struct {
+			Login string `json:"login"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		return nil, fmt.Errorf("parsing gh search prs output: %w", err)
@@ -119,6 +122,7 @@ func SearchReviewRequests(ctx context.Context, cmd Commander, query string, ageD
 			Title:     r.Title,
 			Input:     r.URL,
 			Repo:      r.Repository.Name,
+			Author:    r.Author.Login,
 			UpdatedAt: parseTimestamp(r.UpdatedAt),
 		})
 	}

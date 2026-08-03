@@ -126,9 +126,21 @@ func renderPane(b *strings.Builder, paneContent string, maxLines int, width int)
 	}
 }
 
-// truncateVisible truncates a string (which may contain ANSI escapes) to maxW visible characters,
-// appending "…" if truncated.
+// truncateVisible truncates a string (which may contain ANSI escapes) to maxW
+// visible characters, appending "…" if truncated.
+//
+// The result never exceeds maxW cells, ellipsis included. It used to cut at
+// maxW and then append, so a truncated string was maxW+1 and every caller
+// padding to maxW overflowed its column by one - which is how a queue row
+// could run past the width it was handed.
 func truncateVisible(s string, maxW int) string {
+	// Guard first: a string that already fits is returned untouched, or a
+	// value of exactly maxW would be cut to make room for an ellipsis it
+	// does not need.
+	if visibleLen(s) <= maxW {
+		return s
+	}
+
 	visible := 0
 	inEscape := false
 	for i := 0; i < len(s); i++ {
@@ -148,7 +160,10 @@ func truncateVisible(s string, maxW int) string {
 			continue // UTF-8 continuation byte
 		}
 		visible++
-		if visible >= maxW {
+		// maxW-1, not maxW: the "…" appended below occupies the last cell, so
+		// stopping at maxW returned maxW+1 cells and every caller that padded
+		// to maxW overflowed its column by one.
+		if visible >= maxW-1 {
 			// Skip past remaining bytes of this UTF-8 character
 			end := i + 1
 			for end < len(s) && s[end] >= 0x80 && s[end] < 0xC0 {
