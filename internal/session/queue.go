@@ -20,6 +20,11 @@ type QueueItem struct {
 	Input     string `json:"input"`
 	Repo      string `json:"repo,omitempty"`
 	UpdatedAt int64  `json:"updated_at"`
+
+	// Author is the PR's author login, so a review row says whose work it is.
+	// Empty for stories: Shortcut carries a requester, but resolving it costs
+	// a lookup per story and the column exists to answer "whose PR is this".
+	Author string `json:"author,omitempty"`
 }
 
 // Label is the id column. Repo-qualified for reviews because

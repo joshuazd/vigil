@@ -12,6 +12,15 @@ import (
 // pathological repo name from eating the title.
 const queueLabelWidth = 20
 
+// queueAuthorWidth caps the author column. The longest login seen in real
+// data is 15; GitHub allows 39, so this truncates rather than stretching.
+const queueAuthorWidth = 16
+
+// queueAuthorMinTitle is the title width below which the author column is
+// dropped for the whole section. A narrow queue is worth more as titles than
+// as logins, and dropping the column is how this degrades instead of wrapping.
+const queueAuthorMinTitle = 24
+
 // QueueRowsShown returns how many of itemCount items RenderQueue draws as
 // item rows once capped at maxRows - the header and the "... +N more" line
 // are not counted. Model.drawnQueueRows calls this too, which is what keeps
@@ -62,6 +71,26 @@ func RenderQueue(items []session.QueueItem, hidden, cursor, width, maxRows int, 
 		overflow = len(items) - n
 	}
 
+	// Both of these are decided once for the whole section rather than per
+	// row. Age width varies by row, so a per-row decision would put the
+	// author column on some rows and not others and slide the title with it.
+	ageWidth := 0
+	for _, it := range shown {
+		if n := len(queueAge(it.UpdatedAt, now)); n > ageWidth {
+			ageWidth = n
+		}
+	}
+	fixed := 2 + queueLabelWidth + 2 + ageWidth + 1
+	showAuthor := width-fixed-queueAuthorWidth-2 >= queueAuthorMinTitle
+
+	titleWidth := width - fixed
+	if showAuthor {
+		titleWidth -= queueAuthorWidth + 2
+	}
+	if titleWidth < 1 {
+		titleWidth = 1
+	}
+
 	for i, it := range shown {
 		marker := "  "
 		if i == cursor {
@@ -70,13 +99,11 @@ func RenderQueue(items []session.QueueItem, hidden, cursor, width, maxRows int, 
 		label := truncateVisible(it.Label(), queueLabelWidth)
 		age := queueAge(it.UpdatedAt, now)
 
-		fixed := len(marker) + queueLabelWidth + 2 + len(age) + 1
-		titleWidth := width - fixed
-		if titleWidth < 1 {
-			titleWidth = 1
+		row := fmt.Sprintf("%s%-*s  ", marker, queueLabelWidth, label)
+		if showAuthor {
+			row += fmt.Sprintf("%-*s  ", queueAuthorWidth, truncateVisible(it.Author, queueAuthorWidth))
 		}
-		row := fmt.Sprintf("%s%-*s  %-*s %s",
-			marker, queueLabelWidth, label, titleWidth, truncateVisible(it.Title, titleWidth), age)
+		row += fmt.Sprintf("%-*s %*s", titleWidth, truncateVisible(it.Title, titleWidth), ageWidth, age)
 
 		if i == cursor {
 			row = CursorStyle.Render(row)

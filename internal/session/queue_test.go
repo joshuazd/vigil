@@ -1,6 +1,28 @@
 package session
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+// TestQueueItemAuthorSurvivesTheWire pins Author against the JSON round trip
+// the protocol puts it through. A missing tag would mean a daemon-fed client
+// renders a blank author while a self-polling one renders it, and the two
+// paths are required to render identically.
+func TestQueueItemAuthorSurvivesTheWire(t *testing.T) {
+	in := QueueItem{Kind: QueueReview, ID: "34967", Repo: "portal", Author: "octocat"}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var out QueueItem
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.Author != "octocat" {
+		t.Errorf("Author = %q, want octocat", out.Author)
+	}
+}
 
 func TestQueueItemLabel(t *testing.T) {
 	tests := []struct {

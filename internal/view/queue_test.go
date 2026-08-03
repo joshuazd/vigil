@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
@@ -112,5 +113,69 @@ func TestQueueAgeNeverGoesNegative(t *testing.T) {
 
 	if got := queueAge(future, now); got != "0m" {
 		t.Errorf("queueAge(future) = %q, want 0m", got)
+	}
+}
+
+// TestRenderQueueShowsTheAuthor is the point of the column: at a glance,
+// whose PR am I being asked to review.
+func TestRenderQueueShowsTheAuthor(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	items := []session.QueueItem{
+		{Kind: session.QueueReview, ID: "34967", Repo: "portal", Author: "octocat",
+			Title: "Partner facing incident report Timeline tab", UpdatedAt: now.Add(-2 * time.Hour).Unix()},
+	}
+
+	got := RenderQueue(items, 0, -1, 120, 0, now)
+	if !strings.Contains(got, "octocat") {
+		t.Errorf("render omits the author:\n%s", got)
+	}
+	if !strings.Contains(got, "portal#34967") {
+		t.Errorf("render lost the label:\n%s", got)
+	}
+	if !strings.Contains(got, "Partner facing") {
+		t.Errorf("render lost the title:\n%s", got)
+	}
+}
+
+// TestRenderQueueStillFitsWithAnAuthor guards the column against the failure
+// the status bar already had: a new field that pushes the line past the width
+// it was given. Sweeps the widths the dashboard actually runs at, with the
+// longest login seen in real data (15 chars).
+func TestRenderQueueStillFitsWithAnAuthor(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	items := []session.QueueItem{
+		{Kind: session.QueueReview, ID: "soc-workflows", Repo: "soc-workflows", Author: "contributor-xyz",
+			Title: "Resurrect test_variety_of_tasks investigation work", UpdatedAt: now.Add(-26 * time.Hour).Unix()},
+		{Kind: session.QueueStory, ID: "223479", Title: "Investigation Canvas dynamic report",
+			UpdatedAt: now.Add(-30 * time.Minute).Unix()},
+	}
+
+	for width := 40; width <= 200; width++ {
+		got := RenderQueue(items, 0, 0, width, 0, now)
+		for i, line := range strings.Split(got, "\n") {
+			if w := lipgloss.Width(line); w > width {
+				t.Fatalf("width %d: line %d is %d cells wide:\n%s", width, i, w, got)
+			}
+		}
+	}
+}
+
+// TestRenderQueueLeavesTheAuthorColumnBlankForStories pins the deliberate
+// asymmetry: stories have no author, and the column stays aligned rather than
+// the title sliding left for them.
+func TestRenderQueueLeavesTheAuthorColumnBlankForStories(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	items := []session.QueueItem{
+		{Kind: session.QueueReview, ID: "34967", Repo: "portal", Author: "octocat",
+			Title: "AAA", UpdatedAt: now.Unix()},
+		{Kind: session.QueueStory, ID: "223479", Title: "BBB", UpdatedAt: now.Unix()},
+	}
+
+	lines := strings.Split(RenderQueue(items, 0, -1, 120, 0, now), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want header + 2 rows", len(lines))
+	}
+	if strings.Index(lines[1], "AAA") != strings.Index(lines[2], "BBB") {
+		t.Errorf("title column is not aligned between a review and a story:\n%s\n%s", lines[1], lines[2])
 	}
 }
