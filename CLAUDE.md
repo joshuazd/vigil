@@ -2,96 +2,115 @@
 
 TUI dashboard for tmux sessions. Monitors git status and GitHub PR state across sessions.
 
-## In-flight design work
+## Status: the six-phase design is complete
 
-An approved 6-phase design is turning the session list into the primary surface, with
-sessions expanded next to it. **Phases 0, 1, 2, 3 and 4 are merged.** Phase 2's three
-blockers landed as `31721d4`. Phase 3 landed 2026-07-29 as `a785fb1` here and `fefeeb1` in
-`~/dotfiles`. Phase 4 landed 2026-07-30 as `352b254` here and the phase 4 merge in
-`~/dotfiles`. Both spanned **two repositories** and neither half works without the other, so
-a change to one usually needs the other.
+**All six phases are merged. There is no phase 7 and no in-flight design.** The approved
+design that made the session list the primary surface is finished; the next piece of work is
+a choice from "What is open" below, not a continuation.
 
-Separately, **asserted effect ownership** landed as `b8afd82`, ahead of phase 4 and on
-purpose: a cold dispatch was the named trigger for the `firstSnapshotTimeout` loop, so phase
-4 would have inherited and widened the race it is now built on top of.
+Merge record, newest first. Each handoff is the authority on its own phase:
 
-Also separately, the **collector async remote layer** landed 2026-07-31 as `7b89c0e`, ahead
-of phase 5 and for the same kind of reason: phase 5 adds two network pollers, and adding
-them to a synchronous `Snapshot` would have made the session list slower for reasons
-unrelated to sessions. The seam phase 5 needs now exists, so phase 5 does not touch
-`Snapshot` at all.
+| Phase | Merged | vigil | `~/dotfiles` |
+|---|---|---|---|
+| 6 - deletions | 2026-08-03 | `393aa8f` | `46d844b` |
+| 5 - work queue | 2026-08-03 | `b48979a` | not touched |
+| 4 - dispatch through `vigild` | 2026-07-30 | `352b254` | phase 4 merge |
+| 3 - panel by default | 2026-07-29 | `a785fb1` | `fefeeb1` |
+| 2 blockers | - | `31721d4` | - |
+| 0-2 | - | see handoffs | see handoffs |
 
-**Phase 5 merged 2026-08-03 as `b48979a`, and it was the first phase since phase 1 that was
-single-repo.** `~/dotfiles` was not touched. The PR-author column on review rows landed
-immediately after as part of the same merge.
+Two pieces landed deliberately *between* phases, each to stop the next phase inheriting a
+race: **asserted effect ownership** (`b8afd82`, before phase 4 - a cold dispatch was the named
+trigger for the `firstSnapshotTimeout` loop) and the **collector async remote layer**
+(`7b89c0e`, before phase 5 - it created the `poller` seam so phase 5's two network pollers
+never touched `Snapshot`).
 
-**Phase 6 is the last phase of the six-phase design, and its work is done - nothing further is
-planned or upcoming.** It was deletions: four superseded shell scripts in `~/dotfiles`, plus
-this documentation update here - nothing else in vigil changed. **Merged 2026-08-03 as `393aa8f`
-here and `46d844b` in `~/dotfiles`.** Deleted from `~/dotfiles/scripts/scripts/`:
+**Phases 0-4 spanned two repositories and neither half worked without the other**, so a change
+in that territory - the launch path, panel creation, the dispatch hook chain - usually still
+needs both. Phases 5 and 6 were single-repo, and phase 6's two halves were independent.
 
-- `tmux-monitor` - orphaned, superseded by vigil.
-- `dispatch.1d.sh` - the SwiftBar half of the menu bar. SwiftBar was confirmed not installed
-  (no plugin directory, not running); the native `dispatch-bar`
-  (`com.user.dispatch-bar.plist`) is the surviving implementation and was confirmed running.
-- `worktree-status` and its `.tmux.conf` `prefix+w` / `prefix+C-w` bindings.
-- `gh-review-poll` and its `~/.local/state/gh-review-poll/` state directory. Its
-  `--detached --non-interactive` invocation had been the only production evidence that
-  `gh-review`/`shortcut-implement` honour `--detached`; that evidence was replaced first,
-  2026-08-03, by a real queue dispatch. The gate that matters is each script's own `${detached}`
-  check on its own teleport (`gh-review:196,216-217`, `shortcut-implement:196,229-230`), **not**
-  `lib/tmux.sh:618` inside `run_worktree_popup` - both scripts hardcode `--detached` into
-  `run_worktree_popup`'s own args regardless of their caller's flag, so that gate is
-  unconditionally suppressed for them and live only for `gh-worktree`/`shortcut-worktree`. See
-  the phase 6 handoff for the numbers and the full mechanism.
+### Start here
 
-**Unlike phases 0-4, phase 6's two repository halves were independent** - the dotfiles
-deletions did not depend on any vigil change and vice versa, so the "a change to one usually
-needs the other" warning above describes phases 0-4 only and does not carry forward to phase 6.
+1. **`docs/superpowers/2026-08-03-phase-6-deletions-handoff.md`** - the most recent phase, and
+   the shortest. Its verification-limits section is the honest account of what a green suite
+   did and did not prove.
+2. **`docs/superpowers/2026-08-01-phase-5-work-queue-handoff.md`** - its **process notes are
+   the most valuable page in this directory**. Read them before writing any plan here.
+3. **`docs/superpowers/2026-07-30-phase-4-handoff.md`** - still the authority on the daemon's
+   job runner and on `ExecCommander.Run`. Superseded on its two deferred items by
+   `docs/superpowers/2026-07-30-binary-refresh-handoff.md`, which carries the landmine that the
+   whole re-exec mechanism is **macOS-only**.
+4. `docs/superpowers/2026-07-31-collector-async-remote-handoff.md` - the authority on the
+   `poller` seam and on the `fillGit` measurement below.
 
-Two items on phase 6's original list turned out to need no work, checked 2026-08-03: the
-`dispatch-from-chrome` popup tunnel was already removed in phase 4 (nothing to delete), and
-"one of the two menu bar implementations" is `dispatch.1d.sh` above - SwiftBar was never a live
-consumer.
+## What is open
 
-**`lib/tmux.sh`'s `display-popup` branch (`run_worktree_popup`, around line 611) was kept on
-purpose and is NOT leftover phase 6 work.** It is the only code path for a manual
-`gh-review <url>` or `shortcut-implement <id>` run from a terminal - both call
-`run_worktree_popup` directly, never through the daemon's dispatch queue. Deleting it would
-silently turn every manual run's popup into inline output in the caller's own pane. **Do not
-"finish" this in a later cleanup pass.**
+Roughly in the order they are worth doing. Nothing here is scheduled; the first three are the
+ones that make the primary surface behave the way the design claims it already does.
 
-`worktree-status` was not fully superseded: its Shortcut story-state column has no vigil
-equivalent, and its Branch column has no at-a-glance equivalent either - vigil's git column
-carries no branch name, and the branch that does exist is dashboard-detail-panel-only, for the
-selected session, absent in panel mode entirely. See the open item in "Key Conventions" below,
-next to the `fillGit` and session-viewport entries.
+The measurements and file references for each of these live once, in "Key Conventions" below.
+This list is the priority order and the reason for it, not a second copy.
 
-**Read `docs/superpowers/2026-08-03-phase-6-deletions-handoff.md` first** - the deletion record,
-what was and was not verified, and why a green `make lint`/`make test` here proves nothing
-about the four dotfiles scripts.
+1. **`fillGit` blocks publication, measured rather than suspected**: ~3s per poll, 99.7% of
+   `Snapshot`, and because it exceeds `git_interval` the git memo can never skip, so the real
+   cadence is ~3s rather than the 1s the design assumes. Taking `gh` off the path in `7b89c0e`
+   **relocated** this shape rather than removing it. Ranked first because every other
+   responsiveness complaint is downstream of it.
+2. **The session table has no viewport**, so with a long queue some session rows are
+   cursor-reachable and undrawn - the same defect the queue already fixed for itself, still
+   present on the surface the design calls primary. Ranked second because it is a correctness
+   gap, not a preference, and it is small.
+3. **`queueRowBudget` squeezes the session table to 3 rows** on a tall terminal with a full
+   queue, inverting the design's premise that the session list is primary. A proportional
+   policy would match the intent.
+4. **Stories can starve reviews out of the queue.** Every story sorts ahead of every review and
+   `queue_limit` applies to the merged list, so 20 undeduped stories means zero review requests
+   shown - and review requests were the feature's original motivation.
+5. **`ExecCommander.Run` still has the grandchild-holds-the-pipe defect** that phase 4 fixed in
+   `RunStream`. Latent rather than live - shipped hook defaults background nothing - but the
+   terminal consequence is a daemon that can never restart. A `cmd.WaitDelay` caps it in one
+   line, which is the best effort-to-risk ratio on this list.
+6. **No surface shows a Shortcut story state, and none shows a branch across all sessions at
+   once.** Both were `worktree-status` columns, deleted in phase 6. Feature work either way;
+   the interim answers are `short story <id>` and the detail panel one session at a time.
+7. **The `{flags}` hook migration warning is effectively invisible.** Both `runTUI` and
+   `runPanel` use `tea.WithAltScreen()`, so a panel never shows it and the `prefix v` popup
+   destroys it on close. A user whose `config.toml` lacks `{flags}` gets teleported on their
+   first queue dispatch and never sees why. A toast is the real fix.
+8. Smaller, each documented in a handoff: 80-column dashboards overflow their height by 1-2
+   lines because the footer help line wraps; `getSelf` is Load-then-Run-then-Store rather than
+   single-flight (unreachable today, `storyPoller.pass` is serialized by `passMu`); the cursor
+   clamp in `applySnapshot` is a bounds check, not identity preservation, so a vanishing
+   session can silently retarget the cursor from one queue item to another.
 
-**Read these, in order, for the rest of the design's history:**
+**Two silent-failure modes to know about before debugging anything in this area**, neither of
+them scheduled for a fix: a failed queue fetch is completely silent, so "no assigned stories"
+and "Shortcut is unreachable" render identically; and queue dedup hardcodes the `SC-<id> ` /
+`PR-<number> ` naming convention that `~/dotfiles`' `session_name_from_title` produces, with a
+test on the vigil side only, so if that format changes dedup degrades silently and the queue
+advertises work already in flight.
 
-1. **`docs/superpowers/2026-08-01-phase-5-work-queue-handoff.md`** - what shipped, the
-   `%self%` bug that ten per-task reviews missed and only real data caught, the verification
-   numbers, and the landmines. Its **process notes are the most valuable page in this
-   directory**; read them before writing any plan here.
-2. **`docs/superpowers/2026-07-30-phase-4-handoff.md`** - still the authority on the daemon's
-   job runner and on `ExecCommander.Run`, the non-streaming path used by the `notify` and
-   `cleanup` hooks, which **still** has the grandchild-holds-the-pipe defect that phase 4
-   fixed in `RunStream`. A hook that backgrounds a process wedges the daemon permanently;
-   shipped defaults do not, which is the only reason it was left. Superseded on its two
-   deferred items by `docs/superpowers/2026-07-30-binary-refresh-handoff.md`, which also
-   carries the landmine that the whole re-exec mechanism is **macOS-only**.
+## Do not "finish" these - they are deliberate
 
-The collector async remote handoff
-(`docs/superpowers/2026-07-31-collector-async-remote-handoff.md`) is still the authority on
-the `poller` seam and on the **`fillGit` finding: ~3s per poll, >= `git_interval`, so the git
-memo never skips and the real publication cadence is ~3s rather than the 1s `tmux_interval`
-the design assumes.** Phase 5 deliberately did not address it and it is still open - it is the
-obvious candidate for the next structural piece of work, ahead of whatever phase needs a
-responsive session list.
+- **`lib/tmux.sh`'s `display-popup` branch (`run_worktree_popup`, around line 611) is not
+  leftover phase 6 work.** It is the only code path for a manual `gh-review <url>` or
+  `shortcut-implement <id>` run from a terminal; both call `run_worktree_popup` directly,
+  never through the daemon's dispatch queue. Deleting it would silently turn every manual run's
+  popup into inline output in the caller's own pane. Phase 6's popup item was the
+  `dispatch-from-chrome` tunnel, which phase 4 had already removed.
+- **The daemon never restarts itself** when its binary changes; it publishes
+  `Snapshot.DaemonBin` and clients render `daemon outdated`. Designed, rejected, reasoning in
+  the spec.
+- **The remote pollers have no ticker.** They are woken only by `Snapshot`'s nudge, which is
+  what makes "one daemon means one `gh` budget" true. Adding a ticker restores per-panel
+  polling and only two tests would notice, and only for a *fast* ticker.
+- **`--detached`'s gate lives in the workflow scripts, not in `run_worktree_popup`.**
+  `gh-review` and `shortcut-implement` hardcode `--detached` into `run_worktree_popup`'s args
+  regardless of their own flag, so `lib/tmux.sh:618` is unconditionally suppressed for them and
+  live only for `gh-worktree`/`shortcut-worktree`. The gate that matters is each script's own
+  `${detached}` check on its own teleport: `gh-review:196,216-217`,
+  `shortcut-implement:196,229-230`. Phase 6's review caught this documented at the wrong place;
+  do not re-derive it from the library.
 
 **A standing warning about the plans in this directory. This is now the repository's default
 failure mode, not a pattern.** Across three plans, **nineteen** briefs have contained tests
@@ -114,6 +133,21 @@ What actually worked, in order of effectiveness:
 
 So: where a brief and the shipped code disagree, **the code is right**; watch every test fail
 before writing its subject; and budget a whole-branch review that samples tests nobody flagged.
+
+**Phase 6 added a fourth data point, and it is a different shape from the other three.** It had
+no tests to be vacuous - it was deletions - and the deletions themselves came through every
+review clean. But the whole-branch review still returned **eight findings, and all eight were in
+the prose about the deletions rather than in a deletion.** Two mattered: the `--detached` gate
+was documented at the wrong place, and the accepted capability loss was recorded as one column
+when it was two. Both had been "verified" by a per-task reviewer that re-derived the claim and
+still reached the right accept decision on the wrong derivation - the failure was not laziness,
+it was stopping one call frame too early.
+
+The lesson generalises past tests: **a claim about a mechanism is only verified when you have
+traced it to the line that actually decides.** For `--detached` that meant reading the callers,
+not the library function they call. Two reviewers and the controller all stopped at
+`run_worktree_popup` because a gate was visibly there, and it was the wrong gate. When a
+handoff states a mechanism, check the call sites, not just the implementation.
 
 Read these before changing the daemon, `internal/collect`, `internal/transition`,
 `internal/dispatch`, `internal/view`'s layout, or the launch path in `~/dotfiles`:
