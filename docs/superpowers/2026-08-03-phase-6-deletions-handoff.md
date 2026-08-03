@@ -1,9 +1,13 @@
 # Phase 6: deletions, and the limit of what verified them
 
-Written 2026-08-03 with the dotfiles side of `phase-6-deletions` at `711b7d9` (4 commits from
-`master` at `3225047`) and this vigil docs commit on the matching branch here, both pending the
-whole-branch review and merge. `make test` and `make lint` green on all 14 vigil packages -
-expected, since this phase touches no Go code.
+Written 2026-08-03 with the dotfiles side of `phase-6-deletions` at `711b7d9` (3 commits from
+`master` at `3225047` - `4fab071` deletes both `tmux-monitor` and `dispatch.1d.sh` together,
+`8331fe7` deletes `worktree-status`, `711b7d9` deletes `gh-review-poll`; `6 files changed, 3
+insertions(+), 1147 deletions(-)` over the range) and this vigil docs commit on the matching
+branch here, both pending the whole-branch review and merge. **Once both merges land, replace
+`711b7d9` and this "pending" wording, here and in CLAUDE.md, with the real merge commit shas.**
+`make test` and `make lint` green on all 14 vigil packages - expected, since this phase touches
+no Go code.
 
 - Design: `docs/superpowers/specs/2026-07-27-vigil-cockpit-design.md:157-165` (the five-item
   deletion list phase 6 executes)

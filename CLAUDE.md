@@ -25,12 +25,14 @@ unrelated to sessions. The seam phase 5 needs now exists, so phase 5 does not to
 single-repo.** `~/dotfiles` was not touched. The PR-author column on review rows landed
 immediately after as part of the same merge.
 
-**Phase 6 closes the six-phase design out. All six phases are now merged.** It was deletions:
-four superseded shell scripts in `~/dotfiles`, plus this documentation update here - nothing
-else in vigil changed. Deleted from `~/dotfiles/scripts/scripts/` (branch `phase-6-deletions`,
-head `711b7d9` as of this writing, merging to `master` after the whole-branch review; this
-vigil docs change merges to `main` the same way - see the phase 6 handoff for exact merge
-commits once they exist):
+**Phase 6 is the last phase of the six-phase design, and its work is done - nothing further is
+planned or upcoming.** It was deletions: four superseded shell scripts in `~/dotfiles`, plus
+this documentation update here - nothing else in vigil changed. As of this writing the merges
+are the one remaining step: dotfiles' `phase-6-deletions` (head `711b7d9`) has not yet merged to
+`master`, and this vigil docs change has not yet merged to `main`. **Whoever performs those
+merges should replace `711b7d9` above and this paragraph's "not yet merged" wording with the
+real merge commit shas once both land** - see the phase 6 handoff, which carries the same
+forward pointer. Deleted from `~/dotfiles/scripts/scripts/`:
 
 - `tmux-monitor` - orphaned, superseded by vigil.
 - `dispatch.1d.sh` - the SwiftBar half of the menu bar. SwiftBar was confirmed not installed
