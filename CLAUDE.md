@@ -52,24 +52,21 @@ ones that make the primary surface behave the way the design claims it already d
 The measurements and file references for each of these live once, in "Key Conventions" below.
 This list is the priority order and the reason for it, not a second copy.
 
-1. **The session table has no viewport**, so with a long queue some session rows are
-   cursor-reachable and undrawn - the same defect the queue already fixed for itself, still
-   present on the surface the design calls primary. Ranked first because it is a correctness
-   gap, not a preference, and it is small.
-2. **`queueRowBudget` squeezes the session table to 3 rows** on a tall terminal with a full
+1. **`queueRowBudget` squeezes the session table to 3 rows** on a tall terminal with a full
    queue, inverting the design's premise that the session list is primary. A proportional
-   policy would match the intent.
-3. **Stories can starve reviews out of the queue.** Every story sorts ahead of every review and
+   policy would match the intent. Less urgent since the table got a viewport - those rows are
+   now scrollable rather than unreachable - but 3 rows is still the wrong allocation.
+2. **Stories can starve reviews out of the queue.** Every story sorts ahead of every review and
    `queue_limit` applies to the merged list, so 20 undeduped stories means zero review requests
    shown - and review requests were the feature's original motivation.
-4. **No surface shows a Shortcut story state, and none shows a branch across all sessions at
+3. **No surface shows a Shortcut story state, and none shows a branch across all sessions at
    once.** Both were `worktree-status` columns, deleted in phase 6. Feature work either way;
    the interim answers are `short story <id>` and the detail panel one session at a time.
-5. **The `{flags}` hook migration warning is effectively invisible.** Both `runTUI` and
+4. **The `{flags}` hook migration warning is effectively invisible.** Both `runTUI` and
    `runPanel` use `tea.WithAltScreen()`, so a panel never shows it and the `prefix v` popup
    destroys it on close. A user whose `config.toml` lacks `{flags}` gets teleported on their
    first queue dispatch and never sees why. A toast is the real fix.
-6. Smaller, each documented in a handoff: 80-column dashboards overflow their height by 1-2
+5. Smaller, each documented in a handoff: 80-column dashboards overflow their height by 1-2
    lines because the footer help line wraps; `getSelf` is Load-then-Run-then-Store rather than
    single-flight (unreachable today, `storyPoller.pass` is serialized by `passMu`); the cursor
    clamp in `applySnapshot` is a bounds check, not identity preservation, so a vanishing
@@ -299,5 +296,5 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - **Queue dedup hides an item when a live session covers it**, by name prefix (`SC-<id> ` / `PR-<number> `) or, for reviews only, by `PR.Number`. The name key is a **cross-repository convention with a test on this side only**: if dotfiles' `session_name_from_title` changes format, dedup degrades silently and the queue advertises work already in flight. The `PR.Number` backstop covers reviews; stories would be fully exposed
 - **A failed queue fetch is completely silent** - no log, no toast. "No assigned stories" and "Shortcut is unreachable" render identically. Consistent with `prPoller`, which does not log a failed `gh` either, and the reason `short` is deliberately absent from `main.go`'s `startupDependencies`. First diagnostic step is to run the poller's exact command by hand
 - **`queueRowBudget` gives the queue everything above `minTableRows = 3`.** With many sessions and a full queue the session table is squeezed to 3 rows even on a tall terminal, which inverts the design's premise that the session list is primary. A proportional policy would match the intent better; this is open
-- **The session table has no viewport.** `RenderTable` drops sessions past `height` with no scroll, so with a long queue some session rows are cursor-reachable and undrawn - the same defect class the queue fixed for itself. `enter` on a session is non-destructive and `m`/`x` confirm first, which is the only reason it was not blocking
+- **The session table scrolls; the queue truncates. They are different fixes to the same defect, on purpose.** `view.TableWindow(cursor, count, height)` returns the first session `RenderTable` draws, so a cursor past the allocated height scrolls instead of addressing a row nobody drew. The queue solved its half by *forbidding* the cursor (`rowCount` ends at `drawnQueueRows()`, plus a `… +N more` line), which is right for queue items - extra work you can ignore - and wrong for sessions, which are what the dashboard is for. **This fixed the panel as well as the dashboard**: `panelView` passes `m.height-1` to the same `RenderTable`, and panel-mode `rowCount` is just the session count, so a 9 row panel with 10 sessions had the same unreachable rows. **The window is derived from the cursor, never stored.** A remembered offset would be a second piece of state that has to agree with the cursor and would need its own clamp in `applySnapshot` next to the cursor's; one computed from the cursor cannot disagree with it. Edge-pinned rather than centred because the case it exists for is a 3 row table, where a centred window scrolls on every keypress. **`cursor` may point past the last session** - that is how the Model says "the cursor is on a queue row" - and the `count-height` clamp is what holds the table still as the cursor crosses into the queue instead of dragging it further or snapping it to the top. An explicit `min(cursor, count-1)` alongside that clamp was written, found to be provably the same answer, and removed: with both present neither could be mutated away by a test. The `count <= height` short circuit is *not* redundant with it - at `count < height` the clamp alone returns a negative offset. There is deliberately no `… +N more` row: it would cost one of three rows in exactly the squeezed case this exists for, and the status bar already carries `N sessions` plus the per-state counts
 - **There is no vigil equivalent of `worktree-status`'s Shortcut story-state column, and its Branch column is only a partial match.** Deleted in phase 6: it showed session, branch, git status and the story state for the `sc-NNNN` in the branch name. vigil's session table renders Indicator, Index, Name, Git, PR and State (`internal/view/table.go` `renderRow`, `internal/view/layout.go` `TableLayout`) and `session.Session` carries no story field. The git column (`GitColWithBg`, `internal/view/format.go:83-125`) renders `~N +N -N ↑N` and rebase age, not a branch name; the branch exists only in the dashboard detail panel for the selected session (`internal/view/detail.go:45-48`), and panel mode has no detail panel at all. So the loss is two columns, not one: story state entirely, and at-a-glance branch across every session. The work queue shows stories, but only assigned-and-not-done ones, and hides any a live session already covers - the opposite of "what state is this session's story in right now". Remaining ways to check: `short story <id>` or the Shortcut web UI for story state; the dashboard detail panel, one session at a time, for branch. Adding a story column and a compact branch indicator is feature work, not a phase 6 deletion, and is open

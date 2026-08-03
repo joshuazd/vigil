@@ -8,6 +8,39 @@ import (
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
+// TableWindow returns the index of the first session RenderTable draws, so a
+// cursor past the allocated height scrolls the table instead of addressing a
+// row nobody drew. Without it, a table squeezed to minTableRows by a full
+// queue - or a 9 row panel with 10 sessions - leaves the highlight invisible
+// and j/k looking broken, while enter still switches to the unseen selection.
+//
+// Derived from the cursor rather than remembered. A stored offset would be a
+// second piece of state that has to agree with the cursor, needing its own
+// clamp in applySnapshot alongside the cursor's; one computed from the cursor
+// cannot disagree with it. Same instinct as QueueRowsShown being shared rather
+// than recomputed.
+//
+// Edge-pinned rather than centred: the case this exists for is a 3 row table,
+// where a centred window would scroll on every keypress instead of holding
+// still until the cursor reaches an edge.
+//
+// cursor may point past the last session, which is how the Model says "the
+// cursor is on a queue row". The count-height clamp is what keeps the table
+// still as the cursor crosses into the queue, rather than dragging it further:
+// every cursor at or past the last session yields the same last screen. An
+// explicit clamp of cursor to count-1 as well was tried and removed - it is
+// provably the same answer, and having both meant neither could be mutated away
+// by a test.
+//
+// The count <= height short circuit is not redundant with it: at count < height
+// the clamp alone would return a negative offset.
+func TableWindow(cursor, count, height int) int {
+	if count <= height || height <= 0 {
+		return 0
+	}
+	return min(max(cursor-height+1, 0), count-height)
+}
+
 // RenderTable renders the session table rows, dropping columns to fit width.
 func RenderTable(sessions []*session.Session, cursor int, selected map[string]bool, staleThreshold int, width, height int, notification string) string {
 	if len(sessions) == 0 {
@@ -16,10 +49,15 @@ func RenderTable(sessions []*session.Session, cursor int, selected map[string]bo
 
 	layout := LayoutForWidth(width)
 
+	offset := TableWindow(cursor, len(sessions), height)
+
 	var b strings.Builder
 	rendered := 0
 	for i, s := range sessions {
-		if i >= height {
+		if i < offset {
+			continue
+		}
+		if rendered >= height {
 			break
 		}
 		isCursor := i == cursor
