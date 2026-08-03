@@ -3,7 +3,13 @@
 Written 2026-08-03. Small - two production edits and six tests - but it closes the item phase 4
 deferred, and it turned up one live bug that was not part of the item.
 
-Not merged as anything phase-numbered. This is a single fix off `main`.
+Not merged as anything phase-numbered. This is a single fix off `main`, merged as `df5a3dc`.
+
+Installed and live. The daemon does not restart itself, so the old one was killed by hand and a
+client had spawned a replacement within 3s; the four open panels re-exec'd on their own. All five
+processes were confirmed on the new binary by inode rather than by pid - `execSelf` is
+`syscall.Exec`, so a re-exec'd panel keeps its pid and its start time, and neither shows the
+swap.
 
 ## What was wrong
 
