@@ -394,13 +394,22 @@ still exists.
 tmux unbind-key w
 tmux unbind-key C-w
 tmux source-file ~/.tmux.conf
-tmux list-keys -T prefix | grep -E "^bind-key +-T prefix +(w|C-w) " \
+tmux list-keys -T prefix | grep "worktree-status" \
   && echo "STILL BOUND - investigate" || echo "unbound as intended"
 ```
 
 Expected: `unbound as intended`. The `source-file` is there to prove sourcing does not
 resurrect them, which is the failure mode if `unbind-key` were relied on alone in a config
 that still had the lines.
+
+**Grep for the target (`worktree-status`), not the key.** tmux binds `w` to a built-in
+("Choose the current window interactively") by default, so once this config no longer
+overrides it, `w` shows up bound to something on any fresh server - a key-name grep would print
+"STILL BOUND - investigate" forever, even after a correct unbind. Worse, `tmux unbind-key w` on
+*this* running server leaves `w` truly dead, while a fresh server picks up tmux's default - the
+two states diverge permanently, so a key-name check can never agree with itself across a
+restart. Checking for the deleted script's name is the only assertion that means what it
+should: nothing points at `worktree-status` any more.
 
 ---
 
@@ -618,13 +627,17 @@ are filtered because they are the deliberate historical references catalogued ab
 ```bash
 ls -la ~/scripts/ | grep -E "tmux-monitor|gh-review-poll|worktree-status|dispatch.1d" \
   && echo "STILL PRESENT - stow may not have re-run" || echo "gone from live path"
-tmux list-keys -T prefix | grep -E "^bind-key +-T prefix +(w|C-w) " \
+tmux list-keys -T prefix | grep "worktree-status" \
   && echo "STILL BOUND" || echo "unbound"
 pgrep -fl dispatch-bar || echo "dispatch-bar DOWN - menu bar dispatch is gone"
 pgrep -f "vigil daemon" || echo "no daemon"
 ```
 
 Expected: gone from the live path, unbound, `dispatch-bar` up, a daemon running.
+
+Grep for `worktree-status`, not for the `w`/`C-w` key names - same reasoning as Task 2 Step 8:
+tmux binds `w` to a built-in by default, so a key-name check false-positives as "STILL BOUND" on
+any server where this config no longer overrides it.
 
 - [ ] **Step 3: Exercise the two surfaces that replaced the deleted tools**
 
@@ -692,7 +705,7 @@ gesture.
 - Task 2 consumes that line 10 and leaves `ts vigil-panel`.
 - Task 3 edits line 7 only, which neither of the others touches.
 
-Final state, four names removed from a list that named twenty-two:
+Final state, four names removed from a list that named twenty-six:
 
 ```make
 SHELL_SCRIPTS := common.sh $(wildcard lib/*.sh) \

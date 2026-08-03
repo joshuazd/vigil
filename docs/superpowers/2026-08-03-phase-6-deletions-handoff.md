@@ -22,19 +22,21 @@ anything beyond "the Makefile's script list matches the files on disk."
 
 ## What shipped
 
-Four scripts deleted from `~/dotfiles/scripts/scripts/`, three `Makefile` `SHELL_SCRIPTS`
-entries removed, two `.tmux.conf` bindings removed, one state directory removed outside git:
+Four scripts deleted from `~/dotfiles/scripts/scripts/`, four `Makefile` `SHELL_SCRIPTS`
+entries removed across three lines, two `.tmux.conf` bindings removed, one state directory
+removed outside git:
 
 | Script | Commit | Consumer before deletion |
 |---|---|---|
 | `tmux-monitor` | `4fab071` | none - orphaned, superseded by vigil |
 | `dispatch.1d.sh` | `4fab071` | SwiftBar, which is not installed |
 | `worktree-status` | `8331fe7` | `prefix w` / `prefix C-w` bindings |
-| `gh-review-poll` | `711b7d9` | a cron/launchd-style poller, cold since 2026-05-09 |
+| `gh-review-poll` | `711b7d9` | started manually, self-daemonized via its own `cmd_start` (backgrounds with `&`, then `disown`), cold since 2026-05-09 |
 
 `gh-review-poll`'s `~/.local/state/gh-review-poll/` (log + seen file, ~1.2MB) was removed
-outside git in the same task. Nothing else changed in either repository - **`Snapshot.go`,
-every Go package, and `~/dotfiles/scripts/scripts/gh-review` are byte-for-byte untouched.**
+outside git in the same task. Nothing else changed in either repository - **every Go package
+(`internal/collect`'s `Snapshot` method included - there is no `Snapshot.go` in this repo), and
+`~/dotfiles/scripts/scripts/gh-review` are byte-for-byte untouched.**
 
 Each of Tasks 1-3 ran the same shape: confirm no reference outside the Makefile, delete, run
 `make lint` and **watch it fail** (shellcheck's `openBinaryFile: does not exist` naming the
@@ -62,11 +64,26 @@ That evidence now exists, measured on the live machine before this plan was writ
 
 Both dispatches were user-confirmed to have gone through `enter` on a queue row - the
 `Detached = true` path. Five sessions were created and the one attached client never left
-`main`, so `--detached` reached `run_worktree_popup` and suppressed `teleport_client_to`. The
-phase 5 `%self%` fix is live in the same reading: `short api /member` resolves to `joshuazd`,
-both assigned stories are found, and both are hidden by their own sessions - dedup exercised on
-both keys at once, name-prefix for the two `SC-` sessions and both name-prefix and `PR.Number`
-for the three `PR-` sessions.
+`main`, so `--detached` reached `gh-review`/`shortcut-implement` and suppressed their own
+teleport call. **The gate is not `lib/tmux.sh:618`.** Both scripts hardcode `--detached` into
+`run_worktree_popup`'s own positional args regardless of their caller's own flag - their own
+comment says why: "Pass --detached so run_worktree_popup skips switch-client; we switch to
+:claude ourselves below" (`gh-review:182`, `shortcut-implement:183`). So
+`run_worktree_popup`'s own gate at `lib/tmux.sh:618` (`if ! ${detached}; then ...
+teleport_client_to`) is unconditionally suppressed for these two callers, and is live only for
+`gh-worktree:156` and `shortcut-worktree:153`, which append `--detached` conditionally on their
+own flag. `gh-review` and `shortcut-implement` instead gate their own teleport with their own
+`${detached}` variable, twice each: `gh-review:196` and `gh-review:216-217`;
+`shortcut-implement:196` and `shortcut-implement:229-230`. The safety conclusion is unaffected -
+both the deleted timer and the queue drive `--detached` into `gh-review`/`shortcut-implement`,
+which gate their own teleport with it, so the queue exercises the same flag through the same
+gate the timer did. Only the *location* of that gate was documented wrong, and the wrongness
+matters: a future debugger chasing a teleport regression in either script who follows the old
+docs to `lib/tmux.sh:618` finds a correct-looking gate that is permanently suppressed for both
+callers, and would wrongly conclude the path is intact. The phase 5 `%self%` fix is live in the
+same reading: `short api /member` resolves to `joshuazd`, both assigned stories are found, and
+both are hidden by their own sessions - dedup exercised on both keys at once, name-prefix for
+the two `SC-` sessions and both name-prefix and `PR.Number` for the three `PR-` sessions.
 
 `gh-review-poll` was also confirmed cold before deletion: not running, pid file stale,
 `~/.local/state/gh-review-poll/log` last written 2026-05-09, `seen` 2026-05-07.
@@ -109,29 +126,33 @@ Checked 2026-08-03, before writing the plan, so a future session does not re-der
   which is not the product anymore. Left as-is for the same reason as the `.nit.json` lines:
   it documents a past fact, not a current dependency.
 
-## The `worktree-status` story-column loss, which is real
+## The `worktree-status` story-and-branch loss, which is real
 
-The design called `worktree-status` "superseded by the panel." True for three of its four
-columns, false for the fourth:
+The design called `worktree-status` "superseded by the panel." True for two of its four
+columns, degraded for one, false for the fourth:
 
 | `worktree-status` column | vigil equivalent |
 |---|---|
 | Session | session name column |
-| Branch | git column |
+| Branch | **lost at a glance.** vigil's git column (`GitColWithBg`, `internal/view/format.go:83-125`) renders `~N +N -N ↑N` and rebase age - no branch name. The branch appears only in the dashboard detail panel, for the selected session only (`internal/view/detail.go:45-48`), and panel mode has no detail panel at all |
 | Git (dirty / N unpushed) | git column |
 | **Story (Shortcut story state from `sc-NNNN` in the branch)** | **none** |
 
 vigil's session table renders Indicator, Index, Name, Git, PR, State
-(`internal/view/table.go` `renderRow`, `internal/view/layout.go` `TableLayout`), and
-`session.Session` carries no story field. The work queue shows stories, but only
-*assigned-and-not-done* ones, and hides any story a live session already covers - which is
-exactly the set a session-status view would be asked about. Deleting `worktree-status` loses
-the ability to see, for an existing session, what state its Shortcut story is currently in.
+(`internal/view/table.go` `renderRow`, `internal/view/layout.go` `TableLayout`, whose fields are
+Indicator, Index, State, Name, Git, PR - no branch field), and `session.Session` carries no
+story field. The work queue shows stories, but only *assigned-and-not-done* ones, and hides any
+story a live session already covers - which is exactly the set a session-status view would be
+asked about. Deleting `worktree-status` loses two things, not one: the ability to see, for an
+existing session, what state its Shortcut story is in, and the ability to see its branch name
+at a glance across every session at once, rather than one at a time in the dashboard's detail
+panel.
 
-**Remaining ways to get that information: `short story <id>`, or the Shortcut web UI.** This
-phase accepted the loss rather than adding a story column to vigil, because that is feature
-work and this phase is deletions. Recorded here and in CLAUDE.md's "Key Conventions" as an open
-follow-up candidate, not as a silent regression.
+**Remaining ways to get that information: `short story <id>` or the Shortcut web UI for story
+state; the dashboard detail panel, one session at a time, for branch.** This phase accepted
+both losses rather than adding a story column or an at-a-glance branch column to vigil, because
+that is feature work and this phase is deletions. Recorded here and in CLAUDE.md's "Key
+Conventions" as an open follow-up candidate, not as a silent regression.
 
 ## The honest limit of this phase's verification
 
@@ -174,8 +195,10 @@ baseline bindings it will remove are recorded verbatim in
   regression breaks `--detached` silently, there is no longer a second, independent caller that
   would have surfaced it by drifting out of sync - the queue path is now the only user.
 - **`.nit.json`'s `worktree-status` references are a historical record, not configuration, and
-  are gitignored.** A sweep with `--include-dir=.git` won't find it as untracked; the two lines
-  were found by reading the live file directly.
+  are gitignored** (`git check-ignore -v .nit.json` resolves to `~/.cvsignore:5`). `git grep`
+  misses it for that reason - it only searches tracked content. A plain recursive
+  `grep -rn --exclude-dir=.git worktree-status ~/dotfiles` *does* find it; the two lines were
+  confirmed by reading the live file directly, not by any special sweep flag.
 
 ## Deferred
 

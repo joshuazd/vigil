@@ -40,9 +40,14 @@ forward pointer. Deleted from `~/dotfiles/scripts/scripts/`:
   (`com.user.dispatch-bar.plist`) is the surviving implementation and was confirmed running.
 - `worktree-status` and its `.tmux.conf` `prefix+w` / `prefix+C-w` bindings.
 - `gh-review-poll` and its `~/.local/state/gh-review-poll/` state directory. Its
-  `--detached --non-interactive` invocation had been the only production evidence that the
-  workflow scripts honour `--detached`; that evidence was replaced first, 2026-08-03, by a real
-  queue dispatch - see the phase 6 handoff for the numbers.
+  `--detached --non-interactive` invocation had been the only production evidence that
+  `gh-review`/`shortcut-implement` honour `--detached`; that evidence was replaced first,
+  2026-08-03, by a real queue dispatch. The gate that matters is each script's own `${detached}`
+  check on its own teleport (`gh-review:196,216-217`, `shortcut-implement:196,229-230`), **not**
+  `lib/tmux.sh:618` inside `run_worktree_popup` - both scripts hardcode `--detached` into
+  `run_worktree_popup`'s own args regardless of their caller's flag, so that gate is
+  unconditionally suppressed for them and live only for `gh-worktree`/`shortcut-worktree`. See
+  the phase 6 handoff for the numbers and the full mechanism.
 
 **Unlike phases 0-4, phase 6's two repository halves were independent** - the dotfiles
 deletions did not depend on any vigil change and vice versa, so the "a change to one usually
@@ -61,8 +66,10 @@ silently turn every manual run's popup into inline output in the caller's own pa
 "finish" this in a later cleanup pass.**
 
 `worktree-status` was not fully superseded: its Shortcut story-state column has no vigil
-equivalent. See the open item in "Key Conventions" below, next to the `fillGit` and
-session-viewport entries.
+equivalent, and its Branch column has no at-a-glance equivalent either - vigil's git column
+carries no branch name, and the branch that does exist is dashboard-detail-panel-only, for the
+selected session, absent in panel mode entirely. See the open item in "Key Conventions" below,
+next to the `fillGit` and session-viewport entries.
 
 **Read `docs/superpowers/2026-08-03-phase-6-deletions-handoff.md` first** - the deletion record,
 what was and was not verified, and why a green `make lint`/`make test` here proves nothing
@@ -254,4 +261,4 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - **A failed queue fetch is completely silent** - no log, no toast. "No assigned stories" and "Shortcut is unreachable" render identically. Consistent with `prPoller`, which does not log a failed `gh` either, and the reason `short` is deliberately absent from `main.go`'s `startupDependencies`. First diagnostic step is to run the poller's exact command by hand
 - **`queueRowBudget` gives the queue everything above `minTableRows = 3`.** With many sessions and a full queue the session table is squeezed to 3 rows even on a tall terminal, which inverts the design's premise that the session list is primary. A proportional policy would match the intent better; this is open
 - **The session table has no viewport.** `RenderTable` drops sessions past `height` with no scroll, so with a long queue some session rows are cursor-reachable and undrawn - the same defect class the queue fixed for itself. `enter` on a session is non-destructive and `m`/`x` confirm first, which is the only reason it was not blocking
-- **There is no vigil equivalent of `worktree-status`'s Shortcut story-state column.** Deleted in phase 6: it showed session, branch, git status and the story state for the `sc-NNNN` in the branch name. vigil's session table renders Indicator, Index, Name, Git, PR and State (`internal/view/table.go` `renderRow`, `internal/view/layout.go` `TableLayout`) and `session.Session` carries no story field. The work queue shows stories, but only assigned-and-not-done ones, and hides any a live session already covers - the opposite of "what state is this session's story in right now". Remaining ways to check: `short story <id>` or the Shortcut web UI. Adding a story column is feature work, not a phase 6 deletion, and is open
+- **There is no vigil equivalent of `worktree-status`'s Shortcut story-state column, and its Branch column is only a partial match.** Deleted in phase 6: it showed session, branch, git status and the story state for the `sc-NNNN` in the branch name. vigil's session table renders Indicator, Index, Name, Git, PR and State (`internal/view/table.go` `renderRow`, `internal/view/layout.go` `TableLayout`) and `session.Session` carries no story field. The git column (`GitColWithBg`, `internal/view/format.go:83-125`) renders `~N +N -N ↑N` and rebase age, not a branch name; the branch exists only in the dashboard detail panel for the selected session (`internal/view/detail.go:45-48`), and panel mode has no detail panel at all. So the loss is two columns, not one: story state entirely, and at-a-glance branch across every session. The work queue shows stories, but only assigned-and-not-done ones, and hides any a live session already covers - the opposite of "what state is this session's story in right now". Remaining ways to check: `short story <id>` or the Shortcut web UI for story state; the dashboard detail panel, one session at a time, for branch. Adding a story column and a compact branch indicator is feature work, not a phase 6 deletion, and is open
