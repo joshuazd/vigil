@@ -29,8 +29,7 @@ never touched `Snapshot`).
 in that territory - the launch path, panel creation, the dispatch hook chain - usually still
 needs both. Phases 5 and 6 were single-repo, and phase 6's two halves were independent.
 
-**Session hopping (2026-08-03, vigil branch tip `dd6d7ad`, `~/dotfiles` branch tip `1a224b0`;
-code tips `2cfae6c` and `515b3df`, with documentation on top) is not in the table above and is
+**Session hopping (2026-08-03; merge SHAs recorded below) is not in the table above and is
 not a seventh phase.** It is a defect-and-feature batch out of three user
 complaints - the session order disagreeing with the `M-j`/`M-k` bindings, hopping requiring
 vigil at all, and a session lingering in the list after `prefix d` - not a continuation of the
