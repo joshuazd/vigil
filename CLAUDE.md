@@ -27,12 +27,8 @@ immediately after as part of the same merge.
 
 **Phase 6 is the last phase of the six-phase design, and its work is done - nothing further is
 planned or upcoming.** It was deletions: four superseded shell scripts in `~/dotfiles`, plus
-this documentation update here - nothing else in vigil changed. As of this writing the merges
-are the one remaining step: dotfiles' `phase-6-deletions` (head `711b7d9`) has not yet merged to
-`master`, and this vigil docs change has not yet merged to `main`. **Whoever performs those
-merges should replace `711b7d9` above and this paragraph's "not yet merged" wording with the
-real merge commit shas once both land** - see the phase 6 handoff, which carries the same
-forward pointer. Deleted from `~/dotfiles/scripts/scripts/`:
+this documentation update here - nothing else in vigil changed. **Merged 2026-08-03 as `393aa8f`
+here and `46d844b` in `~/dotfiles`.** Deleted from `~/dotfiles/scripts/scripts/`:
 
 - `tmux-monitor` - orphaned, superseded by vigil.
 - `dispatch.1d.sh` - the SwiftBar half of the menu bar. SwiftBar was confirmed not installed

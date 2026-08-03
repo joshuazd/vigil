@@ -1,13 +1,15 @@
 # Phase 6: deletions, and the limit of what verified them
 
-Written 2026-08-03 with the dotfiles side of `phase-6-deletions` at `711b7d9` (3 commits from
-`master` at `3225047` - `4fab071` deletes both `tmux-monitor` and `dispatch.1d.sh` together,
-`8331fe7` deletes `worktree-status`, `711b7d9` deletes `gh-review-poll`; `6 files changed, 3
-insertions(+), 1147 deletions(-)` over the range) and this vigil docs commit on the matching
-branch here, both pending the whole-branch review and merge. **Once both merges land, replace
-`711b7d9` and this "pending" wording, here and in CLAUDE.md, with the real merge commit shas.**
-`make test` and `make lint` green on all 14 vigil packages - expected, since this phase touches
-no Go code.
+Written 2026-08-03, **merged the same day as `46d844b` in `~/dotfiles` and `393aa8f` here.** The
+dotfiles side was 3 commits from `master` at `3225047` - `4fab071` deletes both `tmux-monitor` and
+`dispatch.1d.sh` together, `8331fe7` deletes `worktree-status`, `711b7d9` deletes `gh-review-poll`;
+`6 files changed, 3 insertions(+), 1147 deletions(-)` over the range. `make test` and `make lint`
+green on all 14 vigil packages - expected, since this phase touches no Go code.
+
+The live unbind that this document's landmine section calls for was run at merge time and is done:
+`prefix C-w` is unbound and `prefix w` was restored to tmux's own default `choose-tree -Zw`, rather
+than left dead, so this server matches any freshly started one. See the second Landmine below for
+why that step could not be folded into the merge.
 
 - Design: `docs/superpowers/specs/2026-07-27-vigil-cockpit-design.md:157-165` (the five-item
   deletion list phase 6 executes)
@@ -189,7 +191,18 @@ baseline bindings it will remove are recorded verbatim in
 - **A skipped Task 2 Step 8 (the live unbind) leaves `prefix w` bound to a deleted file.** The
   failure mode is a popup that flashes a shell error, not silence, which is the only reason this
   is not treated as blocking. `tmux source-file` does not remove a binding absent from the file
-  it reads - only an explicit `unbind-key` does.
+  it reads - only an explicit `unbind-key` does. **Run at merge time and confirmed**: sourcing
+  after the unbind did not resurrect either binding, which is the claim measured rather than
+  assumed.
+- **Assert the unbind on the binding's *target*, never on the key.** tmux binds `w` itself by
+  default (`choose-tree -Zw`), so once the config stops overriding it, a check that greps
+  `tmux list-keys` for the key `w` reports "still bound" on any fresh server and is pure noise.
+  The plan shipped with that defect in two steps and it was caught by the whole-branch review, not
+  by running it. Grep for `worktree-status`.
+  A second-order trap in the same place: `tmux unbind-key w` leaves `w` **dead** on the running
+  server while every future server gets tmux's default, so the live and fresh states diverge
+  permanently. Fixed here by restoring `choose-tree -Zw` explicitly after unbinding. `C-w` has no
+  tmux default and is correctly left unbound.
 - **`gh-review-poll`'s deletion removed the only production evidence for `--detached`
   honouring**, and it was deliberately replaced before deletion rather than after. If a future
   regression breaks `--detached` silently, there is no longer a second, independent caller that
