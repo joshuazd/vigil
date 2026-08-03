@@ -185,6 +185,11 @@ fresh daemon bound the same socket immediately after.
   class as the queue bug fixed in `d4c0391`, on the surface the design calls primary. `enter`
   on a session is non-destructive and `m`/`x` confirm first, which is the only reason this was
   not blocking.
+
+  **Fixed 2026-08-03 (`5d659e4`)** by `view.TableWindow`, which scrolls rather than truncating -
+  the opposite choice from `d4c0391`, because forbidding the cursor is right for queue items and
+  wrong for sessions. It also fixed **panel mode**, which had the same defect at 10+ sessions
+  and is not mentioned above.
 - **80-column dashboards overflow their height by 1-2 lines** because the footer help line
   wraps. Present identically before this branch. The height-sweep test pins width 120 and
   cannot see it.

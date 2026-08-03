@@ -305,6 +305,12 @@ happy accident.
   it. The precedent is on this side: asserted effect ownership and the async remote layer both
   landed as their own work ahead of the phase that needed them rather than inside it. This
   wants the same treatment.
+
+  **Superseded on the number, 2026-08-03.** A re-measurement got 0.138s cold and 0.009s warm,
+  with the memo skipping every poll. `status --porcelain` is still all of `fillGit`, so the
+  attribution stands, but "~3s, never skips" is conditional on the repository rather than
+  current. The structural work was designed and deliberately not built; see
+  `2026-08-03-dirty-counts-off-publication-path-design.md`.
 - **It does not fix `ExecCommander.Run`'s grandchild-holds-the-pipe defect.** Phase 4 fixed
   `RunStream`; `Run` - used by the `notify` and `cleanup` hooks and by `FetchPRStatus` - still
   has it, and the two new pollers use it too. Shipped defaults do not background anything,

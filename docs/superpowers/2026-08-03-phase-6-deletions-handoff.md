@@ -222,8 +222,18 @@ baseline bindings it will remove are recorded verbatim in
 - **The `fillGit` publication-cadence issue** (collector async remote handoff) is untouched by
   this phase and remains the standing candidate for the next structural work, ahead of whatever
   needs a more responsive session list.
+
+  **Superseded 2026-08-03 (`e4b554e`).** Re-measuring it got 0.138s cold and 0.009s warm with
+  the memo skipping every poll, against the ~3.0-3.5s on record. The attribution held; the
+  magnitude did not, and the gap is not fully explained. It is no longer the standing candidate
+  for structural work - see the demotion note under "What is open" in CLAUDE.md. What shipped
+  instead is a `slow poll` daemon log line, so the next suspicion is settled by evidence.
 - **The session table has no viewport** and **`queueRowBudget` starves the session table below
   a full queue** (both from the phase 5 handoff) are untouched by this phase.
+
+  **Superseded in half, 2026-08-03 (`5d659e4`).** The session table has a viewport now
+  (`view.TableWindow`), which fixed the panel along with the dashboard. `queueRowBudget` is
+  still open, and is now the first item on CLAUDE.md's list.
 
 ## Process notes
 

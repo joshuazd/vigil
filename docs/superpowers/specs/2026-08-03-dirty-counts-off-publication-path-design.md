@@ -324,21 +324,22 @@ memo-gating test that depends on it keeps its meaning.
 
 ## Documentation
 
-CLAUDE.md's `fillGit` bullet and open-item 1 both assert "~3.0-3.5s per poll, 99.7% of
-`Snapshot`, the memo can never skip" as current fact. So does the superseding note at the top
-of `docs/superpowers/specs/2026-07-31-collector-async-remote-design.md`. All three get today's
-measurement and the untracked-cache finding, so the next reader does not inherit a number
-that no longer reproduces.
+**This section shipped.** Four places asserted "~3.0-3.5s per poll, 99.7% of `Snapshot`, the
+memo can never skip" as current fact: CLAUDE.md's `fillGit` bullet and its then-first open item,
+the superseding note atop `2026-07-31-collector-async-remote-design.md`, the phase 5 design's
+"does not address the `fillGit` finding" bullet, and the phase 6 handoff's "standing candidate
+for the next structural work". All now carry today's measurement and the untracked-cache
+finding, so the next reader does not inherit a number that no longer reproduces.
 
 ## Files
 
+Only the last two rows were built. The rest is the shelved plan.
+
 | File | Change |
 |---|---|
-| `internal/collect/scheduler.go` | New. `poller` interface and `scheduler` struct relocated from `remote.go`, renamed from `remote`/`newRemote`. |
-| `internal/collect/remote.go` | Keeps `prPoller`; loses the interface and scheduler. |
-| `internal/collect/dirty.go` | New. `dirtyPoller`, keyed by git root. |
-| `internal/collect/collect.go` | `Collector` gains `dirty`, `local`, `RefreshDirty`, `PollStats`. `fillGit` calls `FetchGitMeta` and records timing. `Snapshot` gains `dirty.track`/`dirty.fill`. `Start`, `Wait`, `Invalidate` fan out to both schedulers. |
-| `internal/fetch/git.go` | `FetchGitStatus` splits into `FetchGitMeta` and `FetchDirtyCounts`. |
-| `internal/daemon/daemon.go` | `poll` times `Snapshot` and logs a slow poll, rate-limited. |
-| `CLAUDE.md` | `fillGit` bullet and open item 1 corrected. |
-| `docs/superpowers/specs/2026-07-31-collector-async-remote-design.md` | Superseding note corrected. |
+| `internal/collect/scheduler.go` | **Not built.** New. `poller` interface and `scheduler` struct relocated from `remote.go`, renamed from `remote`/`newRemote`. |
+| `internal/collect/remote.go` | **Not built.** Keeps `prPoller`; loses the interface and scheduler. |
+| `internal/collect/dirty.go` | **Not built.** New. `dirtyPoller`, keyed by git root. |
+| `internal/fetch/git.go` | **Not built.** `FetchGitStatus` splits into `FetchGitMeta` and `FetchDirtyCounts`. |
+| `internal/collect/collect.go` | **Built, instrumentation only**: `GitStats`, `Collector.GitStats()`, and `fillGit` recording its wall time and slowest pane path. The `dirty`/`local`/`RefreshDirty` half was not. |
+| `internal/daemon/daemon.go` | **Built.** `poll` times `Snapshot` and logs a slow poll, rate-limited to one line a minute. |
