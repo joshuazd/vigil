@@ -21,27 +21,52 @@ them to a synchronous `Snapshot` would have made the session list slower for rea
 unrelated to sessions. The seam phase 5 needs now exists, so phase 5 does not touch
 `Snapshot` at all.
 
-**Phase 5 merged 2026-08-03 as `b48979a`, and it is the first phase since phase 1 that is
+**Phase 5 merged 2026-08-03 as `b48979a`, and it was the first phase since phase 1 that was
 single-repo.** `~/dotfiles` was not touched. The PR-author column on review rows landed
 immediately after as part of the same merge.
 
-**Phase 6 is next, and it is deletions**, which makes it the cheapest phase and the one most
-likely to break something quietly. Only after living on phases 0-5:
+**Phase 6 closes the six-phase design out. All six phases are now merged.** It was deletions:
+four superseded shell scripts in `~/dotfiles`, plus this documentation update here - nothing
+else in vigil changed. Deleted from `~/dotfiles/scripts/scripts/` (branch `phase-6-deletions`,
+head `711b7d9` as of this writing, merging to `master` after the whole-branch review; this
+vigil docs change merges to `main` the same way - see the phase 6 handoff for exact merge
+commits once they exist):
 
-- `tmux-monitor` (orphaned, superseded by vigil)
-- `gh-review-poll` (superseded by phase 5's queue - but read the note below first)
-- `worktree-status` and its `.tmux.conf` prefix+w / prefix+C-w bindings
-- **`dispatch.1d.sh`, not `dispatch-bar`.** Phase 6's "delete one of the two menu bar
-  implementations" already resolves itself: SwiftBar is not installed, nothing runs the
-  plugin, and the native `dispatch-bar` is live under `com.user.dispatch-bar.plist`
-- The popup tunnel inside `dispatch-from-chrome`
+- `tmux-monitor` - orphaned, superseded by vigil.
+- `dispatch.1d.sh` - the SwiftBar half of the menu bar. SwiftBar was confirmed not installed
+  (no plugin directory, not running); the native `dispatch-bar`
+  (`com.user.dispatch-bar.plist`) is the surviving implementation and was confirmed running.
+- `worktree-status` and its `.tmux.conf` `prefix+w` / `prefix+C-w` bindings.
+- `gh-review-poll` and its `~/.local/state/gh-review-poll/` state directory. Its
+  `--detached --non-interactive` invocation had been the only production evidence that the
+  workflow scripts honour `--detached`; that evidence was replaced first, 2026-08-03, by a real
+  queue dispatch - see the phase 6 handoff for the numbers.
 
-Before deleting `gh-review-poll`, note that **its `--detached --non-interactive` invocation is
-the only production evidence that the workflow scripts honour `--detached`** - phase 5 never
-ran a real queue dispatch (see the handoff's "What was NOT verified"). Live on a real queue
-dispatch first, then delete it.
+**Unlike phases 0-4, phase 6's two repository halves were independent** - the dotfiles
+deletions did not depend on any vigil change and vice versa, so the "a change to one usually
+needs the other" warning above describes phases 0-4 only and does not carry forward to phase 6.
 
-**Read these two, in this order, before starting phase 6:**
+Two items on phase 6's original list turned out to need no work, checked 2026-08-03: the
+`dispatch-from-chrome` popup tunnel was already removed in phase 4 (nothing to delete), and
+"one of the two menu bar implementations" is `dispatch.1d.sh` above - SwiftBar was never a live
+consumer.
+
+**`lib/tmux.sh`'s `display-popup` branch (`run_worktree_popup`, around line 611) was kept on
+purpose and is NOT leftover phase 6 work.** It is the only code path for a manual
+`gh-review <url>` or `shortcut-implement <id>` run from a terminal - both call
+`run_worktree_popup` directly, never through the daemon's dispatch queue. Deleting it would
+silently turn every manual run's popup into inline output in the caller's own pane. **Do not
+"finish" this in a later cleanup pass.**
+
+`worktree-status` was not fully superseded: its Shortcut story-state column has no vigil
+equivalent. See the open item in "Key Conventions" below, next to the `fillGit` and
+session-viewport entries.
+
+**Read `docs/superpowers/2026-08-03-phase-6-deletions-handoff.md` first** - the deletion record,
+what was and was not verified, and why a green `make lint`/`make test` here proves nothing
+about the four dotfiles scripts.
+
+**Read these, in order, for the rest of the design's history:**
 
 1. **`docs/superpowers/2026-08-01-phase-5-work-queue-handoff.md`** - what shipped, the
    `%self%` bug that ten per-task reviews missed and only real data caught, the verification
@@ -227,3 +252,4 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - **A failed queue fetch is completely silent** - no log, no toast. "No assigned stories" and "Shortcut is unreachable" render identically. Consistent with `prPoller`, which does not log a failed `gh` either, and the reason `short` is deliberately absent from `main.go`'s `startupDependencies`. First diagnostic step is to run the poller's exact command by hand
 - **`queueRowBudget` gives the queue everything above `minTableRows = 3`.** With many sessions and a full queue the session table is squeezed to 3 rows even on a tall terminal, which inverts the design's premise that the session list is primary. A proportional policy would match the intent better; this is open
 - **The session table has no viewport.** `RenderTable` drops sessions past `height` with no scroll, so with a long queue some session rows are cursor-reachable and undrawn - the same defect class the queue fixed for itself. `enter` on a session is non-destructive and `m`/`x` confirm first, which is the only reason it was not blocking
+- **There is no vigil equivalent of `worktree-status`'s Shortcut story-state column.** Deleted in phase 6: it showed session, branch, git status and the story state for the `sc-NNNN` in the branch name. vigil's session table renders Indicator, Index, Name, Git, PR and State (`internal/view/table.go` `renderRow`, `internal/view/layout.go` `TableLayout`) and `session.Session` carries no story field. The work queue shows stories, but only assigned-and-not-done ones, and hides any a live session already covers - the opposite of "what state is this session's story in right now". Remaining ways to check: `short story <id>` or the Shortcut web UI. Adding a story column is feature work, not a phase 6 deletion, and is open
