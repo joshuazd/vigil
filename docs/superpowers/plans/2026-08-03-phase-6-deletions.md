@@ -553,7 +553,8 @@ happened rather than what was planned.
 
 **Interfaces:**
 - Consumes: the outcome of Tasks 1-3, including any deviation.
-- Produces: the handoff a phase 7 session reads first.
+- Produces: the handoff the next session reads first. There is no phase 7 - phase 6 is the last
+  phase the design defines, so that handoff is the end of the sequence, not a baton pass.
 
 - [ ] **Step 1: Rewrite CLAUDE.md's in-flight section**
 
@@ -586,7 +587,7 @@ Required content:
   reference sweep. A future reader must not infer that a green suite validated these deletions.
 - The `worktree-status` story-column loss, with the two remaining ways to get that information
   (`short story <id>`, the Shortcut web UI).
-- The two "already resolved" items, so phase 7 does not re-derive them.
+- The two "already resolved" items, so a later session does not re-derive them.
 - That `.nit.json` and `python/src/vigil/widgets.py` still mention deleted scripts, and why
   both were left.
 
