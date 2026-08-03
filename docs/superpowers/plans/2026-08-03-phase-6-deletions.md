@@ -53,7 +53,15 @@ verified").
 
 Both dispatches were confirmed by the user to have gone through `enter` on a queue row, which
 is the `Detached = true` path. Five sessions were created and **the client never left `main`**,
-so `--detached` reached `run_worktree_popup` and suppressed `teleport_client_to`. The
+so `--detached` reached `gh-review`/`shortcut-implement` and suppressed their own teleport call.
+**The gate is not `lib/tmux.sh:618`.** `gh-review` and `shortcut-implement` hardcode
+`--detached` into `run_worktree_popup`'s own `popup_args` regardless of their caller's own
+flag, so `run_worktree_popup`'s internal gate at `lib/tmux.sh:618` is unconditionally
+suppressed for these two callers and is live only for `gh-worktree` and `shortcut-worktree`,
+which append `--detached` conditionally. `gh-review` and `shortcut-implement` instead gate
+their own `teleport_client_to` with their own `${detached}` variable. The observation itself
+still stands as the evidence: five sessions were created and the client never left `main`, so
+the flag was honoured end to end - only which gate did the honouring was documented wrong. The
 `%self%` fix is live in the same reading: `short api /member` resolves to `joshuazd`, both
 assigned stories are found, and both are hidden by their own sessions.
 
@@ -92,13 +100,13 @@ output in the current pane. **Leave it.** Phase 6's popup item was about the
 
 ## `worktree-status` is not fully superseded, and this is the one real loss
 
-The design says `worktree-status` is "superseded by the panel". That is true for three of its
-four columns and false for the fourth.
+The design says `worktree-status` is "superseded by the panel". That is true for two of its
+four columns, degraded for one, and false for the fourth.
 
 | `worktree-status` column | vigil equivalent |
 |---|---|
 | Session | session name column |
-| Branch | git column |
+| Branch | **lost at a glance.** `GitColWithBg` (`internal/view/format.go:83`) renders `~N +N -N ↑N` and rebase age, never a branch name; `TableLayout` (`internal/view/layout.go:57-64`) has no branch field. The branch renders only in the dashboard detail panel, for the selected session (`internal/view/detail.go:43-49`), and panel mode has no detail panel at all |
 | Git (dirty / N unpushed) | git column |
 | **Story (Shortcut story state from `sc-NNNN` in the branch)** | **none** |
 
@@ -108,14 +116,17 @@ and no field carrying one on `session.Session`. The queue shows stories, but onl
 not-done* ones, and it hides any story a live session already covers - which is the exact set a
 session-oriented status table would be asked about.
 
-So deleting `worktree-status` loses the ability to see, for an existing work session, what
-state its Shortcut story is in. The remaining ways to get it are `short story <id>` and the
-Shortcut web UI.
+So deleting `worktree-status` loses two things, not one: the ability to see, for an existing
+work session, what state its Shortcut story is in, and the ability to see its branch name at a
+glance across every session at once rather than one at a time in the dashboard detail panel.
+The remaining ways to get it are `short story <id>` and the Shortcut web UI for story state;
+the dashboard detail panel, one session at a time, for branch.
 
-**This plan accepts the loss** rather than adding a story column to vigil, because that is
-feature work and this phase is deletions. It is recorded in Task 4's handoff as an explicit
-follow-up candidate, not as a silent regression. If the user would rather keep
-`worktree-status` until vigil grows a story column, skip Task 2 - nothing else in the plan
+**This plan accepts both losses** rather than adding a story column or an at-a-glance branch
+column to vigil, because that is feature work and this phase is deletions. It is recorded in
+Task 4's handoff as an explicit follow-up candidate, not as a silent regression. If the user
+would rather keep `worktree-status` until vigil grows a story column, skip Task 2 - nothing
+else in the plan
 depends on it.
 
 ## Edit sites
