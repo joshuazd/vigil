@@ -9,8 +9,8 @@ not a continuation of that design. Nothing here changes the phase model.
 Spans two repositories. Design:
 `docs/superpowers/specs/2026-08-03-session-hopping-design.md`. Plan:
 `docs/superpowers/plans/2026-08-03-session-hopping.md`. Both are **corrected by this handoff on
-three points** - see "Corrections to the spec and the plan" below, and prefer this document
-where they disagree.
+four points plus one measurement** - see "Corrections to the spec and the plan" below, and prefer
+this document where they disagree.
 
 | Repo | Base | Code tip | Commits |
 |---|---|---|---|
@@ -27,6 +27,34 @@ Both branches are named `session-hopping`. `~/dotfiles` carries **unrelated unco
 (`claude/.claude/settings.json`, `claude/.claude/skills/create-pr/SKILL.md`,
 `scripts/scripts/git-worktree-new`, and two untracked skill directories). Every task staged
 only the files it named. **Never `git add -A` in that repo.**
+
+## Read this first: the ordering fix is inert until the daemon restarts
+
+**If you test `M-j` against a daemon that is still running the old binary, the original bug is
+exactly what you will see, and it is indistinguishable from a failed fix.**
+
+`Session.ID` is additive and `protocol.Version` is still **1**, deliberately. So a new client
+talking to an **old** daemon decodes a snapshot with no `id` key, `ID` is the zero value `0` for
+every session, `(Created, ID)` degrades to `Created` alone, and every `Created` tie falls
+through to whatever order the daemon emitted - which is the alphabetical-ish raw order that
+caused complaint 1 in the first place. Same for a client reading a session cache written before
+`json:"id"` existed, until the first poll lands.
+
+`CLAUDE.md` states that **the daemon never restarts itself** when its binary changes: that was
+designed and rejected, because restarting would drop every connection and bounce every panel
+through daemon-lost on every install. The only signal is the `daemon outdated` marker clients
+render from `Snapshot.DaemonBin` - and on Linux even that is a permanent no-op (see the
+binary-refresh handoff's macOS-only landmine).
+
+So the order of operations for anyone verifying this work:
+
+1. `make install`
+2. **Kill the running daemon.** Any client will spawn a fresh one.
+3. Confirm the new daemon is the one answering, then test `M-j`.
+
+Skipping step 2 reproduces the bug this branch fixes. Nothing in either repository warns about
+this, and no test can catch it - by construction, the degraded behaviour is the old correct
+behaviour.
 
 ## What landed
 
@@ -290,22 +318,46 @@ below for why naming the server matters). This decides whether `tmux-hop`'s "fai
 posture is real:
 
 ```
-run-shell -b 'true'                                   -> name=zsh     mode=0   (pane untouched)
-run-shell -b 'exit 3'                                 -> name=[tmux]  mode=1   (view mode)
-run-shell -b 'echo OUT; echo ERR >&2; exit 1'         -> name=[tmux]  mode=1   (view mode)
+run-shell -b 'true'                                   -> mode=0   (pane untouched)
+run-shell -b 'exit 3'                                 -> mode=1   (view mode)
+run-shell -b 'echo OUT'                               -> mode=1   (view mode)
+run-shell -b 'echo ERR >&2'                           -> mode=0   (pane untouched)
+run-shell -b 'echo ERR >&2; exit 0'                   -> mode=0   (pane untouched)
+run-shell -b 'echo ERR >&2; exit 1'                   -> mode=1   (view mode)
+run-shell -b 'echo OUT; echo ERR >&2; exit 1'         -> mode=1   (view mode)
 ```
 
-So tmux drops the pane into view mode for a backgrounded command that either produces output or
-exits non-zero, and leaves it alone only for a silent success. `tmux-hop`'s `error()` lines and
-`switch-client`'s own `can't find session` are therefore visible to the user, and the
-out-of-range index no-op is silent because it returns 0 with no output - both by mechanism, not
-by luck.
+**The trigger is stdout output OR a non-zero exit - not "output" in general.** An earlier version
+of this section said "produces output or exits non-zero", which is wrong: `echo ERR >&2; exit 0`
+leaves the pane at `mode=0`, so **stderr alone is invisible**. The two rows that separate the
+mechanisms (`echo OUT` alone, and `echo ERR >&2; exit 0`) were added when the claim was
+re-derived; the original three cases could not tell the two rules apart, because every one of
+them paired output with a non-zero exit or had neither.
+
+The conclusions for `tmux-hop` still hold, but they now rest on the exit code rather than on the
+message: **every `tmux-hop` error path pairs its stderr line with `return 1`** - `neighbour`'s
+"No current tmux client", `main`'s "Not next, prev, or a non-negative integer", `usage >&2`, and
+`common.sh`'s `error()` writes to fd 2 (`lib/output.sh:26-28`) - and `switch-client`'s own
+`can't find session` also exits non-zero. So they are visible. The out-of-range index no-op is
+silent because it returns 0 *and* writes nothing. Had any error path used `error()` with
+`return 0`, the user would have got nothing at all.
+
+**Consequence for `M-o`, which nobody has checked.** The binding is
+`{ cd "#{pane_current_path}" && gh pr view --web; } || tmux display-message "no PR for this branch"`.
+If `gh pr view --web` writes its "Opening … in your browser" line to **stderr** and exits 0 -
+which is the shape a CLI normally uses for that message - then a *successful* `M-o` correctly
+pops no overlay, and only a failure does. If it writes to **stdout** instead, every successful
+`M-o` drops the pane into view mode over a one-line message, which is a visible annoyance rather
+than a defect. **Nobody has confirmed which stream `gh` uses, and confirming it means running
+`gh pr view --web`, which opens a browser** - deliberately not done here, and the same reason
+`M-o` has never been run against a real PR at all.
 
 ## Corrections to the spec and the plan
 
-Three prose claims in the design and plan were wrong. All three were caught by a reviewer
-re-deriving the claim rather than reading it. The spec and plan have been edited in place; this
-section is the record of what changed and why.
+**Four** prose claims in the design and plan were wrong. All four were caught by a reviewer
+re-deriving the claim rather than reading it - three during the task reviews, and the fourth
+(`awk`'s `==`) only in the whole-branch review. The spec and plan have been edited in place;
+this section is the record of what changed and why.
 
 **1. `(Created, ID)` is not "provably the same total order" as pure `session_id`.** It is the
 same order under the assumption that `session_created` is monotonic in `session_id`, and that
@@ -351,6 +403,15 @@ non-zero exit with output puts the pane into view mode (measured above), so the 
 shell's parse error instead of the intended message. Accepted risk: no worktree path in this
 toolchain contains a `"`.
 
+**4. "`awk`'s `==` compares exactly" is false, and the script it justified was wrong.** Both
+operands in `if ($0 == cur)` are strnums, and awk compares two strnums numerically whenever both
+look numeric, so a session named `7` matched `007`. `==` does not give an exact comparison here;
+the explicit coercion does. The spec and the plan both carried the claim and both are corrected,
+and the script now reads `if ($0 "" == cur "")`. See "The whole-branch fix wave" for the
+verification. Note the shape this shares with corrections 2 and 3: the mechanism that decides is
+outside the diff - awk's comparison rules, tmux's target parser, `sh`'s quoting - and the diff
+itself looks right.
+
 ## Verification limits
 
 The honest account. Read this before trusting anything above.
@@ -380,12 +441,17 @@ The honest account. Read this before trusting anything above.
   occurred in the window watched (~2-4 minutes)** and nothing was appended to the log. Unit
   tests are the whole of the evidence for that fix. The next real transition on this machine is
   the first live proof, and it is worth looking for: `grep 'notify hook' ~/.local/state/vigil/vigild.log`.
-- **`TestTheFirstPollLogsNoDrops` is non-discriminating.** It survives full removal of the code
-  it was written to pin - both `if s.prevSessions != nil` → `if true` and deleting the branch
-  entirely leave it green - because ranging over a nil map in Go is a zero-iteration loop. It
-  tests Go's semantics, not this implementation. **The plan's Step 8.2 mutation check must not
-  be recorded as passed.** The two positive tests (`TestPollLogsADroppedSession`,
-  `TestPollLogsEverySessionDroppedInOnePoll`) do discriminate and did fail under mutation 1.
+- **`TestTheFirstPollLogsNoDrops` was non-discriminating and has been deleted** (see "The
+  whole-branch fix wave"). It survived full removal of the code it was written to pin - both
+  `if s.prevSessions != nil` → `if true` and deleting the branch entirely left it green - because
+  ranging over a nil map in Go is a zero-iteration loop. It tested Go's semantics, not this
+  implementation. **The plan's Step 8.2 mutation check must not be recorded as passed.** The two
+  positive tests (`TestPollLogsADroppedSession`, `TestPollLogsEverySessionDroppedInOnePoll`) do
+  discriminate and did fail under mutation 1.
+- **`logDroppedSessions`' placement after `poll`'s `err != nil` return was proved by hand and
+  guarded by nothing** until the fix wave added `TestAFailingPollLogsNoDrops`. A reviewer moved
+  the call above the return and the whole `internal/daemon` suite passed. That is now pinned and
+  mutation-checked.
 - **T6's interactive smoke test was never run.** No binding was pressed or simulated against
   the live server. `M-j`/`M-k` moving and wrapping *as a keypress*, `M-<n>` landing on the right
   row with the panel visible, and `M-o` actually opening a browser are all unverified. What was
@@ -425,8 +491,12 @@ kill is not waiting on git. The components sum to roughly
 1.3s worst case, which does not account for "a few seconds".
 
 **The first row is wrong.** The daemon log is opened `O_CREATE|O_WRONLY|O_APPEND`
-(`internal/daemon/spawn.go:26`), never truncated, and it runs continuously from 09:33:58 to
-16:19:13 on 2026-08-03. It contains **eight** `slow poll` lines, not zero:
+(`internal/daemon/spawn.go:26`), never truncated, and it runs continuously from 09:33:58 on
+2026-08-03. It contains **at least eight** `slow poll` lines as of 16:19:13, not zero - and a
+re-run at 16:48 found a ninth (`16:48:55 slow poll: 1.027s total, 978ms in git, slowest 978ms at
+/Users/joshua.zink-duda/sc-223374`). **Any count of this log is a floor with a timestamp, never
+a total**, which is the same mistake in miniature as the row it corrects; re-run the grep rather
+than quoting a number from here. The eight as of 16:19:
 
 ```
 2026/08/03 14:30:27 slow poll: 11.1s total, 11.085s in git, slowest 11.085s at /Users/joshua.zink-duda/sc-223374
@@ -446,12 +516,13 @@ when it was written, and it was the sole support for two things the spec asserte
 for `CLAUDE.md`'s 2026-08-03 demotion. **Neither survives.** Both have been struck from the
 spec.
 
-Read the eight lines with `logSlowPoll`'s rate limit in mind
-(`internal/daemon/daemon.go:413-427`): it is a one-minute **window**, so eight lines means at
-least eight distinct minutes containing a poll over `tmux_interval`, not eight slow polls. The
-shape also matches what `CLAUDE.md` predicted as the remaining unexplained suspect: six of the
-eight are 1.0-1.6s at `pr-35108`, a freshly dispatched worktree, which is the cold-worktree
-first-`status` exposure; the 11.1s outlier at `sc-223374` is not explained by anything.
+Read those lines with `logSlowPoll`'s rate limit in mind: it is a one-minute **window**, so nine
+lines means at least nine distinct minutes containing a poll over `tmux_interval`, not nine slow
+polls. The shape only half matches what `CLAUDE.md` predicted as the remaining unexplained
+suspect: six of the nine are 1.0-1.6s at `pr-35108`, a freshly dispatched worktree, which is the
+cold-worktree first-`status` exposure. **The other three are all `sc-223374`, a warm long-lived
+worktree that has been polled all day, and nothing explains those** - including the 11.1s
+outlier. The cold-worktree story cannot cover a third of the sample.
 
 An 11-second poll in a 1-second cadence blocks publication for eleven seconds, and a session
 that has already been killed stays on screen for all of it. That is a mechanism for the
@@ -485,6 +556,27 @@ it is `fillGit` and the design in
 `docs/superpowers/specs/2026-08-03-dirty-counts-off-publication-path-design.md` is the answer
 already written for it.
 
+**But the absence of a `slow poll` line does NOT rule out `fillGit`, and the earlier version of
+this procedure implied it did.** `slowPollLogInterval` (`internal/daemon/daemon.go`) is a
+one-minute **window**, not an edge trigger, and `logSlowPoll` returns early for any slow poll
+inside a minute that has already logged one. So a genuinely slow poll during `prefix d` is
+silently omitted whenever an earlier slow poll shares its minute - which is precisely the
+correlated case, since a cleanup follows a dispatch and a fresh worktree produces a run of them.
+Read the log as a one-way test: a line inside the window is evidence *for* `fillGit`; no line is
+no information.
+
+The seam that does not lie is **`Collector.GitStats()`**, which `logSlowPoll` itself reads. It
+carries `Total`, `Slowest` and `SlowestPath` for the poll that just finished, unconditionally
+and with no rate limit. To settle the question rather than sample it, log it per poll from
+`poll` for the duration of the experiment, or raise the resolution by shrinking
+`slowPollLogInterval`. Mind its threading rule (`CLAUDE.md`): the `fillGit` half is
+goroutine-owned and unguarded, so only the goroutine that called `Snapshot` may read it, and
+only after `Snapshot` returns.
+
+The daemon log's timestamps are now `LstdFlags|Lmicroseconds`. They were whole seconds when the
+0.968s figure above was taken, which is why that gap could not be resolved from the log at the
+time and had to be measured out of band.
+
 The `session dropped` line is already working on live data - sixteen lines between 15:35 and
 16:00, including the throwaway sessions the tasks created and killed:
 
@@ -509,23 +601,60 @@ predictable name in a world-writable directory, so it is symlink-attackable in p
 (negligible on a single-user machine, and temporary); and the `stamp` helpers are `|| true`, so
 a failure to write is silent apart from bash's own stderr line.
 
+## The whole-branch fix wave
+
+One fix wave after the whole-branch review, on top of the tips in the table at the top. Every
+finding below was found by re-deriving a claim, not by reading a diff - the same pattern the
+process notes record.
+
+**In vigil:**
+
+- **`logDroppedSessions` lost the dead `if s.prevSessions != nil` branch** and kept the loop.
+  Ranging a nil map is a zero-iteration loop, so no test in the package could distinguish the
+  branch's presence; two reviewers confirmed by deleting it and running green.
+  `internal/daemon/daemon.go:66`'s "nil means no poll has succeeded yet" went with it. Precedent:
+  `CLAUDE.md`'s `min(cursor, count-1)` clamp.
+- **`TestTheFirstPollLogsNoDrops` deleted** rather than kept as a green non-test.
+- **`TestAFailingPollLogsNoDrops` added**, pinning the one thing about this feature that was
+  load-bearing and unguarded: the call site's position after `poll`'s `err != nil` return. It
+  seeds two sessions with a successful poll, asserts the seed took, then fails the collector and
+  asserts no `session dropped` line, that `poll failed` did appear, and that `prevSessions` still
+  holds the last successful set. Mutation-checked by moving the call above the return.
+- **`TestDroppedSessionsAreLoggedInSortedOrder` added**, and `logDroppedSessions` now sorts. Map
+  iteration order is random, so a multi-drop poll emitted lines in arbitrary order in a log whose
+  whole purpose is being read against timestamps. Eight names rather than two, so an exact-order
+  assertion cannot pass by chance.
+- **The daemon log gained `log.Lmicroseconds`.** `log.LstdFlags` alone gives whole seconds, and
+  the gap this instrumentation exists to measure - `kill-session returned` → `session dropped` -
+  was 0.968s. The shell stamps it is read against are epoch **milliseconds**. Three drops in one
+  poll were previously indistinguishable inside a single timestamp. No test asserted on the
+  format (`grep -rn 'LstdFlags\|Lmicroseconds'` had exactly one production hit and none in
+  tests), so nothing broke.
+- **`README.md`'s `notify` default was still the never-working form.** It documented
+  `tmux display-message "vigil: {session} → {new_state}"` - the exact string T4 exists to kill,
+  and it also dropped `-d 5000`. Replaced with the shipped default, plus a paragraph carrying the
+  same reasoning as `config.go`'s comment so nobody "fixes" the odd quoting back.
+
+**In dotfiles:**
+
+- **`tmux-hop`'s `awk` comparison was numeric, not exact.** `if ($0 == cur)` compares two
+  **strnums** - a field and a `-v` assignment - and awk compares two strnums numerically whenever
+  both look numeric. So `M-j` from a session named `7` matched the session named `007`, and `1`
+  matched `1.0`, `+1` and `" 1"`. Now `if ($0 "" == cur "")`; the empty-string concatenation
+  strips the numeric attribute. Verified against a real tmux server holding sessions named `7`,
+  `007`, `1`, `1.0`, `zz`: the fixed script walks `7 → 007 → 1 → 1.0 → zz → 7` with `prev` its
+  exact inverse, while the old code sent `next` from `7` to `1` and `prev` from `7` to `7` itself.
+  **This is the third prose claim on this branch that was wrong about a mechanism outside the
+  diff**, after the colon rationale and the quoting claim: the spec and plan both said "`awk`'s
+  `==` compares exactly, which subsumes the problem", and it does not. Both are corrected, and
+  the correct statement is that it compares as strings *because the operands are coerced*.
+
 ## Deferred and open
 
 Nothing below is scheduled.
 
 **In vigil:**
 
-- **The `if s.prevSessions != nil` guard in `logDroppedSessions` is dead.** A reviewer deleted
-  the branch and the package still passed, because ranging a nil map is a no-op. **Ruling:
-  remove the branch, keep the loop.** Same precedent as the `min(cursor, count-1)` removal
-  recorded in `CLAUDE.md`: with both a guard and the thing it guards against being harmless, no
-  test can distinguish them, so the guard is not documentation - it is a second thing that has
-  to stay true.
-- `internal/daemon/daemon.go:66`'s comment ("nil means no poll has succeeded yet") asserts a
-  distinction nothing can observe, for the same reason.
-- **`README.md:108` still documents the old, broken `notify` default** as
-  `tmux display-message "vigil: {session} → {new_state}"`. No task in the plan touched README.
-  Anyone copying it gets a hook that has never worked.
 - The plan's item 4 for the whole-branch review - the `notify` default under a *single*-quoted
   session name - was done and passed. It is worth knowing why it was interesting: before the
   fix that case reduced to one shell argument but the wrong one
@@ -578,9 +707,11 @@ author.**
 - **T3's `TestTheFirstPollLogsNoDrops` is non-discriminating** and shipped that way. It tests
   Go's nil-map semantics.
 
-Separately, **three prose claims were wrong**, and they are the three corrections above: the
-"provably the same total order" claim, defect 3's colon rationale, and the
-single-versus-double-quote claim.
+Separately, **four prose claims were wrong**, and they are the four corrections above: the
+"provably the same total order" claim, defect 3's colon rationale, the
+single-versus-double-quote claim, and "`awk`'s `==` compares exactly". The fourth is the worst of
+the set, because unlike the other three it had a **live defect behind it**: the wrong rationale
+produced a wrong comparison, and `M-j` from a session named `7` went to the wrong session.
 
 **Which mechanism caught which class, because they did not overlap:**
 
@@ -588,12 +719,16 @@ single-versus-double-quote claim.
   own vacuous tests that way and fixed them before reporting; T3's found that the brief's
   predicted failure did not happen and reported it rather than ticking the box. Neither was
   found by reading.
-- **Reviewer re-derivation caught every prose defect, and nothing else could have.** All three
-  wrong claims are about mechanisms outside the diff: tmux's target parser, `sh`'s quoting, and
-  the relationship between two sort keys. A reviewer reading the diff sees nothing wrong,
-  because nothing in the diff *is* wrong. The reviewer who ran `has-session -t '=a.b:c[d+e]'`
-  found the colon claim; the one who created `dir_with_'_quote` found the quoting claim
-  backwards; the one who tried to construct a clock-skew counterexample found one.
+- **Reviewer re-derivation caught every prose defect, and nothing else could have.** All four
+  wrong claims are about mechanisms outside the diff: tmux's target parser, `sh`'s quoting, awk's
+  comparison rules, and the relationship between two sort keys. A reviewer reading the diff sees
+  nothing wrong, because nothing in the diff *is* wrong. The reviewer who ran
+  `has-session -t '=a.b:c[d+e]'` found the colon claim; the one who created `dir_with_'_quote`
+  found the quoting claim backwards; the one who tried to construct a clock-skew counterexample
+  found one; the one who piped `printf '7\n007\n'` through the shipped `awk` program found the
+  last, and that one was a live defect rather than only a wrong explanation. **Three of the four
+  needed nothing but a one-line shell command run against the real tool** - which is the cheapest
+  review technique on this list and the one that keeps finding things.
 
 **A fourth mechanism was needed and was not in the plan: re-checking a measurement the design
 already treated as settled.** The "0 `slow poll` lines" row was false when written, survived

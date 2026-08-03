@@ -217,16 +217,22 @@ tmux list-sessions -F '#{session_id}|#{session_name}' \
 ```
 
 `next`/`prev` resolve the target with a single `awk` pass over that list, comparing
-session names with `==` and wrapping at both ends. `<n>` is `sed -n "$((n+1))p"`.
+session names with `$0 "" == cur ""` and wrapping at both ends. `<n>` is
+`sed -n "$((n+1))p"`.
 
 This replaces the two inline `run-shell` bodies at `.tmux.conf:44-45` and fixes three
 latent defects in them along the way:
 
 - **`grep "^${current}$"` treats the session name as a regex.** Names contain
   metacharacters; `SC-223374 Add bulk "Report Investigation" action` is a live example.
-  `awk`'s `==` compares exactly, which subsumes the problem rather than escaping around
-  it, and also removes the `grep -A1`/`grep -B1` context trick and the two `[ "$x" = "$current" ]`
-  wrap-around special cases.
+  `awk` compares as strings *because the operands are coerced* -
+  `if ($0 "" == cur "")`, not `if ($0 == cur)` - which subsumes the problem rather than
+  escaping around it, and also removes the `grep -A1`/`grep -B1` context trick and the two
+  `[ "$x" = "$current" ]` wrap-around special cases. **`==` on its own is not exact.** Both
+  operands are strnums (a field, and a `-v` assignment), and awk compares two strnums
+  numerically whenever both look numeric, so a session named `7` matches `007`, and `1`
+  matches `1.0`, `+1` and `" 1"`. Concatenating the empty string drops the numeric
+  attribute; that coercion, not `==`, is what makes the comparison exact.
 - **`switch-client -t "$name"` is not an exact match.** Without a `=` prefix tmux may
   resolve `SC-223477` against `SC-2234770`. This is the same load-bearing-prefix hazard
   already documented for `session.QueueItem.SessionPrefix()`'s trailing space. All

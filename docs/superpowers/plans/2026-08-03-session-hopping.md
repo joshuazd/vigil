@@ -1035,9 +1035,13 @@ ordering bug, and this script must not reproduce any of them:
 
 1. `grep "^${current}$"` treats the session name as a **regex**. Names contain
    metacharacters — `SC-223374 Add bulk "Report Investigation" action` is live on this
-   machine. `awk`'s `==` compares exactly, which removes the problem rather than escaping
-   around it, and also removes the `grep -A1`/`-B1` context trick and both
-   `[ "$x" = "$current" ]` wrap-around special cases.
+   machine. `awk` compares as strings *because the operands are coerced* -
+   `if ($0 "" == cur "")` - which removes the problem rather than escaping around it, and
+   also removes the `grep -A1`/`-B1` context trick and both `[ "$x" = "$current" ]`
+   wrap-around special cases. **Corrected after the fact: the brief below wrote
+   `if ($0 == cur)`, and `==` on its own is not exact.** Both operands are strnums, and awk
+   compares two strnums numerically when both look numeric, so `7` matched `007` and `1`
+   matched `1.0`. The shipped script coerces with `""`.
 2. `switch-client -t "$name"` is **not an exact match**. Without a `=` prefix tmux may
    resolve `SC-223477` against `SC-2234770`. This is the same load-bearing-prefix hazard
    already documented for `session.QueueItem.SessionPrefix()`'s trailing space in vigil.
@@ -1205,6 +1209,11 @@ fi
 
 main "${@}"
 ```
+
+**The `awk` body above is wrong as written and was corrected on the branch.** It says
+`if ($0 == cur)`; the shipped script says `if ($0 "" == cur "")`. Both operands are
+strnums and awk compares two strnums numerically when both look numeric, so `7` matched
+`007` and `1` matched `1.0`, `+1`, `" 1"`. Do not copy the body from here.
 
 Note the `awk` program uses `idx == 0` for "current session not found" rather than
 `!idx`, because an unset awk variable compares equal to 0 and 0 is never a valid
@@ -1424,10 +1433,13 @@ Every component measures fast:
 
 | gap | measured 2026-08-03 |
 |---|---|
-| `slow poll` lines in the entire daemon log | 0 |
+| ~~`slow poll` lines in the entire daemon log~~ | ~~0~~ **WRONG - it was at least nine, one of them 11.1s** |
 | `tmux display-popup -E` startup | 0.01-0.02s |
 | cleanup invoke → session gone from `tmux list-sessions` | 0.272s |
 | tmux drops the session → daemon snapshot drops the row | 0.968s (the 1s-cadence floor) |
+
+The first row is false and was false when it was written; the four timing rows stand. The
+same error is corrected at Task 8 Step 2 below, and in full in the handoff's "Complaint 1".
 
 That sums to ~1.3s, not "a few seconds". This task adds the timestamps that turn one real
 `prefix d` into a timeline. **It fixes nothing.** The fix gets its own spec, written
@@ -1596,9 +1608,17 @@ Three edits, no more:
    phase — the file says plainly that there is no phase 7, and this is a defect-and-feature
    batch, not a continuation of that design.
 
-Do not restructure the file. Do not touch the `fillGit` demotion note beyond adding, in
-one sentence, that 2026-08-03's zero `slow poll` lines over a full day is a third data
-point consistent with the demotion.
+Do not restructure the file. Do not touch the `fillGit` demotion note.
+
+**Corrected after the fact - this instruction was wrong and must not be followed.** It
+originally said to add, in one sentence, "that 2026-08-03's zero `slow poll` lines over a
+full day is a third data point consistent with the demotion." **There were never zero.**
+Re-running the grep found **nine** lines in that day's log, including
+`14:30:27 slow poll: 11.1s total, 11.085s in git`, which predates the design file by seven
+minutes. So the number was false when the design asserted it, and it is not a data point
+for the demotion in either direction. The design and the handoff have been corrected; this
+was the last copy on the branch still stating it as fact. See "Complaint 1" in
+`docs/superpowers/2026-08-03-session-hopping-handoff.md`.
 
 - [ ] **Step 3: Verify the claims you just wrote**
 

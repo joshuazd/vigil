@@ -29,13 +29,18 @@ never touched `Snapshot`).
 in that territory - the launch path, panel creation, the dispatch hook chain - usually still
 needs both. Phases 5 and 6 were single-repo, and phase 6's two halves were independent.
 
-**Session hopping (2026-08-03, vigil `2cfae6c`, `~/dotfiles` `515b3df`) is not in the table
-above and is not a seventh phase.** It is a defect-and-feature batch out of three user
+**Session hopping (2026-08-03, vigil branch tip `dd6d7ad`, `~/dotfiles` branch tip `1a224b0`;
+code tips `2cfae6c` and `515b3df`, with documentation on top) is not in the table above and is
+not a seventh phase.** It is a defect-and-feature batch out of three user
 complaints - the session order disagreeing with the `M-j`/`M-k` bindings, hopping requiring
 vigil at all, and a session lingering in the list after `prefix d` - not a continuation of the
 six-phase design. It did span both repositories.
 `docs/superpowers/2026-08-03-session-hopping-handoff.md` is its authority, and it **corrects
-its own design and plan on three points plus one measurement**; read it before either.
+its own design and plan on four points plus one measurement**; read it before either. **Its first
+section is the one to read before testing anything**: `Session.ID` is additive with
+`protocol.Version` still 1, so a new client fed by an *old* daemon sees `ID: 0` everywhere,
+`(Created, ID)` degrades to `Created`, and the original bug is exactly what you get. Kill the
+daemon after `make install`.
 
 ### Start here
 
@@ -116,11 +121,15 @@ sustained cadence. `docs/superpowers/specs/2026-08-03-dirty-counts-off-publicati
 is the design that was written for it and **deliberately not implemented** - read its problem
 section before re-ranking this, and use the `slow poll` daemon log line as the evidence. **The
 session-hopping design claimed zero `slow poll` lines in the whole daemon log as a third data
-point for this demotion, and that count was simply wrong**: the same append-only log holds
-eight on 2026-08-03, six of them 1.0-1.6s at a freshly dispatched worktree and one at 11.1s
-total with 11.085s in git, timestamped seven minutes before the design that recorded zero - so
-there is no third data point, the slow path is live on this machine, and re-running the grep
-is the first thing to do before re-ranking this.
+point for this demotion, and that count was simply wrong**: the same append-only log holds **at
+least eight as of 16:19 on 2026-08-03, and at least nine as of 16:48** - the log is append-only
+and never truncated, so any count here is a floor with a timestamp, never a total. Six of the
+nine are 1.0-1.6s at `pr-35108`, a freshly dispatched worktree, which is the cold-worktree
+story; one is 11.1s total with 11.085s in git, timestamped seven minutes before the design that
+recorded zero. **Three of the nine are `sc-223374`, a warm long-lived worktree, and the
+cold-worktree-first-`status` story does not explain those** - that is exactly the suspect this
+bullet names as untested. So there is no third data point, the slow path is live on this
+machine, and re-running the grep is the first thing to do before re-ranking this.
 
 **Two silent-failure modes to know about before debugging anything in this area**, neither of
 them scheduled for a fix: a failed queue fetch is completely silent, so "no assigned stories"
@@ -286,7 +295,7 @@ make install   # install to ~/.local/bin/vigil via a temp file and rename, never
 - The review-threads poll fetches only the unresolved count (`reviewThreadsQuery` has no `comments(` connection). Comment bodies are fetched on demand for the selected branch (`FetchReviewComments`) and cached by branch in `Model.reviewComments`; the cache is only cleared by `r`
 - Detail panel: three modes (pane, PR description, review comments) with auto-select by state. Comments mode costs one `gh api graphql` call the first time a branch is viewed
 - Session filtering by state, sorting by created/state/alpha, batch operations via multi-select
-- **`SortCreated` compares `(Created, ID)`, and the second key is not optional.** `#{session_created}` is whole seconds, so ties are common; the tie used to fall through the stable sort to `ListSessions`' alphabetical order while `~/dotfiles`' `M-j`/`M-k` ordered by `#{session_id}`, which is exactly why the two disagreed. **Not pure `ID`**, because `ID` 0 means a session hydrated from a cache file written before `json:"id"` existed - `(Created, ID)` degrades to today's behaviour for those, where pure `ID` would hoist every one of them to the front until the first poll landed. `ID` 0 is also legitimately tmux's first session (`$0`) and the comparator is right either way: 0 sorts first and a real `$0` is the oldest. The equivalence with the bindings' pure-`session_id` order holds only while `session_created` is monotonic in `session_id`, which is **not** guaranteed - a backwards clock step between two creations makes them disagree for that pair - so do not restore the "provably the same total order" wording the design shipped with. The index column needs nothing: `RenderTable` passes its loop index `i` to `renderRow`, which passes it to `indexCol`, so the label is absolute rather than viewport-relative and scrolling cannot shift it; `indexCol` blanks past 9, which is why there are ten digit bindings and no eleventh. **`~/dotfiles/scripts/scripts/tmux-hop` is the other half of this contract and must never invoke vigil** - not the binary, not the daemon, not the socket - because tmux navigation has to work on a machine with vigil uninstalled. That is what makes the two orders one convention rather than two implementations. One caveat on the digit bindings: `LayoutForWidth` drops the index column below `tierNoGit` (41), so the landscape panel's default 40 columns renders no index for `M-<n>` to match, and the numbers exist only in the dashboard or a panel 41 columns or wider
+- **`SortCreated` compares `(Created, ID)`, and the second key is not optional.** `#{session_created}` is whole seconds, so ties are common; the tie used to fall through the stable sort to `ListSessions`' alphabetical order while `~/dotfiles`' `M-j`/`M-k` ordered by `#{session_id}`, which is exactly why the two disagreed. **Not pure `ID`**, because `ID` 0 means a session hydrated from a cache file written before `json:"id"` existed - `(Created, ID)` degrades to today's behaviour for those, where pure `ID` would hoist every one of them to the front until the first poll landed. `ID` 0 is also legitimately tmux's first session (`$0`) and the comparator is right either way: 0 sorts first and a real `$0` is the oldest. **The same degradation makes the fix inert against an old daemon**, which is the first thing to check when `M-j` still looks broken: `Session.ID` is additive and `protocol.Version` stayed 1, so an old daemon's snapshot has no `id` key, every session decodes to `ID: 0`, the tie falls through to `Created` alone and lands back on the original bug. The daemon never restarts itself by design, so `make install` is not enough - kill it. Nothing warns and no test can catch it: the degraded behaviour *is* the old behaviour. The equivalence with the bindings' pure-`session_id` order holds only while `session_created` is monotonic in `session_id`, which is **not** guaranteed - a backwards clock step between two creations makes them disagree for that pair - so do not restore the "provably the same total order" wording the design shipped with. The index column needs nothing: `RenderTable` passes its loop index `i` to `renderRow`, which passes it to `indexCol`, so the label is absolute rather than viewport-relative and scrolling cannot shift it; `indexCol` blanks past 9, which is why there are ten digit bindings and no eleventh. **`~/dotfiles/scripts/scripts/tmux-hop` is the other half of this contract and must never invoke vigil** - not the binary, not the daemon, not the socket - because tmux navigation has to work on a machine with vigil uninstalled. That is what makes the two orders one convention rather than two implementations. One caveat on the digit bindings: `LayoutForWidth` drops the index column below `tierNoGit` (41), so the landscape panel's default 40 columns renders no index for `M-<n>` to match, and the numbers exist only in the dashboard or a panel 41 columns or wider
 - **The default `notify` hook's adjacent quoting is correct and the readable form has never worked.** `tmux display-message -d 5000 "vigil: "{session}" → "{new_state}` (`internal/config/config.go:66`) closes the literal before each placeholder and reopens after it, so the shell concatenates the pieces into the one argument `display-message` accepts. `ExpandHook` guarantees **one shell-quoted word per placeholder**, which is the whole reason `"vigil: {session} → {new_state}"` cannot work: the placeholder lands as `'...'` inside the hook's own `"..."`, and dotfiles' `session_name_from_title` produces names containing literal double quotes that close that string early and split the message in two. Every fire failed with `command display-message: too many arguments (need at most 1)` - 22 such lines on 2026-08-03 alone, 26 in the log, and zero successes ever. `rawPlaceholders` was **not** widened to fix it and must not be; the hook body was what was wrong. Any hook needing a placeholder inside a larger string has to concatenate the same way
 - State transition notifications with configurable hooks
 - Stale branch warnings when rebase age exceeds threshold
