@@ -155,12 +155,22 @@ func TestRunReportsACleanExitDespiteALeakedDescendant(t *testing.T) {
 // command must still be an error, or a hook timeout becomes silence. The bound
 // is the second claim - a cancellation must not spend the wait delay before
 // reporting, and killBound is under it so one that did fails here.
+//
+// The explicit exec is load-bearing and the bound is unportable without it.
+// Run has no process group kill by design, so the deadline can only bound wall
+// clock when the direct child is the whole tree: macOS /bin/sh is bash, which
+// execs the sole command of a -c and leaves one process, while Linux /bin/sh is
+// dash, which forks and leaves sleep holding the inherited pipe after its
+// parent is signalled - the wait delay then bounds it at 2s and this fails.
+// exec pins the single-process precondition on either shell. The leaked
+// descendant is TestRunIsBoundedByADescendantHoldingThePipe's subject, not this
+// one's.
 func TestRunStillReportsAKilledCommandAsAnError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	c := &ExecCommander{}
 	start := time.Now()
-	_, err := c.Run(ctx, "", "sh", "-c", "sleep 10")
+	_, err := c.Run(ctx, "", "sh", "-c", "exec sleep 10")
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("got nil, want a kill error")
