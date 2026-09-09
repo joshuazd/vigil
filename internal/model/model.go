@@ -1588,7 +1588,14 @@ func (m *Model) checkStateTransitions() {
 		}
 	}
 
-	if !m.insideTmux && m.cfg.GetSettingBool("auto_focus") && time.Since(m.lastManualNav) > autoFocusCooldown {
+	// Auto-focus exists to point the detail panel at the session needing
+	// attention, so a panel is excluded: it has no detail panel, leaving a
+	// cursor move that nothing renders and that fights the user's own j/k. The
+	// gate is panelMode and not detailOpen because detailOpen is a runtime
+	// toggle, which would switch auto-focus on and off with a keypress.
+	if !m.insideTmux && !m.panelMode &&
+		m.cfg.GetSettingBool("auto_focus") &&
+		time.Since(m.lastManualNav) > autoFocusCooldown {
 		m.maybeAutoFocus()
 	}
 }

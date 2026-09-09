@@ -44,6 +44,24 @@ Vigil discovers all tmux sessions, reads git status from each session's working 
 
 If `vigil daemon` is running, `vigil` consumes its broadcast snapshots instead of polling on its own. If the daemon isn't running, is unreachable, or doesn't send a snapshot within a few seconds of connecting, `vigil` falls back to polling tmux/git/PR state itself - both modes render identically.
 
+### A permanent panel outside tmux
+
+`vigil --panel` does not have to run inside tmux. In an iTerm2 split pane above a tmux pane it becomes one panel that survives every session switch, rather than one panel per session.
+
+Set it up once, by hand. The pane must be **created** with the `Vigil Panel` profile - `Cmd+Shift+D` splits with the *current* profile, and applying the right profile afterwards only changes appearance, leaving a correctly-profiled pane running a bare shell:
+
+```bash
+osascript -e 'tell application "iTerm2" to tell current session of current tab of current window to split horizontally with profile "Vigil Panel"'
+```
+
+Run that from the tmux pane, drag the new pane above it, then `Window > Save Window Arrangement` and `Settings > General > Startup > "Open default window arrangement"`. There is no script, deliberately - iTerm2's AppleScript `split horizontally` always adds the new pane *below* the one it splits, so a scripted split can only put vigil underneath; only the Python API can place a pane above, and an arrangement is what persists the layout anyway.
+
+The `Vigil Panel` profile lives in `~/dotfiles` (a separate repository) as an iTerm2 Dynamic Profile. It matters because an arrangement restores a pane's *profile*, not a command typed at a prompt: a pane where you typed `vigil --panel` comes back as a bare shell, while one opened with that profile comes back running vigil. Its command is `/bin/zsh -c 'vigil --panel; exec /bin/zsh -l'`, and the `zsh -c` wrapper is required - a profile's custom command is not a login shell, so it starts with a PATH that has no `gh`, and vigil's dependency check then refuses to start and iTerm2 closes the pane with no explanation.
+
+Set `panel_auto = "false"` alongside this, or every tmux session gets a second, redundant panel. It has to go *inside* the `[settings]` table - appending it to the end of `config.toml` lands it in whatever table comes last, where it is read as a hook and silently ignored. `vigil config get panel_auto` is the check. Transition side effects keep working either way: the outside panel starts a daemon like every other mode.
+
+**A panel outside tmux is a read-only board.** Session switching is gated on running inside a tmux client, so `enter` does nothing there - switch with the `M-j`/`M-k`/`M-<n>` tmux bindings in the pane below, which never invoke vigil. Auto-focus is off for any panel, inside tmux or not: it exists to aim the detail panel at whatever needs attention, and a panel has no detail panel.
+
 ## Keybindings
 
 | Key | Action |
