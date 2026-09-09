@@ -24,7 +24,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          # go.mod, not `stable`, because the linter version below is pinned
+          # and a pinned linter cannot read a floating toolchain's export
+          # data. When `stable` became Go 1.27.1 this job began failing on
+          # every push with "export data version 4 is greater than maximum
+          # supported version 2" against os/errors/testing - three typecheck
+          # errors that had nothing to do with the code being linted. The
+          # test job above deliberately keeps `stable`, since tests pass
+          # there and that is the early warning for a real Go
+          # incompatibility. Bump this and the linter together.
+          go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.11.4
