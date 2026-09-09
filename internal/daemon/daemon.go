@@ -358,10 +358,10 @@ func (s *Server) poll(ctx context.Context) {
 // tick late, so before the first successful poll this does nothing at all and
 // the submitting client waits.
 //
-// The timestamp is deliberately carried over rather than refreshed: it is
-// what the status bar's "daemon stale Ns" reads, and these sessions are
-// exactly as old as they were. Refreshing it would make a failing collector
-// look healthy.
+// The timestamp is deliberately carried over rather than refreshed, because a
+// rebroadcast must not make a stalled collector's data look fresh. Snapshot.Timestamp
+// currently has no client-side reader, so the carry-over matters only to the
+// daemon's own reasoning about whether the data it is sending is current.
 //
 // Run's goroutine is the only caller, which is what makes touching clients
 // (through broadcast) safe.
