@@ -46,6 +46,11 @@ type dirtyPoller struct {
 	// compares again at write-back: if it moved, an invalidate landed while the
 	// fetch was in flight and the fetch's answer may predate it.
 	gen uint64
+
+	// stats is the last pass's measurement. Guarded by mu rather than
+	// goroutine-owned like GitStats, because the worker writes it while
+	// daemon.poll reads it from Run's goroutine.
+	stats DirtyStats
 }
 
 type dirtyCounts struct{ modified, added, deleted int }
@@ -58,6 +63,7 @@ type dirtyEntry struct {
 type dueRoot struct {
 	root   string
 	counts dirtyCounts
+	took   time.Duration
 }
 
 func newDirtyPoller(c *Collector) *dirtyPoller {
@@ -142,17 +148,28 @@ func (p *dirtyPoller) pass(ctx context.Context) {
 	}
 	p.mu.Unlock()
 
+	var stats DirtyStats
 	if len(due) > 0 {
 		// GitWorkers (8) rather than prWorkers (4): prWorkers is low because
 		// each gh call spends a rate-limited quota, and a local subprocess has
 		// no quota. 8 is what fillGit already fanned out to.
+		start := time.Now()
 		runParallel(due, p.c.GitWorkers, func(d *dueRoot) {
+			fetchStart := time.Now()
 			d.counts.modified, d.counts.added, d.counts.deleted = fetch.FetchDirtyCounts(ctx, p.c.Cmd, d.root)
+			d.took = time.Since(fetchStart)
 		})
+		stats.Total = time.Since(start)
+		for _, d := range due {
+			if d.took > stats.Slowest {
+				stats.Slowest, stats.SlowestRoot = d.took, d.root
+			}
+		}
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.stats = stats
 
 	// Prune to the working set as it stands now, not as it stood when the
 	// fetch started: a root that vanished mid-fetch must not survive, and its

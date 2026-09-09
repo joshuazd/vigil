@@ -2,33 +2,52 @@
 
 Written 2026-08-03 against what was then the first item on CLAUDE.md's "What is open" list.
 
-## Status: not implemented, and that was the conclusion
+## Status: implemented 2026-09-09
 
-**Only the "Instrumentation" section below shipped.** The `dirtyPoller`, the `scheduler`
-rename and the `FetchGitStatus` split were all designed, approved, and then deliberately not
-built.
+Shelved on 2026-08-03 and built on 2026-09-09, unchanged in substance. The 2026-08-03 decision
+was correct on the numbers it had; what changed is the numbers and the consequence.
 
-The reason is the "The problem, re-measured" section, which is the part of this document worth
-reading. Re-measuring the claim the work rested on gave 0.138s cold and 0.009s warm against the
-~3.0-3.5s on record, with the git memo skipping every poll. On those numbers the change saves
-~100ms of a 174ms cold poll and nothing at all on a warm one, and the one un-ruled-out trigger -
-a fresh worktree's first `status` - is a one-or-two-poll hiccup after a dispatch rather than the
-sustained ~3s cadence the item claimed. That is not worth a fourth poller, a scheduler rename, a
-stats accessor and ten tests.
+**The numbers.** The same append-only daemon log holds 25,145 `slow poll` lines, the recent
+ones sustained at 1.3-2.0s with ~99% in git, all at `~/sc-231121`, where a cold
+`git status --porcelain` takes 1348ms against under 250ms for every other worktree. It is
+intermittent - with `fsmonitor` and `core.untrackedCache` warm, 25 consecutive `poke` round
+trips came back 0/25 over 250ms - so the trigger is something that invalidates those caches
+rather than something present all the time. **It is not a diagnosis.** The two candidates the
+problem section below leaves un-ruled-out, a cold worktree's first `status` and machine load,
+are both still un-ruled-out; a sustained series is not the one-or-two-poll hiccup the
+cold-worktree story predicts, and nothing here distinguishes the two. Building this bounded
+the bad case. It did not explain it.
 
-What shipped instead was the instrumentation: `Collector.GitStats()` and a rate-limited
-`slow poll` line in `daemon.poll`, so the next person to suspect this reads a number off the
-machine where it happens instead of re-deriving all of this a third time. Verified end to end
-against a real daemon with a deliberately slowed `git` on the `PATH`:
+**The consequence.** `poll` and `handleRequest` share `Run`'s single goroutine, deliberately,
+since that is what lets `broadcast` touch `s.clients` unguarded. The `poke` feature that landed
+after this spec was shelved means a slow git poll now delays a `RequestPoke` rebroadcast, so
+the current-session highlight took 1-2s to move after a session switch. Before `poke`, a slow
+`fillGit` cost only publication latency, which is what made it affordable enough to shelve.
+
+The 2026-08-03 shelving shipped the "Instrumentation" section and nothing else: the
+`slow poll` line was put there so the next person to suspect this could read a number off the
+machine instead of re-deriving all of it a third time. That is exactly what it was used for
+five weeks later, and it is the whole basis of the count above. Its own end-to-end check on
+2026-08-03 was synthetic - a deliberately slowed `git` on the `PATH`, not a real slow
+worktree:
 
 ```
 vigil: slow poll: 4.019s total, 4.01s in git, slowest 4.01s at /Users/joshua.zink-duda/sc-223374
 ```
 
-**If a `slow poll` line does show up in anger, this design is ready to implement as written.**
-Everything below the problem section is unchanged from the approved version - treat it as a
-plan on the shelf, not as a description of the code. Nothing in it has been built, so where it
-and the code disagree, the code is right by default.
+Three corrections the implementation made to what is written below, each argued in
+`docs/superpowers/plans/2026-09-09-dirty-counts-off-publication-path.md`:
+
+1. Testing item 5 cannot "fail only itself". `Snapshot` builds fresh sessions every call, so
+   reversing `fillGit` and `dirty.track` empties the working set permanently and breaks every
+   other test in the file. The test is a diagnostic that names the invariant, not an isolator.
+2. A branchless worktree - a detached HEAD, ie an in-progress rebase - gains dirty counts.
+   `FetchGitStatus` returned early on an empty branch; `FetchDirtyCounts` needs only a root.
+   Deliberate, and pinned by `TestFetchDirtyCountsNeedsNoBranch`.
+3. The "Instrumentation" section's aside about the pass duration belonging in the stats was
+   built: `Collector.DirtyStats()` and a rate-limited `slow dirty pass` daemon line. Without it
+   the change makes the machine go dark on the exact metric that justified it, because
+   `slow poll` goes quiet once git is off the loop.
 
 ## The problem, re-measured
 
@@ -240,8 +259,9 @@ they turn on stops being true.
 The 2026-07-31 number could not be checked against anything, which is why this spec had to
 re-derive it from scratch. That should not happen twice.
 
-**This is the only section that was implemented.** It is described as shipped; the rest of the
-document is not.
+**This was the only section implemented on 2026-08-03**, which is why it is written in the past
+tense where the rest of the document is not. The rest shipped on 2026-09-09; see the Status
+section above.
 
 `fillGit` records its wall time and its slowest pane path - pane path, not root, because
 `gitMemo` is keyed by pane path and that is what `fillGit` iterates. `Collector.GitStats()`
@@ -333,13 +353,13 @@ finding, so the next reader does not inherit a number that no longer reproduces.
 
 ## Files
 
-Only the last two rows were built. The rest is the shelved plan.
+The last two rows shipped on 2026-08-03; the rest on 2026-09-09.
 
 | File | Change |
 |---|---|
-| `internal/collect/scheduler.go` | **Not built.** New. `poller` interface and `scheduler` struct relocated from `remote.go`, renamed from `remote`/`newRemote`. |
-| `internal/collect/remote.go` | **Not built.** Keeps `prPoller`; loses the interface and scheduler. |
-| `internal/collect/dirty.go` | **Not built.** New. `dirtyPoller`, keyed by git root. |
-| `internal/fetch/git.go` | **Not built.** `FetchGitStatus` splits into `FetchGitMeta` and `FetchDirtyCounts`. |
-| `internal/collect/collect.go` | **Built, instrumentation only**: `GitStats`, `Collector.GitStats()`, and `fillGit` recording its wall time and slowest pane path. The `dirty`/`local`/`RefreshDirty` half was not. |
-| `internal/daemon/daemon.go` | **Built.** `poll` times `Snapshot` and logs a slow poll, rate-limited to one line a minute. |
+| `internal/collect/scheduler.go` | **Built.** New. `poller` interface and `scheduler` struct relocated from `remote.go`, renamed from `remote`/`newRemote`. |
+| `internal/collect/remote.go` | **Built.** Keeps `prPoller`; loses the interface and scheduler. |
+| `internal/collect/dirty.go` | **Built.** New. `dirtyPoller`, keyed by git root, plus the per-pass `DirtyStats` measurement. |
+| `internal/fetch/git.go` | **Built.** `FetchGitStatus` splits into `FetchGitMeta` and `FetchDirtyCounts`. |
+| `internal/collect/collect.go` | **Built.** 2026-08-03: `GitStats`, `Collector.GitStats()`, and `fillGit` recording its wall time and slowest pane path. 2026-09-09: the `dirty`/`local`/`RefreshDirty` half, and `Collector.DirtyStats()`. |
+| `internal/daemon/daemon.go` | **Built.** 2026-08-03: `poll` times `Snapshot` and logs a slow poll, rate-limited to one line a minute. 2026-09-09: `logSlowDirtyPass` on the same window. |

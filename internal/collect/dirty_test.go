@@ -355,3 +355,67 @@ func TestSnapshotAndRefreshDirtyAreRaceFree(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestDirtyPassReportsItsSlowestRoot(t *testing.T) {
+	const delay = 60 * time.Millisecond
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|fast|/tmp/fast\n1700000001|$2|slow|/tmp/slow", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"git rev-parse --show-toplevel": func(_ context.Context, dir string, _ []string) (string, error) {
+			return dir, nil
+		},
+		"git branch --show-current": func(context.Context, string, []string) (string, error) {
+			return "feature", nil
+		},
+		"git --no-optional-locks status --porcelain": func(_ context.Context, dir string, _ []string) (string, error) {
+			if dir == "/tmp/slow" {
+				time.Sleep(delay)
+			}
+			return " M a.go", nil
+		},
+	}
+
+	ctx := context.Background()
+	c := New(noQueueConfig(), cmd)
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	c.RefreshDirty(ctx)
+
+	stats := c.DirtyStats()
+	if stats.SlowestRoot != "/tmp/slow" {
+		t.Errorf("slowest root: got %q, want /tmp/slow", stats.SlowestRoot)
+	}
+	if stats.Slowest < delay {
+		t.Errorf("slowest: got %s, want at least %s", stats.Slowest, delay)
+	}
+	if stats.Total < delay {
+		t.Errorf("total: got %s, want at least %s", stats.Total, delay)
+	}
+}
+
+// Zero means no work, matching GitStats. A pass that timed an empty fan-out
+// and reported a few hundred nanoseconds would make that false, which is the
+// exact bug GitStats shipped with and a test caught.
+func TestDirtyStatsAreZeroWhenNothingWasDue(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.OnArgs("git --no-optional-locks status --porcelain", " M a.go", nil)
+
+	ctx := context.Background()
+	c := New(noQueueConfig(), cmd)
+	c.GitInterval = time.Hour
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	c.RefreshDirty(ctx)
+	if c.DirtyStats().Total == 0 {
+		t.Fatal("the first pass should have measured a fan-out")
+	}
+
+	c.RefreshDirty(ctx)
+	if got := c.DirtyStats(); got != (DirtyStats{}) {
+		t.Errorf("got %+v, want the zero value", got)
+	}
+}

@@ -112,6 +112,30 @@ type GitStats struct {
 // Snapshot has returned.
 func (c *Collector) GitStats() GitStats { return c.gitStats }
 
+// DirtyStats reports what the last dirtyPoller pass cost. Total is the
+// fan-out's wall time and Slowest/SlowestRoot name the single worst worktree,
+// because on a monorepo one worktree is usually all of it.
+//
+// A pass no longer blocks publication, so a slow one is a staleness problem
+// rather than a latency one: a pass exceeding git_interval means the counts
+// are older than they are meant to be.
+//
+// Zero when the last pass found every root inside git_interval, since then it
+// issued no subprocesses at all.
+type DirtyStats struct {
+	Total       time.Duration
+	Slowest     time.Duration
+	SlowestRoot string
+}
+
+// DirtyStats returns the last pass's measurement. Unlike GitStats it is safe
+// from any goroutine: a worker writes it while the poll loop reads it.
+func (c *Collector) DirtyStats() DirtyStats {
+	c.dirty.mu.Lock()
+	defer c.dirty.mu.Unlock()
+	return c.dirty.stats
+}
+
 func New(cfg *config.Config, cmd fetch.Commander) *Collector {
 	workers := cfg.GetSettingInt("git_workers")
 	if workers <= 0 {
