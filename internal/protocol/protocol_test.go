@@ -285,6 +285,14 @@ func TestThePokeRequestTypeRoundTrips(t *testing.T) {
 	if err := EncodeRequest(&buf, &Request{Version: Version, Type: RequestPoke}); err != nil {
 		t.Fatalf("EncodeRequest: %v", err)
 	}
+	// Captured before the decoder drains buf. Asserting the literal word is
+	// what makes this test falsifiable: comparing got.Type to RequestPoke
+	// compares both sides to the same constant, so a rename moves both and
+	// the assertion holds no matter what the wire says.
+	wire := buf.String()
+	if !strings.Contains(wire, `"type":"poke"`) {
+		t.Errorf("wire frame = %s, want it to contain %q", wire, `"type":"poke"`)
+	}
 	got, err := NewRequestDecoder(&buf).Next()
 	if err != nil {
 		t.Fatalf("Next: %v", err)
