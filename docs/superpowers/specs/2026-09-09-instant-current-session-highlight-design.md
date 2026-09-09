@@ -84,15 +84,35 @@ unchanged and untouched here.
 
 ### daemon
 
-A new arm in `handleRequest`:
+**Corrected 2026-09-09, while writing the implementation plan.** This section
+originally specified a new `repaint` method. That was redundant, and the
+correction is recorded here rather than silently dropped, because a reader
+comparing this spec to the shipped code needs to know which is right: the code
+is.
+
+`handleRequest` (`daemon.go:388-404`) already ends in an **unconditional**
+`s.publishJobs(s.jobs.snapshot())`, and `publishJobs` (`daemon.go:352-382`) is
+already the rebroadcast primitive. So the whole daemon change is one arm that
+does nothing but let control reach the call that is already there:
 
 ```go
+switch req.Type {
+case protocol.RequestDismiss:
+    if !s.jobs.dismissTerminal() {
+        return
+    }
 case protocol.RequestPoke:
-    s.repaint()
+    // Nothing to change: the rebroadcast below is the whole point. An
+    // explicit arm rather than falling through `default`, which would reach
+    // the same rebroadcast only by way of submit dropping an empty ID - a
+    // coupling that would break silently if either end moved.
+default:
+    s.jobs.submit(req)
+}
 ```
 
-`repaint` mirrors `publishJobs` (`daemon.go:352-382`) and inherits two of its
-decisions for the same reasons:
+Reusing `publishJobs` inherits three properties that a `repaint` would have had
+to reimplement, and therefore to keep in sync:
 
 - **It never invents a snapshot.** Nil `latest` means no successful poll has
   happened yet; a frame with nil `Sessions` would blank every client's table,
@@ -100,28 +120,25 @@ decisions for the same reasons:
 - **It does not refresh `Timestamp`.** That field is what the status bar's
   `daemon stale Ns` reads. These sessions are exactly as old as they were, and
   refreshing it would make a stalled collector look healthy.
+- **It is documented as Run's-goroutine-only**, which is what makes touching
+  `clients` safe. `broadcast` (`daemon.go:511-525`) mutates `s.clients`
+  unguarded, and `daemon.go:56-57` states `clients` is owned by Run's
+  goroutine. `Run`'s select loop contains
+  `case req := <-s.requests: s.handleRequest(req)` (`daemon.go:209-210`), so
+  `handleRequest` already runs there. No channel, no mutex, and no interaction
+  with the synchronous poll.
 
-Unlike `publishJobs` it does not copy the snapshot, because it changes nothing
-in it. Rebroadcasting the same pointer is safe: each client has its own writer
-goroutine and a one-deep latest-wins queue.
+`publishJobs` attaches the current job list to the copy it broadcasts. For a
+poke that list is unchanged, so the effect is a rebroadcast of identical data.
 
-**Why no new concurrency machinery.** `broadcast` (`daemon.go:511-525`) mutates
-`s.clients` unguarded, and `daemon.go:56-57` states that `clients` is owned by
-Run's goroutine. `Run`'s select loop contains
-`case req := <-s.requests: s.handleRequest(req)` (`daemon.go:209-210`), so
-`handleRequest` **already runs on Run's goroutine**. A poke arm may therefore
-call `broadcast` directly. No channel, no mutex, no interaction with the
-synchronous poll - which is the whole reason this shape was chosen over an
-immediate poll.
-
-**The one trap.** `handleRequest` opens with
-`if s.jobs == nil || req == nil { return }`. A poke needs no jobs runner, so
-that guard would silently turn it into a no-op on a `Server` without one - which
-is what a bare `Server` literal in a test gets. The poke arm must sit **ahead**
-of that guard. Moving or loosening the guard itself is out of scope: the
-`handleRequest` doc comment records that "the default arm stays submit rather
-than becoming a refusal ... and that behaviour must not move." A test pins the
-no-jobs-runner case rather than a code reading.
+**A poke requires a jobs runner, and that is accepted.** `handleRequest` opens
+with `if s.jobs == nil || req == nil { return }`, so a poke is a no-op on a
+`Server` with no jobs runner. That guard protects a real nil dereference in
+`publishJobs(s.jobs.snapshot())`, and `New` always wires a runner - only a bare
+`Server` literal in a test lacks one. Restructuring the guard to serve a
+configuration that never occurs in production would mean touching code whose own
+comment says "that behaviour must not move", in order to pin an unreachable
+branch. Not done, and no test for it.
 
 ### client
 
@@ -195,9 +212,20 @@ tests that pass with their subject deleted.
 - `daemon`: a poke registers no job and no refusal.
 - `daemon`: a poke **runs no poll** - zero additional tmux or git calls on the
   mock Commander. This is the test that pins the whole economy of the design.
-- `daemon`: a poke works on a `Server` with **no jobs runner**, pinning the
-  `s.jobs == nil` guard trap.
 - `daemon`: a poke does not refresh `Timestamp`.
+**The explicit `case protocol.RequestPoke:` arm has no behavioural signature,
+and no test should claim to pin it.** Deleting that line drops a poke into
+`default`, where `submit` discards the empty ID and control still reaches the
+same rebroadcast - identical observable behaviour. The arm is a readability and
+robustness choice: it stops the poke path depending on two unrelated pieces of
+code continuing to line up. Writing a test that appears to cover it would be
+another entry in this repository's list of tests that pass with their subject
+deleted. It is covered by review, not by the suite - the same defence the
+tickerless remote pollers rely on.
+
+What the "registers no job" test *does* pin is the **empty-ID contract**: give
+the poke a generated ID and it becomes a refused job on every session switch
+against an old daemon. That is the landmine below, and it is testable.
 - `model`: a repeat identical snapshot produces **no duplicate toasts**. The
   detector compares against previous state and should return no events, but a
   poke makes repeat snapshots routine for the first time, so this is worth
@@ -212,9 +240,11 @@ coverage. It is verified by hand: switch sessions and watch the highlight.
   what does that, via a guard in `jobs.submit` rather than anything in the poke
   path. Someone "tidying up" by giving the poke a generated id would reintroduce
   undismissable refused jobs on every session switch during a version skew.
-- **`repaint` must stay on Run's goroutine.** It is only safe because
-  `handleRequest` is called from the select loop. Calling it from a reader
-  goroutine, or making the poke path asynchronous, races on `s.clients`.
+- **The poke must stay on Run's goroutine.** `publishJobs` reaching `broadcast`
+  is only safe because `handleRequest` is called from Run's select loop.
+  Handling a poke on a reader goroutine, or making the poke path asynchronous
+  to "avoid blocking the loop", races on `s.clients` - and `-race` will only
+  catch it if a test has a client connected.
 - **The hook must stay fail-soft and out of `tmux-hop`.**
 
 ## Documentation
@@ -232,7 +262,7 @@ coverage. It is verified by hand: switch sessions and watch the highlight.
 vigil:
 
 - `internal/protocol/protocol.go` - `RequestPoke`
-- `internal/daemon/daemon.go` - `handleRequest` arm, `repaint`
+- `internal/daemon/daemon.go` - one `handleRequest` switch arm; no new method
 - the poke client - reusing `internal/dispatch`'s dial, or a minimal sibling
 - `main.go` - subcommand dispatch
 - `README.md`, `CLAUDE.md`
