@@ -38,6 +38,11 @@ vigil --help
 # Run the shared state daemon (optional: polls tmux/git/PR state on an
 # interval and broadcasts it to every connected vigil client)
 vigil daemon
+
+# Ask a running daemon to rebroadcast its current snapshot, so every client
+# re-resolves which tmux session is current. Silent, exits 0 even with no
+# daemon, and starts nothing. Meant for a tmux hook.
+vigil poke
 ```
 
 Vigil discovers all tmux sessions, reads git status from each session's working directory, and fetches PR state via `gh`. Sessions are color-coded by state: idle, pending review, CI failing, mergeable, etc.
@@ -61,6 +66,8 @@ The `Vigil Panel` profile lives in `~/dotfiles` (a separate repository) as an iT
 Set `panel_auto = "false"` alongside this, or every tmux session gets a second, redundant panel. It has to go *inside* the `[settings]` table - appending it to the end of `config.toml` lands it in whatever table comes last, where it is read as a hook and silently ignored. `vigil config get panel_auto` is the check. Transition side effects keep working either way: the outside panel starts a daemon like every other mode.
 
 **A panel outside tmux is a read-only board.** Session switching is gated on running inside a tmux client, so `enter` does nothing there - switch with the `M-j`/`M-k`/`M-<n>` tmux bindings in the pane below, which never invoke vigil. Auto-focus is off for any panel, inside tmux or not: it exists to aim the detail panel at whatever needs attention, and a panel has no detail panel.
+
+Which session is highlighted is resolved by each client, not by the daemon, and only when a snapshot arrives - so it would otherwise lag a session switch by up to one poll interval. `~/dotfiles` binds tmux's `client-session-changed` hook to `vigil poke`, which makes the daemon rebroadcast the snapshot it already holds. That adds no polling: a poke does no tmux re-read, no git, and no `gh`. A session created or destroyed elsewhere still appears on the normal tick; only the highlight is immediate.
 
 ## Keybindings
 
