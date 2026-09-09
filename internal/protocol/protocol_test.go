@@ -275,3 +275,27 @@ func TestTheDismissRequestTypeRoundTrips(t *testing.T) {
 		t.Fatalf("ID = %q, want empty: an old daemon must drop this frame silently rather than register a refused job for an unknown type", got.ID)
 	}
 }
+
+// TestThePokeRequestTypeRoundTrips pins the wire value and the empty ID
+// together. The empty ID is not incidental: jobs.submit drops an empty-ID
+// frame before its reason switch, which is the only thing stopping a poke
+// sent to an old daemon from becoming a refused job on every session switch.
+func TestThePokeRequestTypeRoundTrips(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EncodeRequest(&buf, &Request{Version: Version, Type: RequestPoke}); err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	got, err := NewRequestDecoder(&buf).Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if got.Type != RequestPoke {
+		t.Errorf("Type = %q, want %q", got.Type, RequestPoke)
+	}
+	if got.ID != "" {
+		t.Errorf("ID = %q, want empty (an old daemon must drop this frame)", got.ID)
+	}
+	if got.Version != 1 {
+		t.Errorf("Version = %d, want 1 (every change here is additive)", got.Version)
+	}
+}
