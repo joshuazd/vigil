@@ -21,14 +21,17 @@ const (
 )
 
 type Collector struct {
-	// These nine and clock are read-only once New returns. prPoller.pass reads
-	// Cmd, PRInterval and clock from its own worker goroutine, and
-	// dirtyPoller.pass reads Cmd, GitInterval, GitWorkers and clock from a
-	// second worker goroutine, while Snapshot runs on a third, so a writer
-	// after construction is a data race - and one -race would surface only if
-	// a test happened to interleave two of the three. A test that needs a
-	// different clock or interval must set it before the first Snapshot,
-	// which is the only thing that can start a pass.
+	// These nine and clock are read-only once New returns. Up to four worker
+	// goroutines read them - prPoller.pass reads Cmd, PRInterval and clock;
+	// dirtyPoller.pass reads Cmd, GitInterval, GitWorkers and clock; and,
+	// when queue_enabled, storyPoller.pass and reviewPoller.pass each read
+	// Cmd, QueueInterval, QueueLimit and clock, plus QueueStoryQuery or
+	// QueuePRQuery and QueuePRAgeDays respectively - while Snapshot runs on
+	// its own goroutine, so a writer after construction is a data race and
+	// one -race would surface only if a test happened to interleave two of
+	// the goroutines reading a given field. A test that needs a different
+	// clock or interval must set it before the first Snapshot, which is the
+	// only thing that can start a pass.
 	Cmd         fetch.Commander
 	GitWorkers  int
 	GitInterval time.Duration

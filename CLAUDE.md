@@ -142,7 +142,7 @@ advertises work already in flight.
   gives every open panel that has self-polled at least once its own `git status --porcelain`
   loop against the monorepo, and there is no rate limit to notice it at all. The qualification
   is real but narrow: `dirty.working` is posted only by `dirty.track`, called only from
-  `Snapshot` (`internal/collect/collect.go:275`), so a panel fed by a daemon from startup would
+  `Snapshot` (`internal/collect/collect.go:280`), so a panel fed by a daemon from startup would
   tick over an empty working set - but any panel that ever self-polled, which is every one that
   starts before its daemon or outlives it, has a populated one. Both schedulers are the same
   `scheduler` type now, so one ticker would hit both. The suite is a weak defence here and knows it: a *fast* ticker is caught by
