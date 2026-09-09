@@ -350,8 +350,10 @@ func (s *Server) poll(ctx context.Context) {
 }
 
 // publishJobs re-broadcasts the latest snapshot with jobs attached, off the
-// tick. Called when a submission is accepted and when a poll fails, the two
-// moments a job's state changes without a snapshot of its own.
+// tick. Called when a submission is accepted and when a poll fails - the two
+// moments a job's state changes without a snapshot of its own - and also by
+// a poke, which changes no job state at all and calls this purely for the
+// rebroadcast.
 //
 // It never invents a snapshot. A frame with nil Sessions would blank every
 // client's table, which is a far worse outcome than a job line arriving one

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - `protocol.Version` stays **1**. Every change here is additive.
-- The poke frame carries an **empty `ID`**. `jobs.submit` drops empty-ID frames before its reason switch, so an old daemon ignores a poke instead of registering an undismissable refused job. Never give it a generated id.
+- The poke frame carries an **empty `ID`**. `jobs.submit` drops empty-ID frames before its reason switch, so an old daemon registers no refused job for the frame - it does **not** ignore the poke: `handleRequest`'s `default` arm still reaches the unconditional `publishJobs`, so an old daemon rebroadcasts too, verified 2026-09-09 against a live pre-feature daemon. Never give the frame a generated id. (corrected 2026-09-09, verified against a live pre-feature daemon)
 - `make test` is `go test -race ./...`. **`-race` is not optional**: the daemon's design is a concurrency claim.
 - `make lint` (golangci-lint) must report 0 issues.
 - **Every test brief below mandates a mutation check**: break the subject, run the test, paste the failing output into the task report, restore. Across three prior plans in this repository, nineteen briefs contained tests that would have passed with their subject deleted. A task report without pasted mutation output is incomplete.
@@ -104,12 +104,18 @@ In `internal/protocol/protocol.go`, directly after the `RequestDismiss` const:
 // worktree.
 //
 // Like RequestDismiss it carries an empty ID, so jobs.submit drops it before
-// its reason switch and a poke aimed at an old daemon is a silent no-op
-// rather than a refused job named for a type that daemon does not know. The
-// daemon never restarts itself, so that version skew is the normal state
-// right after `make install` - not a corner case.
+// its reason switch and a poke aimed at an old daemon registers no refused
+// job named for a type that daemon does not know. It is NOT inert against an
+// old daemon: handleRequest's default arm still reaches the unconditional
+// publishJobs at the bottom of the request handler, so an old daemon
+// rebroadcasts its held snapshot exactly as a new one does - verified
+// 2026-09-09 against a live pre-feature daemon binary. The daemon never
+// restarts itself, so that version skew is the normal state right after
+// `make install` - not a corner case.
 const RequestPoke = "poke"
 ```
+
+(corrected 2026-09-09, verified against a live pre-feature daemon)
 
 - [ ] **Step 4: Run it and watch it pass**
 
@@ -678,7 +684,7 @@ Which session is highlighted is resolved by each client, not by the daemon, and 
 Insert immediately after the "A panel is supported outside tmux" bullet:
 
 ```markdown
-- **A poke rebroadcasts; it never polls.** `annotateClientFlags` (`internal/model/client.go:114`) re-resolves `IsCurrent`/`IsLast` from tmux state on every arriving snapshot; `newModel` sets `IsCurrent` once from the cache on startup (`model.go:271`), and that is the only other setter. It runs at two call sites - `listenDaemonCmd` for daemon-fed clients (`client.go:142`) and `collectCmd` for self-polling clients (`client.go:94`), so the poke helps only the daemon-fed path - it rebroadcasts to every connected client, and only they get the re-resolved highlight. `Snapshot` carries no current-session field deliberately, because which session is current belongs to a tmux client and not to the daemon. So the highlight can only move when a snapshot arrives, which is once per `tmux_interval`. `protocol.RequestPoke`, sent by `vigil poke` from `~/dotfiles`' `client-session-changed` hook, makes `handleRequest` fall through to the **unconditional `publishJobs` that was already there** - no new method, and no new poll, git or `gh` work. Three things are load-bearing: the frame carries an **empty ID**, so `jobs.submit`'s guard makes it inert against a daemon predating the type rather than a refused job on every switch (and the daemon never restarts itself, so that skew is normal after `make install`); the poke is handled **on Run's goroutine**, which is the only reason `publishJobs` may reach `broadcast` and touch `s.clients` unguarded; and `publishJobs` **carries `Timestamp` over** deliberately, because a rebroadcast must not make a stalled collector's data look fresh - `Snapshot.Timestamp` currently has no client-side reader, so the carry-over matters only to the daemon's own reasoning. The explicit `case` arm has **no behavioural signature** - deleting it drops the frame into `default`, where `submit` discards the empty ID and the same rebroadcast happens - so it is defended by review, not by a test, like the tickerless remote pollers. (corrected 2026-09-09 after tracing to code)
+- **A poke rebroadcasts; it never polls.** `annotateClientFlags` (`internal/model/client.go:114`) re-resolves `IsCurrent`/`IsLast` from tmux state on every arriving snapshot; `newModel` sets `IsCurrent` once from the cache on startup (`model.go:271`), and that is the only other setter. It runs at two call sites - `listenDaemonCmd` for daemon-fed clients (`client.go:142`) and `collectCmd` for self-polling clients (`client.go:94`), so the poke helps only the daemon-fed path - it rebroadcasts to every connected client, and only they get the re-resolved highlight. `Snapshot` carries no current-session field deliberately, because which session is current belongs to a tmux client and not to the daemon. So the highlight can only move when a snapshot arrives, which is once per `tmux_interval`. `protocol.RequestPoke`, sent by `vigil poke` from `~/dotfiles`' `client-session-changed` hook, makes `handleRequest` fall through to the **unconditional `publishJobs` that was already there** - no new method, and no new poll, git or `gh` work. Three things are load-bearing: the frame carries an **empty ID**, so `jobs.submit`'s guard means a poke against a daemon predating the type registers no refused job rather than one on every switch - **it is not inert against such a daemon**: `handleRequest`'s `default` arm still reaches the unconditional `publishJobs`, so an old daemon rebroadcasts too, verified 2026-09-09 against a live pre-feature binary that answered a poke with a second snapshot carrying the same timestamp and session list (and the daemon never restarts itself, so that skew is normal after `make install`); the poke is handled **on Run's goroutine**, which is the only reason `publishJobs` may reach `broadcast` and touch `s.clients` unguarded; and `publishJobs` **carries `Timestamp` over** deliberately, because a rebroadcast must not make a stalled collector's data look fresh - `Snapshot.Timestamp` currently has no client-side reader, so the carry-over matters only to the daemon's own reasoning. The explicit `case` arm has **no behavioural signature** - deleting it drops the frame into `default`, where `submit` discards the empty ID and the same rebroadcast happens - so it is defended by review, not by a test, like the tickerless remote pollers. A poke adds no polling and no daemon-side tmux re-read, but it does cause each connected client's usual per-snapshot tmux work - two `tmux display-message` calls in `annotateClientFlags`, plus one `tmux capture-pane` for a client with a detail panel open in pane mode. (corrected 2026-09-09, verified against a live pre-feature daemon)
 ```
 
 - [ ] **Step 4: Verify the suite still passes**
@@ -784,6 +790,6 @@ git commit -m "feat(tmux): poke vigil when the session changes"
 
 - [ ] `cd ~/vigil && make test && make lint` - all packages ok, 0 issues
 - [ ] `cd ~/dotfiles/scripts/scripts && make test && make lint` - 422 bats, shellcheck clean
-- [ ] `make install`, kill the running daemon (it never restarts itself, so an old one would still be serving), then switch sessions and confirm the highlight moves immediately
+- [ ] `make install` alone is sufficient here - no need to kill the running daemon first. An old daemon already rebroadcasts on a poke (`handleRequest`'s `default` arm reaches the unconditional `publishJobs`), it just registers no job for the frame; verified 2026-09-09 against a live pre-feature daemon. Switch sessions and confirm the highlight moves immediately. (corrected 2026-09-09, verified against a live pre-feature daemon)
 - [ ] Confirm no job line appears in any panel on a session switch - that is the empty-ID contract working
 - [ ] Report which tasks' mutation checks were pasted, and flag any that were not

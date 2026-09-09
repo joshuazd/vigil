@@ -45,8 +45,13 @@ const RequestDismiss = "dismiss"
 // worktree.
 //
 // Like RequestDismiss it carries an empty ID, so jobs.submit drops it before
-// its reason switch and a poke aimed at an old daemon is a silent no-op
-// rather than a refused job named for a type that daemon does not know. The
+// its reason switch and a poke aimed at an old daemon registers no refused
+// job named for a type that daemon does not know. It is NOT inert against an
+// old daemon: handleRequest's default arm still reaches the unconditional
+// publishJobs at the bottom of the request handler, so an old daemon
+// rebroadcasts its held snapshot exactly as a new one does - verified
+// 2026-09-09 against a live pre-feature daemon binary, which answered a poke
+// with a second snapshot carrying the same timestamp and session list. The
 // daemon never restarts itself, so that version skew is the normal state
 // right after `make install` - not a corner case.
 const RequestPoke = "poke"

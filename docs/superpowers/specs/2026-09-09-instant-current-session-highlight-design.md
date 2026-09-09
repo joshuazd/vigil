@@ -76,10 +76,15 @@ const RequestPoke = "poke"
 The frame is sent with an **empty `ID`**, following the `RequestDismiss`
 precedent. `jobs.submit` (`internal/daemon/jobs.go:97-100`) opens with
 `if req == nil || req.ID == "" { return }`, so an **old** daemon that has never
-heard of `"poke"` drops the frame instead of falling through to its
-unsupported-type arm and registering a refused job nobody can dismiss. Without
-the empty ID, upgrading vigil while an old daemon is still running would litter
-every panel's job line.
+heard of `"poke"` registers no refused job nobody can dismiss. Without the
+empty ID, upgrading vigil while an old daemon is still running would litter
+every panel's job line. **The frame itself is not dropped**: `handleRequest`'s
+`default` arm still falls through to the unconditional `publishJobs` call at
+the bottom of the handler, so an old daemon rebroadcasts its held snapshot
+just as a new one does - verified 2026-09-09 against a live pre-feature
+daemon binary, which answered a poke with a second snapshot carrying the
+identical timestamp and session list and zero jobs. (corrected 2026-09-09,
+verified against a live pre-feature daemon)
 
 `RequestDecoder.Next` still must not reject an unknown version; that rule is
 unchanged and untouched here.
@@ -240,10 +245,15 @@ coverage. It is verified by hand: switch sessions and watch the highlight.
 
 ## Landmines
 
-- **A poke against an old daemon must be inert, not refused.** The empty `ID` is
-  what does that, via a guard in `jobs.submit` rather than anything in the poke
-  path. Someone "tidying up" by giving the poke a generated id would reintroduce
-  undismissable refused jobs on every session switch during a version skew.
+- **A poke against an old daemon must register no refused job, not one on
+  every switch.** The empty `ID` is what does that, via a guard in
+  `jobs.submit` rather than anything in the poke path. Someone "tidying up" by
+  giving the poke a generated id would reintroduce undismissable refused jobs
+  on every session switch during a version skew. This does **not** mean an old
+  daemon does nothing with the frame - it still rebroadcasts, via the
+  unconditional `publishJobs` call `handleRequest`'s `default` arm falls
+  through to. (corrected 2026-09-09, verified against a live pre-feature
+  daemon)
 - **The poke must stay on Run's goroutine.** `publishJobs` reaching `broadcast`
   is only safe because `handleRequest` is called from Run's select loop.
   Handling a poke on a reader goroutine, or making the poke path asynchronous

@@ -74,11 +74,23 @@ func TestPokeWritesOnePokeFrame(t *testing.T) {
 	}
 }
 
-// TestPokeWithNoDaemonFailsWithoutSpawningOne matters because this runs from
-// a tmux hook on every session switch. Spawning a daemon there would start
-// processes behind the user's back; the error is for main to swallow.
-func TestPokeWithNoDaemonFailsWithoutSpawningOne(t *testing.T) {
-	path := filepath.Join(shortTempDir(t), "absent.sock")
+// TestPokeWithNoDaemonFails checks only that Poke reports failure and leaves
+// nothing at the socket path it was given. It does NOT prove Poke never
+// spawns a daemon: Poke takes an explicit path, and a real spawn would bind
+// protocol.SocketPath(), a value this test only pins by also redirecting
+// XDG_RUNTIME_DIR to a disposable directory - so the absence of anything at
+// protocol.SocketPath() here is evidence Poke does not spawn, given today's
+// implementation has no spawn call at all, not proof no future change could
+// add one and still pass. No-spawn is otherwise defended by review, the same
+// way the tickerless remote pollers are (see protocol.go's RequestPoke
+// comment). This runs from a tmux hook on every session switch: a spawn
+// there would start processes behind the user's back, and any error here is
+// for main to swallow, not surface.
+func TestPokeWithNoDaemonFails(t *testing.T) {
+	runtimeDir := shortTempDir(t)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	path := filepath.Join(runtimeDir, "absent.sock")
 	if len(path) > maxSockPath {
 		t.Fatalf("socket path %q is %d bytes, over the %d-byte sun_path limit", path, len(path), maxSockPath)
 	}
@@ -87,5 +99,8 @@ func TestPokeWithNoDaemonFailsWithoutSpawningOne(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("Poke left something at %s (stat err = %v); it must create nothing", path, err)
+	}
+	if _, err := os.Stat(protocol.SocketPath()); !os.IsNotExist(err) {
+		t.Fatalf("Poke left something at %s (stat err = %v); it must create nothing there either", protocol.SocketPath(), err)
 	}
 }

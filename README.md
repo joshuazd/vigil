@@ -67,7 +67,7 @@ Set `panel_auto = "false"` alongside this, or every tmux session gets a second, 
 
 **A panel outside tmux is a read-only board.** Session switching is gated on running inside a tmux client, so `enter` does nothing there - switch with the `M-j`/`M-k`/`M-<n>` tmux bindings in the pane below, which never invoke vigil. Auto-focus is off for any panel, inside tmux or not: it exists to aim the detail panel at whatever needs attention, and a panel has no detail panel.
 
-Which session is highlighted is resolved by each client, not by the daemon, and only when a snapshot arrives - so it would otherwise lag a session switch by up to one poll interval. `~/dotfiles` binds tmux's `client-session-changed` hook to `vigil poke`, which makes the daemon rebroadcast the snapshot it already holds. That adds no polling: a poke does no tmux re-read, no git, and no `gh`. A session created or destroyed elsewhere still appears on the normal tick; only the highlight is immediate.
+Which session is highlighted is resolved by each client, not by the daemon, and only when a snapshot arrives - so it would otherwise lag a session switch by up to one poll interval. `~/dotfiles` binds tmux's `client-session-changed` hook to `vigil poke`, which makes the daemon rebroadcast the snapshot it already holds. That adds no polling and no daemon-side tmux re-read: no new git and no `gh` work, and nothing runs on the daemon's poll loop. It does cause each connected client's usual per-snapshot tmux work to run again - `annotateClientFlags`'s two `tmux display-message` calls, plus one `tmux capture-pane` for a client with a detail panel open in pane mode. A session created or destroyed elsewhere still appears on the normal tick; only the highlight is immediate.
 
 ## Keybindings
 

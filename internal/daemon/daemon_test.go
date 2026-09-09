@@ -943,9 +943,12 @@ func TestAPokeRebroadcastsTheLatestSnapshot(t *testing.T) {
 
 // TestAPokeRunsNoPollAndKeepsTheTimestamp pins the economy of the whole
 // design. A poke must reuse the held snapshot: no new subprocess, and the
-// Timestamp carried over unchanged, because that is what the status bar's
-// "daemon stale Ns" reads and refreshing it would make a stalled collector
-// look healthy.
+// Timestamp carried over unchanged. Snapshot.Timestamp has no client-side
+// reader today - the status bar's "daemon stale Ns" is computed from
+// m.lastSnapshot, set to time.Now() when a client applies a snapshot
+// (model.go) - but a rebroadcast still must not make a stalled collector's
+// data look fresher than it is, so the carry-over is preserved as the
+// daemon's own record of currency.
 func TestAPokeRunsNoPollAndKeepsTheTimestamp(t *testing.T) {
 	srv := pokeServer(t)
 	pollCmd := srv.Collector.Cmd.(*fetch.MockCommander)
@@ -1007,11 +1010,15 @@ func TestAPokeRunsNoPollAndKeepsTheTimestamp(t *testing.T) {
 // unconditionally, synchronously, and strictly before the select loop that
 // would ever accept a connection or read a request (daemon.go's Run: the
 // listener binds, then `s.poll(ctx)` runs, then the loop that reads
-// `incoming` and `s.requests` begins). That ordering means a client can
-// never actually reach the daemon before its first poll has landed, so the
-// "before the first poll" case cannot be reproduced by dialing the real
-// socket - it has to be exercised at the handleRequest level directly,
-// against a Server whose latest is still nil.
+// `incoming` and `s.requests` begins). That ordering means a client cannot
+// reach the daemon before its first poll has *run* - but it can still reach
+// it with latest == nil if that first poll fails: poll's error branch
+// publishes jobs and returns without ever setting s.latest (daemon.go's
+// poll, the `if err != nil` branch around line 273), and the listener is
+// already bound by the time poll runs. So nil-latest over the real socket is
+// reachable given a failing collector; this test exercises it at the
+// handleRequest level directly, against a Server whose latest is still nil,
+// because that is simpler to set up than forcing a collector failure.
 func TestAPokeBeforeTheFirstPollBroadcastsNothing(t *testing.T) {
 	srv := testServer(t)
 	srv.requests = make(chan *protocol.Request, queueDepth)

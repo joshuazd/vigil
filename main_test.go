@@ -361,6 +361,7 @@ func TestShortIsNotAStartupDependency(t *testing.T) {
 // printing "gh not found in PATH".
 func TestPokeExitsZeroAndSilentlyWithNoDaemon(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"poke"}, &stdout, &stderr); code != 0 {
 		t.Errorf("exit code = %d, want 0", code)

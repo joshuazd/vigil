@@ -272,6 +272,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  vigil --panel    Run the compact session list for a tmux pane")
 	_, _ = fmt.Fprintln(w, "  vigil config get <key>   Print a config value")
 	_, _ = fmt.Fprintln(w, "  vigil dispatch <url-or-id>   Submit a job to the daemon")
+	_, _ = fmt.Fprintln(w, "  vigil poke       Ask the daemon to rebroadcast its held snapshot")
 	_, _ = fmt.Fprintln(w, "  vigil --help")
 	_, _ = fmt.Fprintln(w, "  vigil --version")
 	_, _ = fmt.Fprintln(w)
