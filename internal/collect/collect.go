@@ -65,8 +65,8 @@ type Collector struct {
 	stories *storyPoller
 	reviews *reviewPoller
 
-	// remote schedules prs and, from phase 5 on, its siblings.
-	remote *remote
+	// remote schedules prs and its siblings.
+	remote *scheduler
 }
 
 type gitMemoEntry struct {
@@ -142,7 +142,7 @@ func New(cfg *config.Config, cmd fetch.Commander) *Collector {
 		c.reviews = newReviewPoller(c)
 		pollers = append(pollers, c.stories, c.reviews)
 	}
-	c.remote = newRemote(pollers...)
+	c.remote = newScheduler(pollers...)
 	return c
 }
 
