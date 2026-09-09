@@ -1200,3 +1200,84 @@ func TestADaemonFedClientSpendsNoGhBudget(t *testing.T) {
 		t.Errorf("got %d short calls once a daemon was feeding this client, want %d: only Snapshot may wake a poller", got, selfPolledShort)
 	}
 }
+
+// countStatusCalls counts `git --no-optional-locks status --porcelain`.
+func countStatusCalls(cmd *fetch.MockCommander) int {
+	return cmd.CallCountFunc(func(c fetch.MockCall) bool {
+		return c.Name == "git" && len(c.Args) == 3 &&
+			c.Args[0] == "--no-optional-locks" && c.Args[1] == "status" && c.Args[2] == "--porcelain"
+	})
+}
+
+// TestADaemonFedClientSpawnsNoGitSubprocesses is to the local scheduler what
+// TestADaemonFedClientSpendsNoGhBudget is to the remote one, and it matters
+// more: a ticker on the remote side burns a quota somebody eventually notices,
+// while a ticker here gives every open panel its own git status loop against
+// the monorepo with no rate limit to notice it at all.
+//
+// It has to go through a real Collector.Start. A nudge that never reaches a
+// worker leaves every RefreshDirty-driven test in internal/collect green, so
+// those cannot stand in for this one.
+//
+// GitInterval is zeroed for the same reason PRInterval is zeroed above: at the
+// default 3s a woken pass inside the assertion window would find nothing due
+// and spend nothing, and a ticker would sail through.
+func TestADaemonFedClientSpawnsNoGitSubprocesses(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|alpha|/repo/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux display-message -p #{session_name}", "alpha", nil)
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
+			return "/repo/alpha", nil
+		},
+		"git branch --show-current": func(context.Context, string, []string) (string, error) {
+			return "feature", nil
+		},
+	}
+	cmd.OnArgs("git --no-optional-locks status --porcelain", " M a.go", nil)
+	cmd.On("gh", `{"number": 42, "state": "OPEN"}`, nil)
+
+	m := newTestModel()
+	m.cmd = cmd
+	m.collector = collect.New(&config.Config{}, cmd)
+	m.collector.GitInterval = 0
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.collector.Start(ctx)
+
+	if _, err := m.collector.Snapshot(ctx); err != nil {
+		t.Fatalf("the self-polling snapshot failed: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for countStatusCalls(cmd) < 1 {
+		select {
+		case <-deadline:
+			t.Fatal("the self-polling client never ran a dirty pass: this fixture cannot detect a ticker")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Hardcoded rather than latched off the count so far, following the gh
+	// test above. One Snapshot posts one root, so one pass spends exactly one
+	// status call, and unlike gh nothing else in this binary shares a
+	// package-level cache that could change that number.
+	const selfPolledStatus = 1
+	if got := countStatusCalls(cmd); got != selfPolledStatus {
+		t.Fatalf("got %d status calls from the self-polling client, want %d", got, selfPolledStatus)
+	}
+
+	m.daemonConn = &fakeConn{}
+	if got := m.startPoll(false); got != nil {
+		t.Fatal("a daemon-fed client issued a poll of its own")
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	if got := countStatusCalls(cmd); got != selfPolledStatus {
+		t.Errorf("got %d status calls once a daemon was feeding this client, want %d: only Snapshot may wake a poller, and the local scheduler must have no ticker",
+			got, selfPolledStatus)
+	}
+}
