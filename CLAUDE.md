@@ -58,27 +58,36 @@ daemon after `make install`.
 
 ## What is open
 
-Roughly in the order they are worth doing. Nothing here is scheduled; the first two are the
-ones that make the primary surface behave the way the design claims it already does.
+Roughly in the order they are worth doing. Nothing here is scheduled; item 1 is the only one
+with a symptom the user has actually reported, and items 2-3 are the ones that make the primary
+surface behave the way the design claims it already does.
 
 The measurements and file references for each of these live once, in "Key Conventions" below.
 This list is the priority order and the reason for it, not a second copy.
 
-1. **`queueRowBudget` squeezes the session table to 3 rows** on a tall terminal with a full
+1. **`fillGit` blocks the daemon's poll loop, and since the `poke` feature that is visible to
+   the user.** Re-promoted 2026-09-09 after the 2026-08-03 demotion: 25,145 `slow poll` lines,
+   recent ones 1.3-2.0s with ~99% in git at one worktree, and because `poll` and `handleRequest`
+   share Run's goroutine, a slow poll delays a poke's rebroadcast - so the current-session
+   highlight takes 1-2s to move instead of being immediate. Intermittent, tracking whether
+   `fsmonitor`/`core.untrackedCache` are warm. The design already exists and is unimplemented:
+   `docs/superpowers/specs/2026-08-03-dirty-counts-off-publication-path-design.md`. **Chosen as
+   the next piece of work on 2026-09-09.**
+2. **`queueRowBudget` squeezes the session table to 3 rows** on a tall terminal with a full
    queue, inverting the design's premise that the session list is primary. A proportional
    policy would match the intent. Less urgent since the table got a viewport - those rows are
    now scrollable rather than unreachable - but 3 rows is still the wrong allocation.
-2. **Stories can starve reviews out of the queue.** Every story sorts ahead of every review and
+3. **Stories can starve reviews out of the queue.** Every story sorts ahead of every review and
    `queue_limit` applies to the merged list, so 20 undeduped stories means zero review requests
    shown - and review requests were the feature's original motivation.
-3. **No surface shows a Shortcut story state, and none shows a branch across all sessions at
+4. **No surface shows a Shortcut story state, and none shows a branch across all sessions at
    once.** Both were `worktree-status` columns, deleted in phase 6. Feature work either way;
    the interim answers are `short story <id>` and the detail panel one session at a time.
-4. **The `{flags}` hook migration warning is effectively invisible.** Both `runTUI` and
+5. **The `{flags}` hook migration warning is effectively invisible.** Both `runTUI` and
    `runPanel` use `tea.WithAltScreen()`, so a panel never shows it and the `prefix v` popup
    destroys it on close. A user whose `config.toml` lacks `{flags}` gets teleported on their
    first queue dispatch and never sees why. A toast is the real fix.
-5. **vigil's session order and the tmux bindings' order agree only while the user presses
+6. **vigil's session order and the tmux bindings' order agree only while the user presses
    neither `s` nor `f`, and nothing detects a divergence.** They share `session_id` as the key
    now (`(Created, ID)` here, pure `session_id` in `~/dotfiles/scripts/scripts/tmux-hop`), but
    `CycleSort` and `CycleFilter` are live keys and a filter is the worse of the two: a shorter
@@ -87,7 +96,7 @@ This list is the priority order and the reason for it, not a second copy.
    also no automated check that the two orders agree at all - it has only ever been compared by
    hand, and the equivalence rests on `session_created` being monotonic in `session_id`, which
    is asserted nowhere and fails under a backwards clock step.
-6. **Complaint 1 - a session taking "a few seconds" to leave the list after `prefix d` - is
+7. **Complaint 1 - a session taking "a few seconds" to leave the list after `prefix d` - is
    instrumented but uncaused.** It was never reproduced. The daemon now logs
    `session dropped: <name>` and `~/dotfiles`' `git-worktree-done`/`git-worktree-cleanup` carry
    **temporary** stamps to `/tmp/vigil-hop-timing.log`; collecting one real `prefix d` timeline
@@ -95,7 +104,7 @@ This list is the priority order and the reason for it, not a second copy.
    occlusion; the `slow poll` lines discussed below are the other live candidate. Remove the
    dotfiles stamps once the timeline is read - the instruction is in the `TEMPORARY` comment
    above each `stamp` helper.
-7. Smaller, each documented in a handoff: 80-column dashboards overflow their height by 1-2
+8. Smaller, each documented in a handoff: 80-column dashboards overflow their height by 1-2
    lines because the footer help line wraps; `getSelf` is Load-then-Run-then-Store rather than
    single-flight (unreachable today, `storyPoller.pass` is serialized by `passMu`); the cursor
    clamp in `applySnapshot` is a bounds check, not identity preservation, so a vanishing
@@ -104,8 +113,29 @@ This list is the priority order and the reason for it, not a second copy.
    is a no-op) and the ruling is to remove the branch and keep the loop; and `README.md:108`
    still documents the old, broken `notify` default.
 
-**`fillGit` blocking publication used to be item 1 here and was demoted on 2026-08-03, because
-the measurement it rested on did not reproduce.** The attribution did: `git status --porcelain`
+**`fillGit` blocking publication was demoted on 2026-08-03 and is RE-PROMOTED as of 2026-09-09,
+because it reproduced and now has a user-visible symptom.** The 2026-09-09 measurement: the same
+append-only log holds **25,145 `slow poll` lines**, the recent ones sustained at 1.3-2.0s with
+~99% of each in git, all at `~/sc-231121`. A cold `git status --porcelain` there takes 1348ms and
+`portal` 1110ms, against under 250ms for every other worktree. It is **intermittent, not
+constant**: with `fsmonitor` and `core.untrackedCache` warm, 25 consecutive `poke` round trips
+came back 0/25 over 250ms (max 15ms), so the slow path appears when something invalidates those
+caches - a concurrently churning worktree is the suspected trigger.
+
+**What changed is the consequence, not just the magnitude.** `poll` and `handleRequest` share
+Run's single goroutine - deliberately, since that is what lets `broadcast` touch `s.clients`
+unguarded - so a slow git poll now delays a `RequestPoke` rebroadcast. That is directly visible:
+the current-session highlight takes 1-2s to move after a session switch instead of being
+immediate. Before the poke feature, `fillGit` cost only publication latency, which is why this
+was affordable enough to demote.
+`docs/superpowers/specs/2026-08-03-dirty-counts-off-publication-path-design.md` is the design
+written for it and still not implemented; it now has fresh measurement behind it.
+
+The paragraph below is the 2026-08-03 demotion argument, kept because its *attribution* half
+still holds and its reasoning about caches is what the re-measurement built on. Its conclusion
+is superseded.
+
+**The 2026-08-03 demotion rested on a measurement that did not reproduce at the time.** The attribution did: `git status --porcelain`
 is effectively the whole of `fillGit`, and no other git call crossed a 30ms threshold across
 five timed polls. The magnitude did not: 0.138s cold and 0.009s warm, with the memo skipping
 every poll, against the ~3.0-3.5s and never-skips recorded on 2026-07-31. The 20x is the
@@ -121,8 +151,9 @@ is the design that was written for it and **deliberately not implemented** - rea
 section before re-ranking this, and use the `slow poll` daemon log line as the evidence. **The
 session-hopping design claimed zero `slow poll` lines in the whole daemon log as a third data
 point for this demotion, and that count was simply wrong**: the same append-only log holds **at
-least eight as of 16:19 on 2026-08-03, and at least nine as of 16:48** - the log is append-only
-and never truncated, so any count here is a floor with a timestamp, never a total. Six of the
+least eight as of 16:19 on 2026-08-03, and at least nine as of 16:48; re-counted at 25,145 on
+2026-09-09** - the log is append-only and never truncated, so any count here is a floor with a
+timestamp, never a total, and the 2026-09-09 figure is why this item is no longer demoted. Six of the
 nine are 1.0-1.6s at `pr-35108`, a freshly dispatched worktree, which is the cold-worktree
 story; one is 11.1s total with 11.085s in git, timestamped seven minutes before the design that
 recorded zero. **Three of the nine are `sc-223374`, a warm long-lived worktree, and the
