@@ -168,8 +168,8 @@ func (c *Collector) now() time.Time {
 
 // Start runs the pollers' workers - the remote ones and the local git one.
 // Every process that calls Snapshot must call this once: without it no
-// off-box data is ever fetched. It is safe to call more than once and does
-// nothing on a second call.
+// off-box data and no dirty counts are ever fetched. It is safe to call more
+// than once and does nothing on a second call.
 //
 // ctx must outlive the process's use of the collector. The first call wins
 // permanently, so starting with a short-lived or already-cancelled context
@@ -191,10 +191,10 @@ func (c *Collector) Wait() {
 	c.local.wait()
 }
 
-// RefreshRemote runs one pass of every poller on the caller's goroutine. The
-// workers are a scheduler over this. It exists so a test can drive a pass
-// deterministically instead of racing a goroutine; production reaches a pass
-// only through Start.
+// RefreshRemote runs one pass of every remote poller on the caller's
+// goroutine. The workers are a scheduler over this. It exists so a test can
+// drive a pass deterministically instead of racing a goroutine; production
+// reaches a pass only through Start.
 func (c *Collector) RefreshRemote(ctx context.Context) { c.remote.refresh(ctx) }
 
 // RefreshDirty runs one dirtyPoller pass on the caller's goroutine, the local

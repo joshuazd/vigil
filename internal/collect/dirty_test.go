@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jzinkduda/vigil/internal/fetch"
+	"github.com/jzinkduda/vigil/internal/session"
 )
 
 // countStatusCalls counts `git --no-optional-locks status --porcelain`, the
@@ -218,10 +219,10 @@ func TestDirtyPassDoesNotSatisfyAnInvalidateThatLandsDuringIt(t *testing.T) {
 		c.dirty.pass(ctx)
 	}()
 
-	<-entered
+	waitForEntered(t, entered)
 	c.dirty.invalidate()
 	close(release)
-	<-done
+	waitForDone(t, done)
 
 	c.dirty.mu.Lock()
 	e, ok := c.dirty.entries["/repo/alpha"]
@@ -234,7 +235,99 @@ func TestDirtyPassDoesNotSatisfyAnInvalidateThatLandsDuringIt(t *testing.T) {
 	}
 }
 
-// Test 8. -race. Snapshot reads the dirty store while a pass writes it.
+// blockingStatusCommander answers every status --porcelain call by blocking on
+// release until it is closed, signaling entered the first time it is called
+// so a test never has to sleep to know a pass has reached its fetch. Mirrors
+// remote_test.go's blockingGhCommander.
+func blockingStatusCommander(entered chan struct{}, release chan struct{}, output string) *fetch.MockCommander {
+	cmd := fetch.NewMockCommander()
+	cmd.HandlerFuncs = map[string]func(context.Context, string, []string) (string, error){
+		"git --no-optional-locks status --porcelain": func(context.Context, string, []string) (string, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			return output, nil
+		},
+	}
+	return cmd
+}
+
+// Test 9. The write-back must prune against the working set as it stands
+// after the fetch, not as it stood when the fetch started. Mirrors
+// prPoller's TestPassDiscardsAResultForABranchThatVanishedMidFetch.
+func TestDirtyPassDiscardsAResultForARootThatVanishedMidFetch(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cmd := blockingStatusCommander(entered, release, " M a.go")
+
+	c := New(noQueueConfig(), cmd)
+	p := newDirtyPoller(c)
+	p.track([]*session.Session{{Git: session.GitStatus{GitRoot: "/repo/alpha"}}})
+
+	done := make(chan struct{})
+	go func() {
+		p.pass(context.Background())
+		close(done)
+	}()
+	waitForEntered(t, entered)
+
+	// The root vanishes from the working set while its fetch is still in
+	// flight - e.g. its session exited.
+	p.track(nil)
+	close(release)
+	waitForDone(t, done)
+
+	p.mu.Lock()
+	_, ok := p.entries["/repo/alpha"]
+	p.mu.Unlock()
+	if ok {
+		t.Error("a root that vanished mid-fetch must not survive into the entries map")
+	}
+}
+
+// Test 10. mu guards the maps, not the subprocess. A concurrent track or fill
+// must not wait out a slow status call. Mirrors prPoller's
+// TestPassDoesNotHoldMuAcrossTheFetch.
+func TestDirtyPassDoesNotHoldMuAcrossTheFetch(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cmd := blockingStatusCommander(entered, release, " M a.go")
+
+	c := New(noQueueConfig(), cmd)
+	p := newDirtyPoller(c)
+	p.track([]*session.Session{{Git: session.GitStatus{GitRoot: "/repo/alpha"}}})
+
+	done := make(chan struct{})
+	go func() {
+		p.pass(context.Background())
+		close(done)
+	}()
+	waitForEntered(t, entered)
+
+	trackDone := make(chan struct{})
+	go func() {
+		p.track([]*session.Session{{Git: session.GitStatus{GitRoot: "/repo/beta"}}})
+		close(trackDone)
+	}()
+
+	select {
+	case <-trackDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("track blocked on mu while a fetch was in flight")
+	}
+
+	close(release)
+	waitForDone(t, done)
+}
+
+// Test 8. -race. Snapshot reads the dirty store while a pass writes it. The
+// loop counts are 10x prPoller's equivalent race test: catching the dropped
+// -mu mutation (finding 8, task 3 review) needed -count=5 at 50 iterations
+// per goroutine, and both goroutines also serialize on MockCommander's own
+// mutex, which narrows the window further. 500 iterations catches it
+// reliably at -count=1.
 func TestSnapshotAndRefreshDirtyAreRaceFree(t *testing.T) {
 	cmd := singleBranchCommander()
 	cmd.OnArgs("git --no-optional-locks status --porcelain", " M a.go", nil)
@@ -247,7 +340,7 @@ func TestSnapshotAndRefreshDirtyAreRaceFree(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 50; i++ {
+		for i := 0; i < 500; i++ {
 			if _, err := c.Snapshot(ctx); err != nil {
 				t.Errorf("Snapshot: %v", err)
 				return
@@ -256,7 +349,7 @@ func TestSnapshotAndRefreshDirtyAreRaceFree(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 50; i++ {
+		for i := 0; i < 500; i++ {
 			c.RefreshDirty(ctx)
 		}
 	}()
