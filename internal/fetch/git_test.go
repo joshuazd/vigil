@@ -64,6 +64,9 @@ func TestFetchGitMetaNoGitRoot(t *testing.T) {
 	if status.GitRoot != "" {
 		t.Errorf("expected empty gitRoot, got %q", status.GitRoot)
 	}
+	if n := mock.CallCountFunc(func(c MockCall) bool { return c.Name == "git" }); n != 1 {
+		t.Errorf("got %d git calls after rev-parse failed, want 1: FetchGitMeta must not probe a path that is not a repository", n)
+	}
 }
 
 func TestFetchDirtyCountsEveryXYCode(t *testing.T) {
