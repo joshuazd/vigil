@@ -49,6 +49,8 @@ func parseArgs(args []string) (string, []string, error) {
 		return "config", args[1:], nil
 	case "dispatch":
 		return "dispatch", args[1:], nil
+	case "poke":
+		return "poke", args[1:], nil
 	case "--panel":
 		return "panel", args[1:], nil
 	case "--help", "-h":
@@ -81,6 +83,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "config":
 		return runConfigGet(rest, stdout, stderr)
+	case "poke":
+		// Before the dependency gate and before config.Load on purpose. This
+		// runs from a tmux hook on every session switch: a "gh not found"
+		// line would land in the user's pane, and a poke needs neither the
+		// config nor any of tmux/git/gh in PATH.
+		_ = dispatch.Poke(protocol.SocketPath())
+		return 0
 	}
 
 	for _, dep := range startupDependencies {
