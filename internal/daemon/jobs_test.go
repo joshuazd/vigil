@@ -584,3 +584,18 @@ func containsEnv(env []string, want string) bool {
 	}
 	return false
 }
+
+// TestSubmitDropsAnEmptyIDPokeFrame pins the contract that keeps a poke inert
+// against a daemon predating RequestPoke. Such a daemon has no poke arm, so
+// the frame falls through to submit, and only the empty-ID guard stops it
+// becoming a refused job on every session switch - undismissable, and
+// produced by a keypress the user never made. handleRequest's poke arm means
+// this guard is dormant in THIS daemon, which is why it has to be pinned
+// here rather than through the socket.
+func TestSubmitDropsAnEmptyIDPokeFrame(t *testing.T) {
+	j := newJobs(testJobsConfig(), newBlockingStream(), fetch.NewMockCommander(), func(string, ...any) {})
+	j.submit(&protocol.Request{Version: protocol.Version, Type: protocol.RequestPoke})
+	if got := j.snapshot(); len(got) != 0 {
+		t.Errorf("got jobs %+v, want none", got)
+	}
+}

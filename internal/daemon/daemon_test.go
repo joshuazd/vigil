@@ -960,17 +960,25 @@ func TestAPokeRunsNoPollAndKeepsTheTimestamp(t *testing.T) {
 		t.Fatalf("SetReadDeadline: %v", err)
 	}
 	dec := protocol.NewDecoder(conn)
-	first, err := dec.Next()
-	if err != nil {
+	if _, err := dec.Next(); err != nil {
 		t.Fatalf("first Next: %v", err)
 	}
 
-	// Captured only now, not before startServer: Run's own bootstrap poll
-	// (unconditional, right after the listener binds and before the select
-	// loop that would ever read this connection) always runs once more
-	// regardless of Interval or a pre-existing latest, so any baseline taken
-	// earlier double-counts a poll that happened before the poke was even
-	// sent.
+	// Only now, not before startServer or inside pokeServer: Run's own
+	// bootstrap poll (unconditional, right after the listener binds and
+	// before the select loop that would ever read this connection or a
+	// fixture's pre-seeded stamp) always runs once more regardless of
+	// Interval or a pre-existing latest, and it runs before addClient ever
+	// sends this connection its first snapshot. So a sentinel set any earlier
+	// - including inside pokeServer, before Run starts - is overwritten by
+	// that poll before this point, and a CallCount baseline taken any
+	// earlier double-counts it too. Both are safe to fix up only once the
+	// first real snapshot has round-tripped, proving that poll is done and
+	// the ticker (an hour) cannot fire another.
+	const sentinelTimestamp = 1
+	srv.mu.Lock()
+	srv.latest.Timestamp = sentinelTimestamp
+	srv.mu.Unlock()
 	before := pollCmd.CallCount("tmux")
 
 	sendPoke(t, conn)
@@ -979,9 +987,9 @@ func TestAPokeRunsNoPollAndKeepsTheTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Next: %v", err)
 	}
-	if second.Timestamp != first.Timestamp {
-		t.Errorf("Timestamp moved %d -> %d; a poke must not poll or restamp",
-			first.Timestamp, second.Timestamp)
+	if second.Timestamp != sentinelTimestamp {
+		t.Errorf("Timestamp %d, want the sentinel %d carried over unchanged; a poke must not poll or restamp",
+			second.Timestamp, sentinelTimestamp)
 	}
 	if got := pollCmd.CallCount("tmux"); got != before {
 		t.Errorf("tmux call count %d -> %d; a poke must issue no subprocess", before, got)
@@ -1020,9 +1028,13 @@ func TestAPokeBeforeTheFirstPollBroadcastsNothing(t *testing.T) {
 	}
 }
 
-// TestAPokeRegistersNoJob pins the empty-ID contract. Give the poke frame a
-// generated id and it lands as a refused job on every session switch against
-// a daemon that predates RequestPoke.
+// TestAPokeRegistersNoJob is an end-to-end sanity check on the poke path as
+// wired in this daemon, not a pin on the empty-ID contract itself: with the
+// explicit RequestPoke arm in place, handleRequest never calls submit for a
+// poke at all, so no mutation of submit's guard can make this test fail.
+// TestSubmitDropsAnEmptyIDPokeFrame (jobs_test.go) is what actually pins that
+// contract, against a daemon that falls through to submit because it
+// predates RequestPoke.
 func TestAPokeRegistersNoJob(t *testing.T) {
 	srv := pokeServer(t)
 	startServer(t, srv)
