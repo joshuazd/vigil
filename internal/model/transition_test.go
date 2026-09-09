@@ -228,3 +228,26 @@ func TestCheckStateTransitionsAutoFocusesTheMostUrgentSession(t *testing.T) {
 		t.Errorf("got cursor %d, want 1 (auto-focus on the blocked session)", m.cursor)
 	}
 }
+
+// TestAPanelNeverAutoFocuses is the test above with one field changed. Auto-focus
+// exists to point the detail panel at the session that needs attention, and a
+// panel has no detail panel, so moving its cursor changes nothing the user can
+// see and fights their own j/k. Reusing the passing case's sessions verbatim is
+// what stops this passing vacuously: those two sessions demonstrably do move the
+// cursor to 1, so deleting the panelMode gate fails this.
+func TestAPanelNeverAutoFocuses(t *testing.T) {
+	m := transitionModel()
+	m.panelMode = true
+	m.cfg = &config.Config{Settings: map[string]any{
+		"notifications_enabled": "true",
+		"auto_focus":            "true",
+	}}
+	m.sessions = []*session.Session{idleSession("alpha"), blockedSession("beta")}
+	m.cursor = 0
+
+	m.checkStateTransitions()
+
+	if m.cursor != 0 {
+		t.Errorf("got cursor %d, want 0 (a panel has no detail panel to focus)", m.cursor)
+	}
+}
