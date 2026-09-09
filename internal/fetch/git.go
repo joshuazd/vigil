@@ -22,7 +22,10 @@ var (
 // Snapshot's later stages need them: groupByBranchRoot feeds prPoller's
 // working set from Branch and GitRoot, dirtyPoller keys its working set on
 // GitRoot, and transition.Detect reads both off the event. Timed across five
-// real polls on 2026-08-03, none of the calls below ever crossed 30ms.
+// real polls on 2026-08-03 against a log of every subprocess over 30ms, none of
+// the calls that appeared crossed it - evidence about the calls that ran, not
+// about all of them, since DetectDefaultBranch memoizes per root and its
+// symbolic-ref may not have run at all.
 func FetchGitMeta(ctx context.Context, cmd Commander, panePath string) session.GitStatus {
 	gitRoot := gitRoot(ctx, cmd, panePath)
 	if gitRoot == "" {

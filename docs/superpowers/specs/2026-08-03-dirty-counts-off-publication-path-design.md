@@ -270,7 +270,8 @@ total, the git portion, the slowest duration and the pane path that owned it thr
 
 Had the `dirtyPoller` been built, its last pass duration would belong here too, since a pass
 exceeding `git_interval` means the counts are staler than intended even though it no longer
-blocks publication.
+blocks publication. (Built 2026-09-09 as `Collector.DirtyStats()` and the `slow dirty pass`
+line; see Status, correction 3. The rest of this section is 2026-08-03 text.)
 
 `GitStats` inherits `Snapshot`'s threading rule: it is goroutine-owned and unguarded, like
 `gitMemo`, so only the goroutine that called `Snapshot` may read it, and only after `Snapshot`
