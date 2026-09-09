@@ -223,6 +223,24 @@ func countGhCalls(cmd *fetch.MockCommander) int {
 	return n
 }
 
+// fillGit still runs both halves in this task, so a Snapshot alone fills the
+// counts. Task 3 moves the second half to a poller and this test moves with
+// it; until then it is what says the split did not lose anything.
+func TestSnapshotStillFillsDirtyCountsSynchronously(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.OnArgs("git --no-optional-locks status --porcelain", " M a.go\n?? b.go\n D c.go", nil)
+
+	c := New(noQueueConfig(), cmd)
+	sessions, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	got := sessions[0].Git
+	if got.Modified != 1 || got.Added != 1 || got.Deleted != 1 {
+		t.Errorf("got ~%d +%d -%d, want ~1 +1 -1", got.Modified, got.Added, got.Deleted)
+	}
+}
+
 func TestSnapshotSkipsPRFetchWithinPRInterval(t *testing.T) {
 	cmd := singleBranchCommander()
 	cmd.On("gh", `{"number": 42, "state": "MERGED"}`, nil)

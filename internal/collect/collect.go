@@ -263,7 +263,10 @@ func (c *Collector) fillGit(ctx context.Context, sessions []*session.Session) {
 	start := time.Now()
 	runParallel(due, c.GitWorkers, func(d *dueGit) {
 		fetchStart := time.Now()
-		d.s.Git = fetch.FetchGitStatus(ctx, c.Cmd, d.s.PanePath)
+		d.s.Git = fetch.FetchGitMeta(ctx, c.Cmd, d.s.PanePath)
+		if d.s.Git.GitRoot != "" {
+			d.s.Git.Modified, d.s.Git.Added, d.s.Git.Deleted = fetch.FetchDirtyCounts(ctx, c.Cmd, d.s.Git.GitRoot)
+		}
 		d.took = time.Since(fetchStart)
 	})
 
