@@ -394,6 +394,12 @@ func (s *Server) handleRequest(req *protocol.Request) {
 		if !s.jobs.dismissTerminal() {
 			return
 		}
+	case protocol.RequestPoke:
+		// Nothing to change: the unconditional publishJobs below is the whole
+		// point of the frame. An explicit arm rather than letting this fall
+		// through `default`, which reaches the same rebroadcast only by way
+		// of submit discarding an empty ID - a coupling between two unrelated
+		// pieces of code that would break silently if either moved.
 	default:
 		s.jobs.submit(req)
 	}

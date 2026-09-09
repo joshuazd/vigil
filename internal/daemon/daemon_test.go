@@ -874,3 +874,179 @@ func TestSnapshotQueueIsOmittedWhenEmpty(t *testing.T) {
 		t.Errorf("empty snapshot carries a queue key: %s", data)
 	}
 }
+
+// pokeServer returns a server whose ticker will not fire during a test, with
+// one snapshot already published. Interval is an hour and the single poll is
+// done here, on the test's own goroutine before Run starts, because a poke
+// must be shown to add no subprocess calls of its own - a 50ms ticker would
+// make that unmeasurable.
+func pokeServer(t *testing.T) *Server {
+	t.Helper()
+	srv := testServer(t)
+	srv.Interval = time.Hour
+	// testServer builds a bare literal, which leaves requests nil; without
+	// this, addClient's readLoop never starts and a poke frame is never read
+	// at all, regardless of handleRequest.
+	srv.requests = make(chan *protocol.Request, queueDepth)
+	// The commander here only satisfies newJobs; no job is ever submitted in
+	// these tests. The one whose calls get counted is the collector's, which
+	// testServer already primed - reach it with srv.Collector.Cmd.
+	srv.jobs = newJobs(testJobsConfig(), newBlockingStream(), fetch.NewMockCommander(), srv.logf)
+	// No clients and no Run goroutine yet, so touching clients here is safe.
+	srv.poll(context.Background())
+	if srv.latest == nil {
+		t.Fatal("fixture failed to publish a first snapshot")
+	}
+	return srv
+}
+
+func sendPoke(t *testing.T, conn net.Conn) {
+	t.Helper()
+	if err := protocol.EncodeRequest(conn, &protocol.Request{
+		Version: protocol.Version,
+		Type:    protocol.RequestPoke,
+	}); err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+}
+
+// TestAPokeRebroadcastsTheLatestSnapshot is the feature. The client reads the
+// snapshot addClient sends it, pokes, and must get a second one without any
+// tick having fired - Interval is an hour.
+func TestAPokeRebroadcastsTheLatestSnapshot(t *testing.T) {
+	srv := pokeServer(t)
+	startServer(t, srv)
+
+	conn, err := net.Dial("unix", srv.SocketPath)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	dec := protocol.NewDecoder(conn)
+	if _, err := dec.Next(); err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+
+	sendPoke(t, conn)
+
+	second, err := dec.Next()
+	if err != nil {
+		t.Fatalf("second Next (the poke did not rebroadcast): %v", err)
+	}
+	if len(second.Sessions) != 1 || second.Sessions[0].Name != "alpha" {
+		t.Fatalf("got %+v, want the same one session named alpha", second.Sessions)
+	}
+}
+
+// TestAPokeRunsNoPollAndKeepsTheTimestamp pins the economy of the whole
+// design. A poke must reuse the held snapshot: no new subprocess, and the
+// Timestamp carried over unchanged, because that is what the status bar's
+// "daemon stale Ns" reads and refreshing it would make a stalled collector
+// look healthy.
+func TestAPokeRunsNoPollAndKeepsTheTimestamp(t *testing.T) {
+	srv := pokeServer(t)
+	pollCmd := srv.Collector.Cmd.(*fetch.MockCommander)
+	startServer(t, srv)
+
+	conn, err := net.Dial("unix", srv.SocketPath)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	dec := protocol.NewDecoder(conn)
+	first, err := dec.Next()
+	if err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+
+	// Captured only now, not before startServer: Run's own bootstrap poll
+	// (unconditional, right after the listener binds and before the select
+	// loop that would ever read this connection) always runs once more
+	// regardless of Interval or a pre-existing latest, so any baseline taken
+	// earlier double-counts a poll that happened before the poke was even
+	// sent.
+	before := pollCmd.CallCount("tmux")
+
+	sendPoke(t, conn)
+
+	second, err := dec.Next()
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if second.Timestamp != first.Timestamp {
+		t.Errorf("Timestamp moved %d -> %d; a poke must not poll or restamp",
+			first.Timestamp, second.Timestamp)
+	}
+	if got := pollCmd.CallCount("tmux"); got != before {
+		t.Errorf("tmux call count %d -> %d; a poke must issue no subprocess", before, got)
+	}
+}
+
+// TestAPokeBeforeTheFirstPollBroadcastsNothing guards the one case where a
+// rebroadcast would be actively harmful. publishJobs refuses to invent a
+// snapshot when latest is nil, because a frame with nil Sessions blanks every
+// client's table - far worse than a highlight arriving one tick late. A poke
+// can hit this for real: the hook fires on any session switch, including one
+// a second after a cold daemon started.
+//
+// This does not go through Run/the socket: Run's own bootstrap poll runs
+// unconditionally, synchronously, and strictly before the select loop that
+// would ever accept a connection or read a request (daemon.go's Run: the
+// listener binds, then `s.poll(ctx)` runs, then the loop that reads
+// `incoming` and `s.requests` begins). That ordering means a client can
+// never actually reach the daemon before its first poll has landed, so the
+// "before the first poll" case cannot be reproduced by dialing the real
+// socket - it has to be exercised at the handleRequest level directly,
+// against a Server whose latest is still nil.
+func TestAPokeBeforeTheFirstPollBroadcastsNothing(t *testing.T) {
+	srv := testServer(t)
+	srv.requests = make(chan *protocol.Request, queueDepth)
+	srv.jobs = newJobs(testJobsConfig(), newBlockingStream(), fetch.NewMockCommander(), srv.logf)
+
+	if srv.latest != nil {
+		t.Fatal("fixture already has a snapshot; this test needs latest == nil")
+	}
+
+	srv.handleRequest(&protocol.Request{Version: protocol.Version, Type: protocol.RequestPoke})
+
+	if srv.latest != nil {
+		t.Fatalf("got snapshot %+v, want none: a poke must not invent one", srv.latest)
+	}
+}
+
+// TestAPokeRegistersNoJob pins the empty-ID contract. Give the poke frame a
+// generated id and it lands as a refused job on every session switch against
+// a daemon that predates RequestPoke.
+func TestAPokeRegistersNoJob(t *testing.T) {
+	srv := pokeServer(t)
+	startServer(t, srv)
+
+	conn, err := net.Dial("unix", srv.SocketPath)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	dec := protocol.NewDecoder(conn)
+	if _, err := dec.Next(); err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+
+	sendPoke(t, conn)
+
+	second, err := dec.Next()
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if len(second.Jobs) != 0 {
+		t.Errorf("got jobs %+v, want none", second.Jobs)
+	}
+}
