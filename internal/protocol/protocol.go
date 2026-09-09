@@ -34,6 +34,28 @@ const RequestDispatch = "dispatch"
 // clear one.
 const RequestDismiss = "dismiss"
 
+// RequestPoke asks the daemon to rebroadcast the snapshot it already holds.
+// It exists so a tmux client-session-changed hook can make every panel
+// re-resolve IsCurrent/IsLast at once, which annotateClientFlags only does
+// when a snapshot arrives - otherwise the highlight lags by up to a tick.
+//
+// It deliberately triggers no poll: no tmux re-read, no git, no gh, and no
+// nudge to the remote pollers. A poke therefore cannot be slower than the
+// tick it pre-empts, which an immediate-poll variant could be on a cold
+// worktree.
+//
+// Like RequestDismiss it carries an empty ID, so jobs.submit drops it before
+// its reason switch and a poke aimed at an old daemon registers no refused
+// job named for a type that daemon does not know. It is NOT inert against an
+// old daemon: handleRequest's default arm still reaches the unconditional
+// publishJobs at the bottom of the request handler, so an old daemon
+// rebroadcasts its held snapshot exactly as a new one does - verified
+// 2026-09-09 against a live pre-feature daemon binary, which answered a poke
+// with a second snapshot carrying the same timestamp and session list. The
+// daemon never restarts itself, so that version skew is the normal state
+// right after `make install` - not a corner case.
+const RequestPoke = "poke"
+
 // Job states. JobFailed means the job was accepted and ran, then exited
 // non-zero: "vigil dispatch" exits 0 for it, the same as JobSucceeded,
 // because the daemon owning the job - not this process seeing it succeed -

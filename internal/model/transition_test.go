@@ -251,3 +251,27 @@ func TestAPanelNeverAutoFocuses(t *testing.T) {
 		t.Errorf("got cursor %d, want 0 (a panel has no detail panel to focus)", m.cursor)
 	}
 }
+
+// TestARepeatSnapshotAddsNoSecondToast pins what a poke depends on. A poke
+// makes the daemon rebroadcast an unchanged snapshot, so identical input
+// arrives routinely; if Detect reported an event for it, every tmux session
+// switch would duplicate every toast.
+func TestARepeatSnapshotAddsNoSecondToast(t *testing.T) {
+	m := transitionModel()
+	m.sessions = []*session.Session{idleSession("alpha")}
+	m.checkStateTransitions()
+	m.sessions = []*session.Session{blockedSession("alpha")}
+	m.checkStateTransitions()
+
+	afterRealChange := len(m.notifications)
+	if afterRealChange == 0 {
+		t.Fatal("fixture produced no toast to begin with")
+	}
+
+	// The same sessions again, as a poke's rebroadcast delivers them.
+	m.checkStateTransitions()
+
+	if got := len(m.notifications); got != afterRealChange {
+		t.Errorf("got %d notifications after a repeat snapshot, want %d", got, afterRealChange)
+	}
+}

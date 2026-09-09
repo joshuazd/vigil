@@ -353,3 +353,20 @@ func TestShortIsNotAStartupDependency(t *testing.T) {
 		}
 	}
 }
+
+// TestPokeExitsZeroAndSilentlyWithNoDaemon is what keeps the tmux hook quiet.
+// A non-zero exit or a line on stderr would surface in the user's pane on
+// every session switch. Poke is also dispatched before the tmux/git/gh
+// LookPath gate, so a machine missing gh still pokes silently rather than
+// printing "gh not found in PATH".
+func TestPokeExitsZeroAndSilentlyWithNoDaemon(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"poke"}, &stdout, &stderr); code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if stdout.String() != "" || stderr.String() != "" {
+		t.Errorf("got stdout %q stderr %q, want both empty", stdout.String(), stderr.String())
+	}
+}

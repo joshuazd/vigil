@@ -49,6 +49,8 @@ func parseArgs(args []string) (string, []string, error) {
 		return "config", args[1:], nil
 	case "dispatch":
 		return "dispatch", args[1:], nil
+	case "poke":
+		return "poke", args[1:], nil
 	case "--panel":
 		return "panel", args[1:], nil
 	case "--help", "-h":
@@ -81,6 +83,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "config":
 		return runConfigGet(rest, stdout, stderr)
+	case "poke":
+		// Before the dependency gate and before config.Load on purpose. This
+		// runs from a tmux hook on every session switch: a "gh not found"
+		// line would land in the user's pane, and a poke needs neither the
+		// config nor any of tmux/git/gh in PATH.
+		_ = dispatch.Poke(protocol.SocketPath())
+		return 0
 	}
 
 	for _, dep := range startupDependencies {
@@ -263,6 +272,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  vigil --panel    Run the compact session list for a tmux pane")
 	_, _ = fmt.Fprintln(w, "  vigil config get <key>   Print a config value")
 	_, _ = fmt.Fprintln(w, "  vigil dispatch <url-or-id>   Submit a job to the daemon")
+	_, _ = fmt.Fprintln(w, "  vigil poke       Ask the daemon to rebroadcast its held snapshot")
 	_, _ = fmt.Fprintln(w, "  vigil --help")
 	_, _ = fmt.Fprintln(w, "  vigil --version")
 	_, _ = fmt.Fprintln(w)

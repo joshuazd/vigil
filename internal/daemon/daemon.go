@@ -350,18 +350,20 @@ func (s *Server) poll(ctx context.Context) {
 }
 
 // publishJobs re-broadcasts the latest snapshot with jobs attached, off the
-// tick. Called when a submission is accepted and when a poll fails, the two
-// moments a job's state changes without a snapshot of its own.
+// tick. Called when a submission is accepted and when a poll fails - the two
+// moments a job's state changes without a snapshot of its own - and also by
+// a poke, which changes no job state at all and calls this purely for the
+// rebroadcast.
 //
 // It never invents a snapshot. A frame with nil Sessions would blank every
 // client's table, which is a far worse outcome than a job line arriving one
 // tick late, so before the first successful poll this does nothing at all and
 // the submitting client waits.
 //
-// The timestamp is deliberately carried over rather than refreshed: it is
-// what the status bar's "daemon stale Ns" reads, and these sessions are
-// exactly as old as they were. Refreshing it would make a failing collector
-// look healthy.
+// The timestamp is deliberately carried over rather than refreshed, because a
+// rebroadcast must not make a stalled collector's data look fresh. Snapshot.Timestamp
+// currently has no client-side reader, so the carry-over matters only to the
+// daemon's own reasoning about whether the data it is sending is current.
 //
 // Run's goroutine is the only caller, which is what makes touching clients
 // (through broadcast) safe.
@@ -394,6 +396,12 @@ func (s *Server) handleRequest(req *protocol.Request) {
 		if !s.jobs.dismissTerminal() {
 			return
 		}
+	case protocol.RequestPoke:
+		// Nothing to change: the unconditional publishJobs below is the whole
+		// point of the frame. An explicit arm rather than letting this fall
+		// through `default`, which reaches the same rebroadcast only by way
+		// of submit discarding an empty ID - a coupling between two unrelated
+		// pieces of code that would break silently if either moved.
 	default:
 		s.jobs.submit(req)
 	}
