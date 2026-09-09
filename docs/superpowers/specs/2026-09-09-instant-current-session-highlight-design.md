@@ -10,10 +10,12 @@ more often than vigil already does.** This design adds zero polls.
 
 Three facts, each read from the code rather than assumed:
 
-1. **`annotateClientFlags` (`internal/model/client.go:114-124`) is the only
-   thing that decides which session is current.** It runs
+1. **`annotateClientFlags` (`internal/model/client.go:114-124`) re-resolves which
+   session is current from tmux state on every arriving snapshot.** It runs
    `fetch.CurrentSession` and `fetch.LastSession` - two `tmux display-message`
-   calls - and sets `IsCurrent` / `IsLast` on every session in the list.
+   calls - and sets `IsCurrent` / `IsLast` on every session in the list. `newModel`
+   also sets `IsCurrent` once from the session cache at startup (`model.go:271`).
+   (corrected 2026-09-09 after tracing to code)
 2. **It only runs when a snapshot arrives.** On the daemon-fed path that is
    `listenDaemonCmd`'s closure, re-issued by `Update` on every `SnapshotMsg`;
    on the self-polling path it is inside `collectCmd`.
@@ -143,12 +145,13 @@ branch. Not done, and no test for it.
 
 ### client
 
-**No changes.** This is the point of the design. `listenDaemonCmd` reads one
+**No changes.** This is the point of the design. On the daemon-fed path, `listenDaemonCmd` reads one
 snapshot per invocation, `Update` re-issues it on every `SnapshotMsg`, and
-`annotateClientFlags` runs inside that closure. An extra arriving snapshot is
+`annotateClientFlags` runs inside that closure (`client.go:142`). On the self-polling path,
+`annotateClientFlags` runs inside `collectCmd` (`client.go:94`). An extra arriving snapshot is
 already a full re-resolution of `IsCurrent` / `IsLast`.
 
-A self-polling client gets no benefit, and that is accepted. It has no daemon to
+A self-polling client gets no benefit from a poke, and that is accepted. It has no daemon to
 poke, and adding a client-side listener would be a second mechanism for a case
 that barely exists now that every mode spawns a daemon.
 

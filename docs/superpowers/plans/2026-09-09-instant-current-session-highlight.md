@@ -4,7 +4,7 @@
 
 **Goal:** Make a vigil panel re-highlight the current tmux session immediately after a session switch, instead of up to one poll interval later, without adding any polling.
 
-**Architecture:** tmux's `client-session-changed` hook runs `vigil poke`, which writes one `Request` frame to the daemon socket. The daemon's `handleRequest` already ends in an unconditional `publishJobs`, which rebroadcasts the snapshot it already holds - so a poke needs one switch arm and no new method. Each client's `listenDaemonCmd` returns on the arriving snapshot and re-runs `annotateClientFlags`, which is the only code that sets `IsCurrent`/`IsLast`. No poll, no git, no `gh`, no client changes.
+**Architecture:** tmux's `client-session-changed` hook runs `vigil poke`, which writes one `Request` frame to the daemon socket. The daemon's `handleRequest` already ends in an unconditional `publishJobs`, which rebroadcasts the snapshot it already holds - so a poke needs one switch arm and no new method. Each client's `listenDaemonCmd` returns on the arriving snapshot and re-runs `annotateClientFlags`, which re-resolves `IsCurrent`/`IsLast` from tmux state per arriving snapshot (with `newModel` seeding `IsCurrent` once from the cache at startup). No poll, no git, no `gh`, no client changes. (corrected 2026-09-09 after tracing to code)
 
 **Tech Stack:** Go, Bubble Tea, newline-delimited JSON over a unix socket, bats + shellcheck on the `~/dotfiles` side.
 
