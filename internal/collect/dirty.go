@@ -152,7 +152,11 @@ func (p *dirtyPoller) pass(ctx context.Context) {
 	if len(due) > 0 {
 		// GitWorkers (8) rather than prWorkers (4): prWorkers is low because
 		// each gh call spends a rate-limited quota, and a local subprocess has
-		// no quota. 8 is what fillGit already fanned out to.
+		// no quota. This is not a claim that peak git concurrency stays at 8:
+		// fillGit can fan out to GitWorkers on Snapshot's goroutine at the same
+		// time a pass fans out to GitWorkers here, so the real peak is up to
+		// 16. Measured harmless (1 vs 9 simultaneous status calls: 0.065s vs
+		// 0.067s) in the design doc.
 		start := time.Now()
 		runParallel(due, p.c.GitWorkers, func(d *dueRoot) {
 			fetchStart := time.Now()

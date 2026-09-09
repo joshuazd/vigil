@@ -93,7 +93,7 @@ func TestSchedulerRunsNothingWithoutANudge(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 	if got := p.count(); got != 0 {
-		t.Errorf("got %d passes with no nudge, want 0: the remote layer must have no ticker of its own", got)
+		t.Errorf("got %d passes with no nudge, want 0: a scheduler must have no ticker of its own", got)
 	}
 }
 

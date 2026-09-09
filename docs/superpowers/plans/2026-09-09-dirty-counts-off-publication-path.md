@@ -66,7 +66,7 @@ first keeps task 3 a diff about the poller rather than a diff about both.
 
 The struct is renamed because after task 3 it schedules local subprocess pollers as well as
 off-box ones, and a type called `remote` scheduling a `git status` loop is a lie. `newRemote`
-becomes `newScheduler`. `Collector.RefreshRemote` is **not** renamed: it has 52 test call sites
+becomes `newScheduler`. `Collector.RefreshRemote` is **not** renamed: it has 46 test call sites
 across three packages and is load-bearing vocabulary in six documents, and after task 3 it
 still refreshes exactly the remote scheduler, so the name stays true.
 
@@ -1058,7 +1058,7 @@ In `internal/collect/collect.go`, add two fields beside `remote`:
 	// remote schedules prs and its siblings; local schedules dirty.
 	//
 	// Two schedulers rather than one list because folding dirty into remote
-	// would make RefreshRemote a lie, and that name has 52 test call sites
+	// would make RefreshRemote a lie, and that name has 46 test call sites
 	// across three packages. Two of them cost one extra goroutine and keep
 	// both names honest.
 	remote *scheduler

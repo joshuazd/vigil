@@ -211,6 +211,61 @@ func TestRunWaitsForAnInFlightPass(t *testing.T) {
 	}
 }
 
+// TestRunWaitsForAnInFlightDirtyPass is TestRunWaitsForAnInFlightPass's local
+// sibling: Collector.Wait fans out to both schedulers, and only the remote
+// half was pinned before this test. Doing that with a git child still running
+// leaves an orphan holding a pipe, exactly like the gh case above.
+func TestRunWaitsForAnInFlightDirtyPass(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cmd := mergedPRCommander()
+	cmd.HandlerFuncs["git --no-optional-locks status --porcelain"] = func(context.Context, string, []string) (string, error) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return " M a.go", nil
+	}
+	s := &Server{
+		Collector:  collect.New(&config.Config{}, cmd),
+		Interval:   10 * time.Millisecond,
+		SocketPath: testSocketPath(t),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		close(release)
+		cancel()
+		<-done
+		t.Fatal("the status --porcelain stub was never reached")
+	}
+
+	cancel()
+	select {
+	case <-done:
+		close(release)
+		t.Fatal("Run returned while a local pass was still in flight")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after the pass finished")
+	}
+}
+
 // TestSlowRemoteDoesNotStallNewConnections is the secondary win. poll runs
 // inline in Run's select loop, so a gh call on that path means the daemon
 // accepts no connections and handles no dispatch requests for its whole

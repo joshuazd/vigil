@@ -419,3 +419,89 @@ func TestDirtyStatsAreZeroWhenNothingWasDue(t *testing.T) {
 		t.Errorf("got %+v, want the zero value", got)
 	}
 }
+
+// branchlessCommander answers tmux and git for one session whose branch is
+// empty, the shape of a detached HEAD (an in-progress rebase).
+func branchlessCommander() *fetch.MockCommander {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"1700000000|$1|alpha|/repo/alpha", nil)
+	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
+			return "/repo/alpha", nil
+		},
+		"git branch --show-current": func(context.Context, string, []string) (string, error) {
+			return "", nil
+		},
+	}
+	return cmd
+}
+
+// TestBranchlessSessionStillGetsDirtyCounts pins the line that decides the
+// design doc's Status correction 2: FetchGitMeta's empty-branch early return,
+// `return session.GitStatus{GitRoot: gitRoot}`, is what puts a detached-HEAD
+// root into dirty.track's working set. Mutating that to session.GitStatus{}
+// leaves GitRoot empty too, the working set permanently empty for this
+// session, and the counts below never land.
+func TestBranchlessSessionStillGetsDirtyCounts(t *testing.T) {
+	cmd := branchlessCommander()
+	cmd.OnArgs("git --no-optional-locks status --porcelain", " M a.go\n?? b.go\n D c.go", nil)
+
+	ctx := context.Background()
+	c := New(noQueueConfig(), cmd)
+	first, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	if first[0].Git.GitRoot != "/repo/alpha" {
+		t.Fatalf("fixture is broken: got GitRoot %q, want /repo/alpha", first[0].Git.GitRoot)
+	}
+	if first[0].Git.Branch != "" {
+		t.Fatalf("fixture is broken: got branch %q, want empty (detached HEAD)", first[0].Git.Branch)
+	}
+
+	c.RefreshDirty(ctx)
+
+	second, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("second Snapshot: %v", err)
+	}
+	g := second[0].Git
+	if g.Modified != 1 || g.Added != 1 || g.Deleted != 1 {
+		t.Errorf("second Snapshot: got ~%d +%d -%d, want ~1 +1 -1: a branchless root must still be tracked and filled", g.Modified, g.Added, g.Deleted)
+	}
+}
+
+// TestInvalidateForcesARefetchOfDirtyCounts is the local half of
+// TestInvalidateForcesARefetchOfGitAndPR. It goes through Collector.Invalidate
+// rather than dirtyPoller's own invalidate, because the wiring - Invalidate's
+// fan-out to c.local - is the thing under test: a local scheduler left out of
+// Invalidate would still pass a test that called c.dirty.invalidate() directly.
+//
+// GitInterval is set high enough that only Invalidate can make the root due
+// again inside this test's timeframe, or the assertion would pass even with
+// the fan-out deleted.
+func TestInvalidateForcesARefetchOfDirtyCounts(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.OnArgs("git --no-optional-locks status --porcelain", " M a.go", nil)
+
+	ctx := context.Background()
+	c := New(noQueueConfig(), cmd)
+	c.GitInterval = time.Hour
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("first Snapshot: %v", err)
+	}
+	c.RefreshDirty(ctx)
+	first := countStatusCalls(cmd)
+	if first != 1 {
+		t.Fatalf("got %d status calls after the first pass, want 1", first)
+	}
+
+	c.Invalidate()
+	c.RefreshDirty(ctx)
+
+	if got := countStatusCalls(cmd); got <= first {
+		t.Errorf("got %d status calls after Invalidate, want more than %d (the entry should have been made due)", got, first)
+	}
+}

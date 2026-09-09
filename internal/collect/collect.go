@@ -21,12 +21,14 @@ const (
 )
 
 type Collector struct {
-	// These eight and clock are read-only once New returns. prPoller.pass reads
-	// Cmd, PRInterval and clock from its own worker goroutine while Snapshot
-	// runs on another, so a writer after construction is a data race - and one
-	// -race would surface only if a test happened to interleave the two. A
-	// test that needs a different clock or interval must set it before the
-	// first Snapshot, which is the only thing that can start a pass.
+	// These nine and clock are read-only once New returns. prPoller.pass reads
+	// Cmd, PRInterval and clock from its own worker goroutine, and
+	// dirtyPoller.pass reads Cmd, GitInterval, GitWorkers and clock from a
+	// second worker goroutine, while Snapshot runs on a third, so a writer
+	// after construction is a data race - and one -race would surface only if
+	// a test happened to interleave two of the three. A test that needs a
+	// different clock or interval must set it before the first Snapshot,
+	// which is the only thing that can start a pass.
 	Cmd         fetch.Commander
 	GitWorkers  int
 	GitInterval time.Duration
@@ -73,7 +75,7 @@ type Collector struct {
 	// remote schedules prs and its siblings; local schedules dirty.
 	//
 	// Two schedulers rather than one list because folding dirty into remote
-	// would make RefreshRemote a lie, and that name has 52 test call sites
+	// would make RefreshRemote a lie, and that name has 46 test call sites
 	// across three packages. Two of them cost one extra goroutine and keep
 	// both names honest.
 	remote *scheduler

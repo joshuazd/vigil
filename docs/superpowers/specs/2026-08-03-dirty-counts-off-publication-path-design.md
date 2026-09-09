@@ -42,8 +42,14 @@ Three corrections the implementation made to what is written below, each argued 
    reversing `fillGit` and `dirty.track` empties the working set permanently and breaks every
    other test in the file. The test is a diagnostic that names the invariant, not an isolator.
 2. A branchless worktree - a detached HEAD, ie an in-progress rebase - gains dirty counts.
-   `FetchGitStatus` returned early on an empty branch; `FetchDirtyCounts` needs only a root.
-   Deliberate, and pinned by `TestFetchDirtyCountsNeedsNoBranch`.
+   `FetchDirtyCounts` needs only a root, and the line that actually decides is
+   `FetchGitMeta`'s empty-branch early return (`internal/fetch/git.go:37`), which returns
+   `session.GitStatus{GitRoot: gitRoot}` rather than a zero value - that is what puts a
+   detached-HEAD root into `dirty.track`'s working set. Deliberate, and pinned by
+   `TestBranchlessSessionStillGetsDirtyCounts` (`internal/collect/dirty_test.go`).
+   `TestFetchDirtyCountsNeedsNoBranch` (`internal/fetch/git_test.go`) is not vacuous - it pins
+   that `FetchDirtyCounts` itself needs no branch - but it cannot fail on the early return above,
+   since `FetchDirtyCounts` never takes a branch parameter at all.
 3. The "Instrumentation" section's aside about the pass duration belonging in the stats was
    built: `Collector.DirtyStats()` and a rate-limited `slow dirty pass` daemon line. Without it
    the change makes the machine go dark on the exact metric that justified it, because
