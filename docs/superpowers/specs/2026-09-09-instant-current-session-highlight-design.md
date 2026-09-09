@@ -117,9 +117,10 @@ to reimplement, and therefore to keep in sync:
 - **It never invents a snapshot.** Nil `latest` means no successful poll has
   happened yet; a frame with nil `Sessions` would blank every client's table,
   which is far worse than a highlight arriving one tick late.
-- **It does not refresh `Timestamp`.** That field is what the status bar's
-  `daemon stale Ns` reads. These sessions are exactly as old as they were, and
-  refreshing it would make a stalled collector look healthy.
+- **It does not refresh `Timestamp`.** The carry-over is deliberate because a
+  rebroadcast must not make a stalled collector's data look fresh. `Snapshot.Timestamp`
+  currently has no client-side reader, so the carry-over matters only to the daemon's
+  own reasoning about data freshness. (corrected 2026-09-09 after tracing to code)
 - **It is documented as Run's-goroutine-only**, which is what makes touching
   `clients` safe. `broadcast` (`daemon.go:511-525`) mutates `s.clients`
   unguarded, and `daemon.go:56-57` states `clients` is owned by Run's
