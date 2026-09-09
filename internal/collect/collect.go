@@ -65,8 +65,19 @@ type Collector struct {
 	stories *storyPoller
 	reviews *reviewPoller
 
-	// remote schedules prs and its siblings.
+	// dirty holds `git status --porcelain` counts per git root. Snapshot posts
+	// its working set and reads it; the fetching happens on the local
+	// scheduler's worker goroutine.
+	dirty *dirtyPoller
+
+	// remote schedules prs and its siblings; local schedules dirty.
+	//
+	// Two schedulers rather than one list because folding dirty into remote
+	// would make RefreshRemote a lie, and that name has 52 test call sites
+	// across three packages. Two of them cost one extra goroutine and keep
+	// both names honest.
 	remote *scheduler
+	local  *scheduler
 }
 
 type gitMemoEntry struct {
@@ -143,6 +154,8 @@ func New(cfg *config.Config, cmd fetch.Commander) *Collector {
 		pollers = append(pollers, c.stories, c.reviews)
 	}
 	c.remote = newScheduler(pollers...)
+	c.dirty = newDirtyPoller(c)
+	c.local = newScheduler(c.dirty)
 	return c
 }
 
@@ -153,9 +166,10 @@ func (c *Collector) now() time.Time {
 	return time.Now()
 }
 
-// Start runs the remote pollers' workers. Every process that calls Snapshot
-// must call this once: without it no off-box data is ever fetched. It is safe
-// to call more than once and does nothing on a second call.
+// Start runs the pollers' workers - the remote ones and the local git one.
+// Every process that calls Snapshot must call this once: without it no
+// off-box data is ever fetched. It is safe to call more than once and does
+// nothing on a second call.
 //
 // ctx must outlive the process's use of the collector. The first call wins
 // permanently, so starting with a short-lived or already-cancelled context
@@ -164,12 +178,18 @@ func (c *Collector) now() time.Time {
 //
 // A process that never calls Snapshot may still call it. The workers are woken
 // only by a nudge, so a daemon-fed client's stay blocked and spend nothing.
-func (c *Collector) Start(ctx context.Context) { c.remote.start(ctx) }
+func (c *Collector) Start(ctx context.Context) {
+	c.remote.start(ctx)
+	c.local.start(ctx)
+}
 
 // Wait joins the workers after their context is cancelled. The daemon calls it
 // before Run returns, so the process does not release its flock and unlink its
-// socket with a gh child still running.
-func (c *Collector) Wait() { c.remote.wait() }
+// socket with a gh or git child still running.
+func (c *Collector) Wait() {
+	c.remote.wait()
+	c.local.wait()
+}
 
 // RefreshRemote runs one pass of every poller on the caller's goroutine. The
 // workers are a scheduler over this. It exists so a test can drive a pass
@@ -177,19 +197,27 @@ func (c *Collector) Wait() { c.remote.wait() }
 // only through Start.
 func (c *Collector) RefreshRemote(ctx context.Context) { c.remote.refresh(ctx) }
 
-// Invalidate drops the git memo and makes every remote entry due, so a caller
+// RefreshDirty runs one dirtyPoller pass on the caller's goroutine, the local
+// half of what RefreshRemote does. Same reason: a test drives a pass here
+// instead of racing a goroutine, and production reaches one only through Start.
+func (c *Collector) RefreshDirty(ctx context.Context) { c.local.refresh(ctx) }
+
+// Invalidate drops the git memo and makes every poller entry due, so a caller
 // that just changed state - a merge, a draft toggle, the Refresh key - does
 // not have to wait out git_interval or pr_interval.
 //
-// Git comes back inside the next Snapshot, because fillGit is synchronous.
-// Remote data comes back a tick later, when the pass this nudges has landed.
+// Git metadata - root, branch, unpushed, rebase age - comes back inside the
+// next Snapshot, because fillGit is still synchronous. Dirty counts and remote
+// data come back a tick later, when the passes this nudges have landed.
 //
-// The git half must only ever be called from the same goroutine as Snapshot:
-// gitMemo is not guarded by a lock. The remote half is safe from anywhere.
+// The git memo must only ever be dropped from the same goroutine as Snapshot:
+// gitMemo is not guarded by a lock. Both poller halves are safe from anywhere.
 func (c *Collector) Invalidate() {
 	c.gitMemo = nil
 	c.remote.invalidate()
+	c.local.invalidate()
 	c.remote.nudge()
+	c.local.nudge()
 }
 
 func (c *Collector) Snapshot(ctx context.Context) ([]*session.Session, error) {
@@ -215,14 +243,23 @@ func (c *Collector) Snapshot(ctx context.Context) ([]*session.Session, error) {
 
 	c.fillGit(ctx, sessions)
 
+	// dirty.track must stay below fillGit: the working set is derived from
+	// s.Git.GitRoot, which only exists once meta has landed. Reversed, the
+	// poller never has anything to do and every count renders zero forever -
+	// on every poll, not just the first, because Snapshot builds fresh
+	// sessions each call.
+	c.dirty.track(sessions)
+	c.dirty.fill(sessions)
+
 	// Everything past here is local. The PR store is read as it stands and the
 	// workers are nudged to refresh it; whatever they fetch is published by
 	// the next Snapshot, at most one tick later. Nothing here blocks on the
-	// network, which is the whole contract.
+	// network or on a subprocess, which is the whole contract.
 	branches := groupByBranchRoot(sessions)
 	c.prs.track(branches)
 	c.prs.fill(branches)
 	c.remote.nudge()
+	c.local.nudge()
 	return sessions, nil
 }
 
@@ -264,9 +301,6 @@ func (c *Collector) fillGit(ctx context.Context, sessions []*session.Session) {
 	runParallel(due, c.GitWorkers, func(d *dueGit) {
 		fetchStart := time.Now()
 		d.s.Git = fetch.FetchGitMeta(ctx, c.Cmd, d.s.PanePath)
-		if d.s.Git.GitRoot != "" {
-			d.s.Git.Modified, d.s.Git.Added, d.s.Git.Deleted = fetch.FetchDirtyCounts(ctx, c.Cmd, d.s.Git.GitRoot)
-		}
 		d.took = time.Since(fetchStart)
 	})
 
