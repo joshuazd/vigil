@@ -271,7 +271,6 @@ func (s *Server) poll(ctx context.Context) {
 	start := time.Now()
 	sessions, err := s.Collector.Snapshot(ctx)
 	s.logSlowPoll(time.Since(start))
-	s.logSlowDirtyPass()
 
 	if err != nil {
 		if !s.pollFailing {
@@ -290,6 +289,7 @@ func (s *Server) poll(ctx context.Context) {
 		s.pollFailing = false
 		s.logf("poll recovered")
 	}
+	s.logSlowDirtyPass()
 	s.logDroppedSessions(sessions)
 	queue, queueHidden := s.Collector.Queue(sessions)
 	snap := &protocol.Snapshot{
@@ -454,6 +454,14 @@ func (s *Server) logSlowPoll(elapsed time.Duration) {
 //
 // Rate-limited on the same window as logSlowPoll and for the same reason: a
 // diagnosis wants a series, not one line and then hours of silence.
+//
+// Callers must invoke this only after poll's err != nil return, the same rule
+// logDroppedSessions carries and for a related reason: a failing Snapshot never
+// reaches its nudge, so no new pass runs and DirtyStats stays frozen at the last
+// one. Above the return, an outage would re-emit that same stale measurement
+// every minute, asserting a slow pass while nothing is polling at all.
+// logSlowPoll is different and stays above: it times the failed Snapshot itself,
+// so its number is fresh on the error path.
 func (s *Server) logSlowDirtyPass() {
 	d := s.Collector.DirtyStats()
 	if d.Total <= s.Collector.GitInterval {

@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"testing"
@@ -189,5 +190,37 @@ func TestASlowDirtyPassLogsAgainOnceTheRateLimitWindowHasPassed(t *testing.T) {
 
 	if n := strings.Count(buf.String(), "slow dirty pass"); n != 2 {
 		t.Errorf("got %d slow dirty pass lines in %q, want 2", n, buf.String())
+	}
+}
+
+// A failing Snapshot never reaches its nudge, so no pass runs and DirtyStats
+// stays frozen at the last one. That is why logSlowDirtyPass sits below poll's
+// error return: above it, an outage would re-emit the same stale measurement
+// every minute while nothing was polling at all.
+//
+// The clock is pinned so the rate limit cannot be what suppresses the second
+// line, and the failure is asserted so a mis-injected error cannot make this
+// pass for the wrong reason.
+func TestAFailingPollLogsNoSlowDirtyPass(t *testing.T) {
+	var buf bytes.Buffer
+	s, runPass := slowDirtyServer(t, 60*time.Millisecond, &buf)
+	clock := time.Unix(1700000000, 0)
+	s.clock = func() time.Time { return clock }
+
+	ctx := context.Background()
+	s.poll(ctx) // posts the working set
+	runPass()   // and now DirtyStats holds a slow measurement
+
+	cmd := s.Collector.Cmd.(*fetch.MockCommander)
+	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+		"", errors.New("tmux is gone"))
+	clock = clock.Add(slowPollLogInterval + time.Second)
+	s.poll(ctx)
+
+	if !strings.Contains(buf.String(), "poll failed") {
+		t.Fatalf("got log %q, want a failed poll: the fixture did not break Snapshot", buf.String())
+	}
+	if strings.Contains(buf.String(), "slow dirty pass") {
+		t.Errorf("got log %q, want no slow dirty pass line: a failing poll runs no pass, so the measurement is stale", buf.String())
 	}
 }
