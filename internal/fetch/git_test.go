@@ -103,6 +103,46 @@ func TestFetchDirtyCountsNeedsNoBranch(t *testing.T) {
 	}
 }
 
+// WarmDirtyCache exists only to let git write the index back, so the one
+// thing that matters is that it does NOT pass --no-optional-locks. Measured
+// 2026-09-10 in a two-hour-old portal worktree: with the flag, status took
+// 127s and stayed that way forever; one run without it took 154s and every
+// subsequent flagged run took 0.3s.
+func TestWarmDirtyCacheOmitsNoOptionalLocks(t *testing.T) {
+	mock := NewMockCommander()
+	mock.OnArgs("git status --porcelain", "", nil)
+
+	WarmDirtyCache(context.Background(), mock, "/repo")
+
+	n := mock.CallCountFunc(func(c MockCall) bool {
+		return c.Name == "git" && len(c.Args) == 2 && c.Args[0] == "status" && c.Args[1] == "--porcelain"
+	})
+	if n != 1 {
+		t.Fatalf("got %d plain status calls, want 1", n)
+	}
+	if got := mock.CallCountFunc(func(c MockCall) bool {
+		for _, a := range c.Args {
+			if a == "--no-optional-locks" {
+				return true
+			}
+		}
+		return false
+	}); got != 0 {
+		t.Errorf("got %d calls carrying --no-optional-locks, want 0: the flag is what stops git persisting the cache", got)
+	}
+}
+
+func TestWarmDirtyCacheRunsInTheGitRoot(t *testing.T) {
+	mock := NewMockCommander()
+	mock.OnArgs("git status --porcelain", "", nil)
+
+	WarmDirtyCache(context.Background(), mock, "/repo/alpha")
+
+	if got := mock.CallCountFunc(func(c MockCall) bool { return c.Dir == "/repo/alpha" }); got != 1 {
+		t.Errorf("got %d calls in /repo/alpha, want 1", got)
+	}
+}
+
 func TestDetectDefaultBranch(t *testing.T) {
 	// Clear cache for test isolation
 	defaultBranchCache.Delete("/repo")

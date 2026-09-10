@@ -505,3 +505,163 @@ func TestInvalidateForcesARefetchOfDirtyCounts(t *testing.T) {
 		t.Errorf("got %d status calls after Invalidate, want more than %d (the entry should have been made due)", got, first)
 	}
 }
+
+// countWarmCalls counts the *unflagged* `git status --porcelain`, the one
+// that lets git write the index back. Distinct from countStatusCalls, which
+// counts the --no-optional-locks form the steady state uses.
+func countWarmCalls(cmd *fetch.MockCommander) int {
+	return cmd.CallCountFunc(func(c fetch.MockCall) bool {
+		return c.Name == "git" && len(c.Args) == 2 && c.Args[0] == "status" && c.Args[1] == "--porcelain"
+	})
+}
+
+// A root vigil has never seen may have a cold untracked cache, and the
+// --no-optional-locks form can never warm it - that is the whole defect. One
+// unflagged run per root fixes it permanently.
+func TestAFirstPassWarmsARootBeforeFetchingIt(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.OnArgs("git --no-optional-locks status --porcelain", " M a.go", nil)
+
+	ctx := context.Background()
+	c := New(noQueueConfig(), cmd)
+	c.GitInterval = time.Hour
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	c.RefreshDirty(ctx)
+
+	if got := countWarmCalls(cmd); got != 1 {
+		t.Errorf("got %d warm calls on the first pass, want 1", got)
+	}
+	if got := countStatusCalls(cmd); got != 1 {
+		t.Errorf("got %d flagged status calls, want 1: warming must not replace the fetch", got)
+	}
+}
+
+// Once per root, not once per pass. Warming takes the index lock, which is
+// the contention --no-optional-locks exists to avoid, so it must not become
+// the steady state.
+func TestWarmingHappensOncePerRootNotOncePerPass(t *testing.T) {
+	cmd := singleBranchCommander()
+	cmd.OnArgs("git --no-optional-locks status --porcelain", " M a.go", nil)
+
+	ctx := context.Background()
+	c := New(noQueueConfig(), cmd)
+	c.GitInterval = time.Hour
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	// Invalidate rather than a zero interval: at GitInterval 0 the staleAfter
+	// floor makes freshness the fetch's own duration, which is microseconds
+	// here, so whether a pass refetches becomes a race. Zeroing fetchedAt is
+	// deterministic, and it leaves warmed untouched - which is the point, so
+	// the warm gate is the only thing that can hold.
+	for i := 0; i < 3; i++ {
+		c.Invalidate()
+		c.RefreshDirty(ctx)
+	}
+
+	if got := countStatusCalls(cmd); got != 3 {
+		t.Fatalf("got %d flagged status calls, want 3: the fixture must refetch every pass or this proves nothing", got)
+	}
+	if got := countWarmCalls(cmd); got != 1 {
+		t.Errorf("got %d warm calls across three passes, want 1", got)
+	}
+}
+
+// slowStatusCommander answers status --porcelain for one root after delay.
+// Real sleeps rather than a fake clock, as in stats_test.go: what is under
+// test is how a fetch's own wall time feeds back into when it next runs.
+func slowStatusCommander(delay time.Duration) *fetch.MockCommander {
+	cmd := singleBranchCommander()
+	cmd.HandlerFuncs["git --no-optional-locks status --porcelain"] = func(context.Context, string, []string) (string, error) {
+		time.Sleep(delay)
+		return " M a.go", nil
+	}
+	return cmd
+}
+
+// A fetch slower than git_interval used to be stale the instant it was
+// written: fetchedAt recorded when the pass started, so by write-back time it
+// was already older than the interval and the very next pass refetched. With
+// Snapshot nudging every tick that is a back-to-back loop with no gap, and it
+// bites hardest exactly when the machine is too loaded to afford it - measured
+// on 2026-09-10 at load average 293, where a status call at ~/pr-36411 spent
+// its whole 10s command timeout and was reissued every 10s indefinitely.
+func TestASlowRootIsNotRefetchedOnTheNextPass(t *testing.T) {
+	const delay = 200 * time.Millisecond
+	cmd := slowStatusCommander(delay)
+
+	ctx := context.Background()
+	c := New(noQueueConfig(), cmd)
+	c.GitInterval = 50 * time.Millisecond
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	c.RefreshDirty(ctx)
+	if got := countStatusCalls(cmd); got != 1 {
+		t.Fatalf("got %d status calls after the first pass, want 1", got)
+	}
+
+	c.RefreshDirty(ctx)
+	if got := countStatusCalls(cmd); got != 1 {
+		t.Errorf("got %d status calls, want 1: a root whose fetch took %s must not be due again immediately at a %s interval",
+			got, delay, c.GitInterval)
+	}
+}
+
+// Recording fetchedAt after the fetch is not on its own enough: it only buys
+// a slow root one git_interval of gap, so a 10s fetch at a 3s interval still
+// spends 10s of every 13s in git. staleAfter's floor is what bounds that to
+// half, and the window between the interval and the fetch's own duration is
+// the only place the floor is observable - the test above passes without it.
+func TestASlowRootsBackoffScalesWithItsOwnFetch(t *testing.T) {
+	const delay = 300 * time.Millisecond
+	cmd := slowStatusCommander(delay)
+
+	ctx := context.Background()
+	c := New(noQueueConfig(), cmd)
+	c.GitInterval = 30 * time.Millisecond
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	c.RefreshDirty(ctx)
+	if got := countStatusCalls(cmd); got != 1 {
+		t.Fatalf("got %d status calls after the first pass, want 1", got)
+	}
+
+	// Past git_interval, well short of what the fetch itself cost.
+	time.Sleep(100 * time.Millisecond)
+	c.RefreshDirty(ctx)
+	if got := countStatusCalls(cmd); got != 1 {
+		t.Errorf("got %d status calls, want 1: a root that took %s must stay fresh for %s, not for the %s interval",
+			got, delay, delay, c.GitInterval)
+	}
+}
+
+// The other half, and the reason the tests above cannot be satisfied by simply
+// never refetching: the backoff is a delay, not a latch.
+func TestASlowRootIsRefetchedOnceItsBackoffElapses(t *testing.T) {
+	const delay = 100 * time.Millisecond
+	cmd := slowStatusCommander(delay)
+
+	ctx := context.Background()
+	c := New(noQueueConfig(), cmd)
+	c.GitInterval = 20 * time.Millisecond
+	if _, err := c.Snapshot(ctx); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	c.RefreshDirty(ctx)
+	if got := countStatusCalls(cmd); got != 1 {
+		t.Fatalf("got %d status calls after the first pass, want 1", got)
+	}
+
+	time.Sleep(delay + 50*time.Millisecond)
+	c.RefreshDirty(ctx)
+	if got := countStatusCalls(cmd); got != 2 {
+		t.Errorf("got %d status calls, want 2: the backoff must expire, not latch", got)
+	}
+}
