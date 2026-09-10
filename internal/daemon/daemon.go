@@ -84,10 +84,12 @@ type Server struct {
 	effectsMu       sync.Mutex
 	inFlightEffects map[string]struct{}
 
-	// pollFailing and lastSlowPollLog are only read and written from poll,
-	// which Run only ever calls from its own goroutine, so they need no mutex.
-	pollFailing     bool
-	lastSlowPollLog time.Time
+	// pollFailing, lastSlowPollLog and lastSlowDirtyLog are only read and
+	// written from poll, which Run only ever calls from its own goroutine, so
+	// they need no mutex.
+	pollFailing      bool
+	lastSlowPollLog  time.Time
+	lastSlowDirtyLog time.Time
 
 	// clock is nil outside tests; see now.
 	clock func() time.Time
@@ -287,6 +289,7 @@ func (s *Server) poll(ctx context.Context) {
 		s.pollFailing = false
 		s.logf("poll recovered")
 	}
+	s.logSlowDirtyPass()
 	s.logDroppedSessions(sessions)
 	queue, queueHidden := s.Collector.Queue(sessions)
 	snap := &protocol.Snapshot{
@@ -440,6 +443,39 @@ func (s *Server) logSlowPoll(elapsed time.Duration) {
 		g.Slowest.Round(time.Millisecond), g.SlowestPath)
 }
 
+// logSlowDirtyPass records a dirtyPoller pass that took longer than the
+// interval its counts are meant to be fresh within.
+//
+// It exists because moving git off the poll loop makes logSlowPoll go quiet,
+// and that line was the only number anybody could ever read off the machine
+// where this happens. A slow pass is no longer a latency problem - publication
+// does not wait for it - but it is a staleness one, and it is the same
+// measurement the 2026-09-09 re-promotion rested on.
+//
+// Rate-limited on the same window as logSlowPoll and for the same reason: a
+// diagnosis wants a series, not one line and then hours of silence.
+//
+// Callers must invoke this only after poll's err != nil return, the same rule
+// logDroppedSessions carries and for a related reason: a failing Snapshot never
+// reaches its nudge, so no new pass runs and DirtyStats stays frozen at the last
+// one. Above the return, an outage would re-emit that same stale measurement
+// every minute, asserting a slow pass while nothing is polling at all.
+// logSlowPoll is different and stays above: it times the failed Snapshot itself,
+// so its number is fresh on the error path.
+func (s *Server) logSlowDirtyPass() {
+	d := s.Collector.DirtyStats()
+	if d.Total <= s.Collector.GitInterval {
+		return
+	}
+	now := s.now()
+	if !s.lastSlowDirtyLog.IsZero() && now.Sub(s.lastSlowDirtyLog) < slowPollLogInterval {
+		return
+	}
+	s.lastSlowDirtyLog = now
+	s.logf("slow dirty pass: %s total, slowest %s at %s",
+		d.Total.Round(time.Millisecond), d.Slowest.Round(time.Millisecond), d.SlowestRoot)
+}
+
 // logDroppedSessions records each session that was in the previous poll and is
 // not in this one. Daemon-only and not user-visible, for the same reason as
 // logSlowPoll: a session going away is not a failure, and a self-polling client
@@ -476,7 +512,8 @@ func (s *Server) logDroppedSessions(sessions []*session.Session) {
 	s.prevSessions = current
 }
 
-// now is the clock logSlowPoll's rate limit reads. Nil outside tests.
+// now is the clock the logSlowPoll and logSlowDirtyPass rate limits read. Nil
+// outside tests.
 func (s *Server) now() time.Time {
 	if s.clock != nil {
 		return s.clock()

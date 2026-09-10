@@ -78,8 +78,9 @@ func TestQueuePollerFetchesAgainAfterInterval(t *testing.T) {
 
 // TestQueuePollerInvalidateMakesItDueImmediately goes through Collector.Invalidate
 // rather than the poller's own method, because the wiring is the thing under
-// test: remote.invalidate iterates r.pollers, so a poller left out of newRemote
-// would still pass a test that called p.invalidate() directly.
+// test: scheduler.invalidate iterates s.pollers, so a poller left out of the
+// remote scheduler's construction in New would still pass a test that called
+// p.invalidate() directly.
 func TestQueuePollerInvalidateMakesItDueImmediately(t *testing.T) {
 	cmd := queueCommander()
 	c := New(&config.Config{}, cmd)

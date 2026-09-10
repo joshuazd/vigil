@@ -747,8 +747,12 @@ func (plainCommander) Run(context.Context, string, string, ...string) (string, e
 func TestADaemonThatCannotStreamRefusesRatherThanDropping(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv := New(testJobsConfig(), plainCommander{})
-	// logf reads s.Log at call time, so this still silences the refusal that
-	// New's own logger would otherwise write to the suite's stderr.
+	// This reassignment does not silence the refusal line: New binds
+	// logger.Printf into newJobs (daemon.go:146) before srv.Log is set here,
+	// so the job table's logger keeps writing to the original os.Stderr
+	// logger regardless of what srv.Log is reassigned to. The refusal line
+	// below reaches the suite's stderr on every run - a real, pre-existing
+	// defect out of scope for this test.
 	srv.Log = log.New(io.Discard, "", 0)
 	if srv.jobs == nil {
 		t.Fatal("no job table, so a submission has nowhere to be refused")

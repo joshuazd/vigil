@@ -14,8 +14,19 @@ var (
 	defaultBranchCache sync.Map // map[string]string
 )
 
-// FetchGitStatus computes git status for the repo at panePath.
-func FetchGitStatus(ctx context.Context, cmd Commander, panePath string) session.GitStatus {
+// FetchGitMeta resolves everything about panePath's repository except the
+// dirty counts: the root, the branch, how many commits are unpushed, and how
+// stale the branch's merge base is.
+//
+// These stay on the publication path because they are cheap and because
+// Snapshot's later stages need them: groupByBranchRoot feeds prPoller's
+// working set from Branch and GitRoot, dirtyPoller keys its working set on
+// GitRoot, and transition.Detect reads both off the event. Timed across five
+// real polls on 2026-08-03 against a log of every subprocess over 30ms, none of
+// the calls that appeared crossed it - evidence about the calls that ran, not
+// about all of them, since DetectDefaultBranch memoizes per root and its
+// symbolic-ref may not have run at all.
+func FetchGitMeta(ctx context.Context, cmd Commander, panePath string) session.GitStatus {
 	gitRoot := gitRoot(ctx, cmd, panePath)
 	if gitRoot == "" {
 		return session.GitStatus{}
@@ -26,18 +37,11 @@ func FetchGitStatus(ctx context.Context, cmd Commander, panePath string) session
 		return session.GitStatus{GitRoot: gitRoot}
 	}
 
-	modified, added, deleted := parsePorcelain(ctx, cmd, gitRoot)
-	unpushed := unpushedCount(ctx, cmd, gitRoot, branch)
-	rebaseAge := rebaseAge(ctx, cmd, gitRoot, branch)
-
 	return session.GitStatus{
 		Branch:        branch,
 		GitRoot:       gitRoot,
-		Modified:      modified,
-		Added:         added,
-		Deleted:       deleted,
-		Unpushed:      unpushed,
-		RebaseAgeSecs: rebaseAge,
+		Unpushed:      unpushedCount(ctx, cmd, gitRoot, branch),
+		RebaseAgeSecs: rebaseAge(ctx, cmd, gitRoot, branch),
 	}
 }
 
@@ -57,7 +61,20 @@ func currentBranch(ctx context.Context, cmd Commander, gitRoot string) string {
 	return strings.TrimSpace(out)
 }
 
-func parsePorcelain(ctx context.Context, cmd Commander, gitRoot string) (modified, added, deleted int) {
+// FetchDirtyCounts counts modified, added and deleted paths in gitRoot. It is
+// effectively the whole cost of collecting git state: 0.7-1.6s per worktree on
+// 2026-07-31, 1348ms cold at ~/sc-231121 on 2026-09-09, against under 30ms for
+// every call FetchGitMeta makes. How slow it is is a property of the
+// worktree's index rather than of vigil - core.untrackedCache and
+// core.fsmonitor put it under 40ms warm - which is why it is a poller's job
+// and not Snapshot's.
+//
+// It takes a git root rather than a pane path because that is where the
+// command runs, and because two sessions in one worktree then share an answer.
+//
+// A failed call returns zeros, indistinguishable from a clean tree. That is
+// what it has always done and nothing gates on the difference.
+func FetchDirtyCounts(ctx context.Context, cmd Commander, gitRoot string) (modified, added, deleted int) {
 	out, err := cmd.Run(ctx, gitRoot, "git", "--no-optional-locks", "status", "--porcelain")
 	if err != nil {
 		return
