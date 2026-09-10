@@ -132,7 +132,16 @@ func slowDirtyServer(t *testing.T, delay time.Duration, buf *bytes.Buffer) (*Ser
 		Interval:  time.Hour, // so the poll itself is never slow and only the dirty line can appear
 		Log:       log.New(buf, "", 0),
 	}
-	return s, func() { c.RefreshDirty(context.Background()) }
+	// Invalidate before each pass. dirtyEntry.staleAfter floors a root's
+	// freshness at its own last fetch duration, so after one 60ms pass this
+	// root is not due again for 60ms of real time - and these tests advance
+	// only the Server's fake clock, never the collector's. Without this a
+	// second runPass finds nothing due, reports zero stats, and the rate-limit
+	// tests fail for a reason that has nothing to do with the rate limit.
+	return s, func() {
+		c.Invalidate()
+		c.RefreshDirty(context.Background())
+	}
 }
 
 func TestPollLogsASlowDirtyPass(t *testing.T) {

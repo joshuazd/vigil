@@ -110,6 +110,30 @@ func FetchDirtyCounts(ctx context.Context, cmd Commander, gitRoot string) (modif
 	return
 }
 
+// WarmDirtyCache runs one `git status --porcelain` **without**
+// --no-optional-locks, so git may take the index lock and write back what it
+// learned. Its output is discarded; the point is the write, not the answer.
+//
+// It exists because --no-optional-locks is self-defeating on a cold worktree.
+// The flag is there so polling never contends with the user's own git, but it
+// also stops git persisting the untracked cache and the fsmonitor token - so a
+// freshly dispatched worktree recomputes both on every single poll and never
+// gets faster. Measured 2026-09-10 in a two-hour-old portal worktree (29,817
+// tracked files): 127s flagged and stuck there, 154s once unflagged, then
+// 0.28-0.32s flagged from then on. A sibling worktree nine days old, warmed
+// long ago by ordinary use, was 0.23s throughout.
+//
+// So this is not a cache vigil owns. It is git's, in the worktree's own index,
+// and vigil is only the process that happens to notice it is cold. One call
+// per root is enough; the caller decides when.
+//
+// The caller must supply a context with a deadline of its own. The default
+// 10s in ExecCommander.Run would kill this well before it finished, which is
+// exactly what produced the daemon's endless `slow dirty pass: 10.0s` lines.
+func WarmDirtyCache(ctx context.Context, cmd Commander, gitRoot string) {
+	_, _ = cmd.Run(ctx, gitRoot, "git", "status", "--porcelain")
+}
+
 // DetectDefaultBranch finds the default branch via remote HEAD or fallback.
 func DetectDefaultBranch(ctx context.Context, cmd Commander, gitRoot string) string {
 	if cached, ok := defaultBranchCache.Load(gitRoot); ok {

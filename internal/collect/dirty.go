@@ -36,11 +36,20 @@ type dirtyPoller struct {
 	// the fetch; mu is not.
 	passMu sync.Mutex
 
-	// mu guards entries, working and gen, and is held only for the map work at
-	// either end of a pass.
+	// mu guards entries, working, warmed and gen, and is held only for the map
+	// work at either end of a pass.
 	mu      sync.Mutex
 	entries map[string]dirtyEntry
 	working []string
+
+	// warmed records which roots have had their one unflagged status. Marked
+	// on attempt rather than on success: a warm that lost the index lock to
+	// the user's own git leaves the root exactly as it was, which is today's
+	// behaviour, whereas retrying a multi-minute call every pass would be far
+	// worse than the problem. Pruned with entries, so a root that leaves and
+	// returns is warmed again - cheap, since by then it is warm and the call
+	// costs a fraction of a second.
+	warmed map[string]bool
 
 	// gen counts invalidations. A pass reads it alongside the working set and
 	// compares again at write-back: if it moved, an invalidate landed while the
@@ -58,16 +67,48 @@ type dirtyCounts struct{ modified, added, deleted int }
 type dirtyEntry struct {
 	counts    dirtyCounts
 	fetchedAt time.Time
+	took      time.Duration
+}
+
+// staleAfter is how long this root stays fresh: git_interval normally, but
+// never less than its own last fetch took.
+//
+// The floor is what stops a slow root pinning a worker. git_interval is a
+// statement about how fresh the counts should be, and honouring it for a root
+// that needs longer than the interval to answer means running status
+// back-to-back forever - which is worst exactly when the machine is too loaded
+// to afford it. Measured on 2026-09-10 at load average 293: status at
+// ~/pr-36411 spent its whole 10s command timeout and was reissued immediately,
+// indefinitely. With the floor that root costs at most half a worker.
+//
+// prPoller has no equivalent and needs none: at a 30s interval against
+// sub-second gh calls the floor would never bind.
+func (e dirtyEntry) staleAfter(interval time.Duration) time.Duration {
+	if e.took > interval {
+		return e.took
+	}
+	return interval
 }
 
 type dueRoot struct {
 	root   string
 	counts dirtyCounts
 	took   time.Duration
+
+	// warm asks for one unflagged status before the fetch, to let git persist
+	// the untracked cache. Set for a root this poller has not warmed yet.
+	warm bool
 }
 
+// warmTimeout bounds the one unflagged status per root. It is minutes rather
+// than the commander's default 10s because the call it wraps is slow by
+// definition - it is only issued for a root whose cache is cold, and a cold
+// portal worktree measured 154s on 2026-09-10. The 10s default is what killed
+// this work every time before it could finish.
+const warmTimeout = 3 * time.Minute
+
 func newDirtyPoller(c *Collector) *dirtyPoller {
-	return &dirtyPoller{c: c, entries: make(map[string]dirtyEntry)}
+	return &dirtyPoller{c: c, entries: make(map[string]dirtyEntry), warmed: make(map[string]bool)}
 }
 
 // track posts the working set: the deduped git roots the most recent Snapshot
@@ -141,10 +182,10 @@ func (p *dirtyPoller) pass(ctx context.Context) {
 	startGen := p.gen
 	var due []*dueRoot
 	for _, root := range p.working {
-		if prev, ok := p.entries[root]; ok && now.Sub(prev.fetchedAt) < interval {
+		if prev, ok := p.entries[root]; ok && now.Sub(prev.fetchedAt) < prev.staleAfter(interval) {
 			continue
 		}
-		due = append(due, &dueRoot{root: root})
+		due = append(due, &dueRoot{root: root, warm: !p.warmed[root]})
 	}
 	p.mu.Unlock()
 
@@ -159,6 +200,14 @@ func (p *dirtyPoller) pass(ctx context.Context) {
 		// 0.067s) in the design doc.
 		start := time.Now()
 		runParallel(due, p.c.GitWorkers, func(d *dueRoot) {
+			if d.warm {
+				// Its own deadline: the commander's default 10s is shorter
+				// than a cold worktree's status and would kill exactly the
+				// call that makes every later one fast.
+				warmCtx, cancel := context.WithTimeout(ctx, warmTimeout)
+				fetch.WarmDirtyCache(warmCtx, p.c.Cmd, d.root)
+				cancel()
+			}
 			fetchStart := time.Now()
 			d.counts.modified, d.counts.added, d.counts.deleted = fetch.FetchDirtyCounts(ctx, p.c.Cmd, d.root)
 			d.took = time.Since(fetchStart)
@@ -170,6 +219,12 @@ func (p *dirtyPoller) pass(ctx context.Context) {
 			}
 		}
 	}
+
+	// Read after the fetch, not reused from the due scan's now. A fetch slower
+	// than git_interval would otherwise be stale the moment it was written and
+	// the next pass would reissue it with no gap at all, which is the loop
+	// staleAfter's floor exists to bound.
+	fetchedAt := p.c.now()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -190,17 +245,29 @@ func (p *dirtyPoller) pass(ctx context.Context) {
 			next[root] = e
 		}
 	}
+	nextWarmed := make(map[string]bool, len(p.working))
+	for root := range p.warmed {
+		if _, ok := live[root]; ok {
+			nextWarmed[root] = true
+		}
+	}
+	for _, d := range due {
+		if _, ok := live[d.root]; ok && d.warm {
+			nextWarmed[d.root] = true
+		}
+	}
+	p.warmed = nextWarmed
 
 	invalidated := p.gen != startGen
 	for _, d := range due {
 		if _, ok := live[d.root]; !ok {
 			continue
 		}
-		fetchedAt := now
+		at := fetchedAt
 		if invalidated {
-			fetchedAt = time.Time{}
+			at = time.Time{}
 		}
-		next[d.root] = dirtyEntry{counts: d.counts, fetchedAt: fetchedAt}
+		next[d.root] = dirtyEntry{counts: d.counts, fetchedAt: at, took: d.took}
 	}
 	p.entries = next
 }
