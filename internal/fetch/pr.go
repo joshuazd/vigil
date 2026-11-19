@@ -24,6 +24,7 @@ const reviewThreadsQuery = `
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
+      isInMergeQueue
       reviewThreads(first: 100) {
         nodes { isResolved isOutdated }
       }
@@ -87,8 +88,9 @@ func FetchPRStatus(ctx context.Context, cmd Commander, branch, gitRoot string) *
 	reviewersRequested := len(jsonArray(data, "reviewRequests"))
 
 	var unresolved int
+	var inMergeQueue bool
 	if state == "OPEN" {
-		unresolved = fetchReviewThreads(ctx, cmd, gitRoot, number)
+		unresolved, inMergeQueue = fetchPollingFields(ctx, cmd, gitRoot, number)
 	}
 
 	return &session.PRStatus{
@@ -101,6 +103,7 @@ func FetchPRStatus(ctx context.Context, cmd Commander, branch, gitRoot string) *
 		Approvals:          approvals,
 		UnresolvedComments: unresolved,
 		HasConflicts:       hasConflicts,
+		InMergeQueue:       inMergeQueue,
 		ReviewersRequested: reviewersRequested,
 		Title:              title,
 		Body:               body,
@@ -144,13 +147,14 @@ func parseChecks(rollup []any) string {
 	return "pass"
 }
 
-// fetchReviewThreads returns the number of threads that are neither resolved
-// nor outdated. That count drives session.State() == Unresolved, so it is
-// polled for every open PR.
-func fetchReviewThreads(ctx context.Context, cmd Commander, gitRoot string, prNumber int) int {
-	nodes := reviewThreadNodes(ctx, cmd, gitRoot, prNumber, reviewThreadsQuery)
+// fetchPollingFields returns the number of threads that are neither resolved
+// nor outdated, and merge queue membership, which gh pr view cannot report.
+// The count drives session.State() == Unresolved, so it is polled for every
+// open PR.
+func fetchPollingFields(ctx context.Context, cmd Commander, gitRoot string, prNumber int) (int, bool) {
+	pr := pullRequestNode(ctx, cmd, gitRoot, prNumber, reviewThreadsQuery)
 	unresolved := 0
-	for _, t := range nodes {
+	for _, t := range threadNodes(pr) {
 		tm, ok := t.(map[string]any)
 		if !ok {
 			continue
@@ -159,7 +163,7 @@ func fetchReviewThreads(ctx context.Context, cmd Commander, gitRoot string, prNu
 			unresolved++
 		}
 	}
-	return unresolved
+	return unresolved, jsonBool(pr, "isInMergeQueue")
 }
 
 // FetchReviewComments fetches the review comment bodies for one PR. Called for
@@ -167,7 +171,7 @@ func fetchReviewThreads(ctx context.Context, cmd Commander, gitRoot string, prNu
 // poll.
 func FetchReviewComments(ctx context.Context, cmd Commander, gitRoot string, prNumber int) []session.ReviewComment {
 	var comments []session.ReviewComment
-	for _, t := range reviewThreadNodes(ctx, cmd, gitRoot, prNumber, reviewCommentsQuery) {
+	for _, t := range threadNodes(pullRequestNode(ctx, cmd, gitRoot, prNumber, reviewCommentsQuery)) {
 		tm, ok := t.(map[string]any)
 		if !ok {
 			continue
@@ -198,7 +202,7 @@ func FetchReviewComments(ctx context.Context, cmd Commander, gitRoot string, prN
 	return comments
 }
 
-func reviewThreadNodes(ctx context.Context, cmd Commander, gitRoot string, prNumber int, query string) []any {
+func pullRequestNode(ctx context.Context, cmd Commander, gitRoot string, prNumber int, query string) map[string]any {
 	nwo := getNWO(ctx, cmd, gitRoot)
 	if nwo == [2]string{} {
 		return nil
@@ -215,7 +219,12 @@ func reviewThreadNodes(ctx context.Context, cmd Commander, gitRoot string, prNum
 	if err := json.Unmarshal([]byte(out), &data); err != nil {
 		return nil
 	}
-	nodes, _ := jsonPath(data, "data", "repository", "pullRequest", "reviewThreads", "nodes").([]any)
+	pr, _ := jsonPath(data, "data", "repository", "pullRequest").(map[string]any)
+	return pr
+}
+
+func threadNodes(pr map[string]any) []any {
+	nodes, _ := jsonPath(pr, "reviewThreads", "nodes").([]any)
 	return nodes
 }
 

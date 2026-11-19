@@ -273,3 +273,29 @@ func TestFetchPRStatusStillRetriesATransientFailure(t *testing.T) {
 		t.Fatalf("gh invoked %d times, want 3: a transient failure must still be retried", n)
 	}
 }
+
+// TestFetchPRStatusReadsMergeQueueMembership: gh pr view has no merge queue
+// field, so it rides on the polling GraphQL query rather than costing a call.
+func TestFetchPRStatusReadsMergeQueueMembership(t *testing.T) {
+	for _, inQueue := range []bool{true, false} {
+		cmd := NewMockCommander()
+		cmd.OnArgs("gh pr view feature/x --json number,state,isDraft,url,title,body,statusCheckRollup,reviewDecision,latestReviews,mergeable,reviewRequests",
+			`{"number":42,"state":"OPEN","url":"u","title":"t"}`, nil)
+		cmd.On("git", "git@github.com:owner/repo.git", nil)
+		resp := `{"data":{"repository":{"pullRequest":{"isInMergeQueue":` + strconv.FormatBool(inQueue) + `,"reviewThreads":{"nodes":[]}}}}}`
+		cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
+			"gh api": func(_ context.Context, _ string, _ []string) (string, error) { return resp, nil },
+		}
+
+		pr := FetchPRStatus(context.Background(), cmd, "feature/x", "/repo")
+		if pr == nil {
+			t.Fatal("got nil PRStatus")
+		}
+		if pr.InMergeQueue != inQueue {
+			t.Errorf("got InMergeQueue %v, want %v", pr.InMergeQueue, inQueue)
+		}
+	}
+	if !strings.Contains(reviewThreadsQuery, "isInMergeQueue") {
+		t.Error("the polling query does not ask for isInMergeQueue")
+	}
+}

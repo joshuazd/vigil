@@ -180,6 +180,10 @@ func ColorizePR(pr *session.PRStatus) string {
 }
 
 func ColorizePRWithBg(pr *session.PRStatus, bg *lipgloss.Color) string {
+	if pr.InMergeQueue {
+		return styledFg(Yellow, bg).Render(fmt.Sprintf("#%d", pr.Number))
+	}
+
 	var b strings.Builder
 
 	sp := " "

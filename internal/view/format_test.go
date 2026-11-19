@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
+
 	"github.com/jzinkduda/vigil/internal/session"
 )
 
@@ -84,5 +87,24 @@ func TestTheStateColumnAndDetailHeaderShowTheQuestionMark(t *testing.T) {
 	}
 	if got := stripANSIForTest(RenderDetail(s, DetailPane, "", nil, 86400, 80, 10)); !strings.Contains(got, "? attention") {
 		t.Errorf("detail header missing \"? attention\":\n%s", got)
+	}
+}
+
+func TestAQueuedPRRendersOnlyItsNumberInYellow(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.ANSI)
+	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
+
+	pr := &session.PRStatus{
+		Number: 42, State: "OPEN", Checks: "pending", ReviewDecision: "APPROVED",
+		UnresolvedComments: 2, HasConflicts: true, InMergeQueue: true,
+	}
+	got := ColorizePR(pr)
+	if want := lipgloss.NewStyle().Foreground(Yellow).Render("#42"); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	pr.InMergeQueue = false
+	if stripANSIForTest(ColorizePR(pr)) == "#42" {
+		t.Error("the fixture renders only its number outside the queue too, so the assertion above proves nothing")
 	}
 }

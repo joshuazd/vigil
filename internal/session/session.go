@@ -76,6 +76,7 @@ type PRStatus struct {
 	Approvals          int             `json:"approvals"`
 	UnresolvedComments int             `json:"unresolved_comments"`
 	HasConflicts       bool            `json:"has_conflicts"`
+	InMergeQueue       bool            `json:"in_merge_queue"`
 	ReviewersRequested int             `json:"reviewers_requested"`
 	Title              string          `json:"title"`
 	Body               string          `json:"body"`
