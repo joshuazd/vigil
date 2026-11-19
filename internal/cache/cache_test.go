@@ -30,6 +30,21 @@ func TestRoundTripBasic(t *testing.T) {
 	}
 }
 
+// A cold-started client renders the cache before the first snapshot, so a
+// dropped agent state would flash a waiting session as idle.
+func TestRoundTripWithAgent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cache.json")
+	s := makeSession("test")
+	s.Agent = session.AgentDone
+	if err := Save(p, []*session.Session{s}); err != nil {
+		t.Fatal(err)
+	}
+	loaded := Load(p, 30*time.Second)
+	if loaded[0].Agent != session.AgentDone {
+		t.Errorf("got agent %q, want done", loaded[0].Agent)
+	}
+}
+
 func TestRoundTripWithPR(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cache.json")

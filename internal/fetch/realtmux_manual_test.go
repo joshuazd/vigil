@@ -40,7 +40,7 @@ func TestListSessionsAgainstRealTmux(t *testing.T) {
 
 	for _, s := range sessions {
 		marked := panelPaths[s.Name][s.PanePath]
-		t.Logf("%-44s -> %s", s.Name, s.PanePath)
+		t.Logf("%-44s -> %s agent=%q", s.Name, s.PanePath, s.Agent)
 		if marked {
 			t.Errorf("session %q resolved to its vigil panel pane (%s); a panel is never the session's work",
 				s.Name, s.PanePath)

@@ -47,6 +47,26 @@ vigil poke
 
 Vigil discovers all tmux sessions, reads git status from each session's working directory, and fetches PR state via `gh`. Sessions are color-coded by state: idle, pending review, CI failing, mergeable, etc.
 
+### Agent status
+
+A coding agent reports its status by setting the `@vigil_agent` option on its own tmux pane:
+
+```bash
+tmux set-option -p -t "$TMUX_PANE" @vigil_agent needs_input   # or working | done | idle
+tmux set-option -pu -t "$TMUX_PANE" @vigil_agent              # no agent
+```
+
+| Value | Shown as |
+|-------|----------|
+| `needs_input` | `attention` with a `?`, above everything |
+| `done` | `waiting` with a `✓`, below `blocked`/`unresolved`, above PR states; a merged PR still shows `done` |
+| `working` | a braille spinner in the indicator column; state comes from the PR. It animates only while some session is working |
+| `idle` | nothing; state comes from the PR |
+
+A session with several agent panes shows the most urgent one. Any other value is ignored. Once a session has an agent status, its terminal bell is ignored - the agent has already said more precisely what the bell would - and the bell still drives `attention` for sessions without one.
+
+For Claude Code, `~/dotfiles` publishes it from hooks (`claude/.claude/hooks/vigil-agent-state.sh`): `SessionStart` idle, `UserPromptSubmit` and `PostToolUse` working, `PermissionRequest`, `PreToolUse` on `AskUserQuestion|ExitPlanMode`, `Notification` `elicitation_dialog` and `StopFailure` needs_input, `Stop` done, `SessionEnd` unset. Claude Code has no hook for an Esc interrupt, so an interrupted turn shows `working` until the next prompt.
+
 If `vigil daemon` is running, `vigil` consumes its broadcast snapshots instead of polling on its own. If the daemon isn't running, is unreachable, or doesn't send a snapshot within a few seconds of connecting, `vigil` falls back to polling tmux/git/PR state itself - both modes render identically.
 
 ### A permanent panel outside tmux

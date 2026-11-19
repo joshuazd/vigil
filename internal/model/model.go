@@ -137,6 +137,11 @@ type Model struct {
 	// daemon that is connected but silent is invisible without it.
 	lastSnapshot time.Time
 
+	// spinning is true while a SpinnerTickMsg is outstanding, which is what
+	// keeps ensureSpinner from starting a second chain.
+	spinning  bool
+	spinFrame int
+
 	// daemonBin is the last stamp a daemon published for its own image.
 	daemonBin selfbin.Stamp
 
@@ -436,6 +441,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DaemonProbeResultMsg:
 		return m.handleProbeResult(msg)
 
+	case SpinnerTickMsg:
+		if !m.anyWorking() {
+			m.spinning = false
+			return m, nil
+		}
+		m.spinFrame++
+		return m, spinnerTickCmd()
+
 	case RenderTickMsg:
 		// Render-only heartbeat for the daemon path: Bubble Tea always
 		// calls View() after Update, so this does nothing but keep the
@@ -551,7 +564,7 @@ func (m Model) View() string {
 		queueBadge = len(m.queue)
 	}
 	statusBar := view.RenderStatusBar(m.sessions, m.filterState, m.sortMode, m.width, m.daemonHealth(), queueBadge)
-	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight, notif)
+	table := view.RenderTable(visible, m.cursor, m.selected, staleThreshold, m.width, tableHeight, notif, m.spinFrame)
 
 	// Detail panel
 	var detail string
@@ -625,6 +638,7 @@ func (m Model) panelView() string {
 		m.width,
 		rows,
 		m.activeNotification(),
+		m.spinFrame,
 	)
 	if jobLine == "" {
 		return lipgloss.JoinVertical(lipgloss.Left, statusBar, table)
@@ -1048,7 +1062,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 		}
 		m.daemonBin = msg.DaemonBin
 		m.checkStateTransitions()
-		var cmds []tea.Cmd
+		cmds := []tea.Cmd{m.ensureSpinner()}
 		if m.detailOpen {
 			cmds = append(cmds, m.refreshDetailCmd())
 		}
@@ -1080,7 +1094,7 @@ func (m Model) handleSnapshot(msg SnapshotMsg) (tea.Model, tea.Cmd) {
 	m.daemonBin = msg.DaemonBin
 
 	m.checkStateTransitions()
-	var cmds []tea.Cmd
+	cmds := []tea.Cmd{m.ensureSpinner()}
 	if m.detailOpen {
 		cmds = append(cmds, m.refreshDetailCmd())
 	}
@@ -1300,6 +1314,34 @@ func renderTickCmd(interval time.Duration, epoch int) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return RenderTickMsg{Time: t, Epoch: epoch}
 	})
+}
+
+const spinnerInterval = 100 * time.Millisecond
+
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg {
+		return SpinnerTickMsg{}
+	})
+}
+
+func (m *Model) anyWorking() bool {
+	for _, s := range m.sessions {
+		if s.Agent == session.AgentWorking {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureSpinner starts the spinner chain if a session is working and no chain
+// is running. The tick handler ends the chain once nothing is working, so an
+// idle board repaints no faster than it did before.
+func (m *Model) ensureSpinner() tea.Cmd {
+	if m.spinning || !m.anyWorking() {
+		return nil
+	}
+	m.spinning = true
+	return spinnerTickCmd()
 }
 
 // delayedPRRefreshCmd triggers a follow-up forced poll a few seconds after an
@@ -1604,7 +1646,8 @@ func (m *Model) maybeAutoFocus() {
 	visible := m.visibleSessions()
 	autoFocusStates := map[session.SessionState]bool{
 		session.Attention: true, session.Blocked: true,
-		session.Unresolved: true, session.Mergeable: true,
+		session.Unresolved: true, session.Waiting: true,
+		session.Mergeable: true,
 	}
 	for i, s := range visible {
 		if autoFocusStates[s.State()] {
@@ -1618,7 +1661,7 @@ func notifSeverity(state session.SessionState) string {
 	switch state {
 	case session.Blocked, session.Unresolved:
 		return "error"
-	case session.Mergeable, session.Done:
+	case session.Waiting, session.Mergeable, session.Done:
 		return "info"
 	default:
 		return "warning"

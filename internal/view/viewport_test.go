@@ -76,7 +76,7 @@ func TestTableWindowNeverScrollsPastTheLastScreen(t *testing.T) {
 // height bound is ever reached.
 func TestTableDrawsTheCursorRowWhenItIsPastTheVisibleHeight(t *testing.T) {
 	sessions := scrollFixture(10)
-	out := RenderTable(sessions, 7, nil, 0, 120, 3, "")
+	out := RenderTable(sessions, 7, nil, 0, 120, 3, "", 0)
 
 	if !strings.Contains(out, "sess-h") {
 		t.Errorf("cursor row sess-h (index 7) was not drawn:\n%s", out)
@@ -96,7 +96,7 @@ func TestTableDrawsTheCursorRowWhenItIsPastTheVisibleHeight(t *testing.T) {
 // scrolled row must keep its own index rather than its position in the window.
 func TestTableKeepsAbsoluteIndexesAfterScrolling(t *testing.T) {
 	sessions := scrollFixture(10)
-	out := RenderTable(sessions, 5, nil, 0, 120, 3, "")
+	out := RenderTable(sessions, 5, nil, 0, 120, 3, "", 0)
 
 	var cursorLine string
 	for _, l := range strings.Split(out, "\n") {
@@ -123,7 +123,7 @@ func TestTableKeepsAbsoluteIndexesAfterScrolling(t *testing.T) {
 // passes with no viewport at all.
 func TestTableStillFillsItsHeightWhenScrolled(t *testing.T) {
 	sessions := scrollFixture(10)
-	out := RenderTable(sessions, 9, nil, 0, 120, 4, "")
+	out := RenderTable(sessions, 9, nil, 0, 120, 4, "", 0)
 
 	if n := len(strings.Split(out, "\n")); n != 4 {
 		t.Errorf("got %d lines, want exactly the 4 allocated:\n%s", n, out)

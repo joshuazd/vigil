@@ -21,9 +21,9 @@ import (
 func slowPollServer(t *testing.T, delay time.Duration, buf *bytes.Buffer) *Server {
 	t.Helper()
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|fast|/tmp/fast\n1700000001|$2|slow|/tmp/slow", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "", nil)
 	cmd.HandlerFuncs = make(map[string]func(ctx context.Context, dir string, args []string) (string, error))
 	cmd.HandlerFuncs["git rev-parse --show-toplevel"] = func(ctx context.Context, dir string, args []string) (string, error) {
 		if dir == "/tmp/slow" {
@@ -108,9 +108,9 @@ func TestASlowPollLogsAgainOnceTheRateLimitWindowHasPassed(t *testing.T) {
 func slowDirtyServer(t *testing.T, delay time.Duration, buf *bytes.Buffer) (*Server, func()) {
 	t.Helper()
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|slow|/tmp/slow", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
 		"git rev-parse --show-toplevel": func(_ context.Context, dir string, _ []string) (string, error) {
 			return dir, nil
@@ -221,7 +221,7 @@ func TestAFailingPollLogsNoSlowDirtyPass(t *testing.T) {
 	runPass()   // and now DirtyStats holds a slow measurement
 
 	cmd := s.Collector.Cmd.(*fetch.MockCommander)
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"", errors.New("tmux is gone"))
 	clock = clock.Add(slowPollLogInterval + time.Second)
 	s.poll(ctx)

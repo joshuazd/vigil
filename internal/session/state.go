@@ -4,9 +4,10 @@ package session
 type SessionState int
 
 const (
-	Attention  SessionState = iota // Bell active
+	Attention  SessionState = iota // Agent needs input, or bell with no agent
 	Blocked                        // CI fail or changes requested
 	Unresolved                     // Unresolved review comments
+	Waiting                        // Agent finished its turn
 	Mergeable                      // Approved + CI passing
 	Approved                       // Approved + CI pending
 	Pending                        // CI running, no review yet
@@ -19,6 +20,7 @@ var stateNames = [...]string{
 	Attention:  "attention",
 	Blocked:    "blocked",
 	Unresolved: "unresolved",
+	Waiting:    "waiting",
 	Mergeable:  "mergeable",
 	Approved:   "approved",
 	Pending:    "pending",
@@ -37,7 +39,7 @@ func (s SessionState) String() string {
 // AllStates returns all SessionState values in priority order.
 func AllStates() []SessionState {
 	return []SessionState{
-		Attention, Blocked, Unresolved, Mergeable,
+		Attention, Blocked, Unresolved, Waiting, Mergeable,
 		Approved, Pending, Review, Done, Idle,
 	}
 }
@@ -52,6 +54,7 @@ var StateStyles = map[SessionState]StateStyle{
 	Attention:  {"bright_yellow", "●"},
 	Blocked:    {"bright_red", "●"},
 	Unresolved: {"bright_red", "○"},
+	Waiting:    {"bright_magenta", "✓"},
 	Mergeable:  {"bright_green", "●"},
 	Approved:   {"bright_green", "○"},
 	Pending:    {"bright_yellow", "○"},

@@ -18,6 +18,9 @@ type RenderTickMsg struct {
 	Epoch int
 }
 
+// SpinnerTickMsg advances the working-agent spinner one frame.
+type SpinnerTickMsg struct{}
+
 // CollectTickMsg paces the self-polling loop. Its handler is the only thing
 // that consumes one and the only thing that schedules the next, so exactly one
 // is outstanding per self-polling generation: a heartbeat, independent of

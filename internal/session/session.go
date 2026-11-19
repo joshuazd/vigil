@@ -133,9 +133,10 @@ type Session struct {
 
 	IsCurrent bool      `json:"-"`
 	IsLast    bool      `json:"-"`
-	HasBell   bool      `json:"has_bell"`
-	Git       GitStatus `json:"git"`
-	PR        *PRStatus `json:"pr,omitempty"`
+	HasBell   bool       `json:"has_bell"`
+	Agent     AgentState `json:"agent,omitempty"`
+	Git       GitStatus  `json:"git"`
+	PR        *PRStatus  `json:"pr,omitempty"`
 
 	// PRPending means this session's branch has no entry in the PR store at
 	// all, which is not the same as a branch known to have no PR. It exists
@@ -145,13 +146,24 @@ type Session struct {
 	PRPending bool `json:"pr_pending,omitempty"`
 }
 
+// State ranks a reporting agent over the bell: Claude rings on every turn it
+// ends, so a bell from an agent's session says nothing the agent has not
+// already said more precisely. The bell only decides for sessions without one.
 func (s *Session) State() SessionState {
-	if s.HasBell {
+	if s.Agent == AgentNeedsInput {
+		return Attention
+	}
+	if s.Agent == AgentNone && s.HasBell {
 		return Attention
 	}
 	if s.PR == nil || s.PR.Number == 0 {
+		if s.Agent == AgentDone {
+			return Waiting
+		}
 		return Idle
 	}
+	// Above Waiting so a finished agent nobody answers cannot hold a merged
+	// session out of Done, which is the only state cleanup acts on.
 	if s.PR.State == "MERGED" {
 		return Done
 	}
@@ -163,6 +175,9 @@ func (s *Session) State() SessionState {
 	}
 	if s.PR.UnresolvedComments > 0 {
 		return Unresolved
+	}
+	if s.Agent == AgentDone {
+		return Waiting
 	}
 	if s.PR.ReviewDecision == "APPROVED" && s.PR.Checks == "pass" {
 		return Mergeable

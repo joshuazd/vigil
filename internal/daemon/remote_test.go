@@ -27,9 +27,9 @@ func testSocketPath(t *testing.T) string {
 // below meaningful: Done is the one transition that runs auto_cleanup.
 func mergedPRCommander() *fetch.MockCommander {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|alpha|/repo/alpha", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "alpha|0", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
 		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
 			return "/repo/alpha", nil
