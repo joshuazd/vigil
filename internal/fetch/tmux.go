@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/jzinkduda/vigil/internal/session"
 )
 
 // RawSession is an intermediate struct from tmux list-panes output.
@@ -22,7 +24,18 @@ type RawSession struct {
 	// was absent/unparseable or this is genuinely tmux's first-ever session
 	// ($0); the total order is correct either way.
 	ID int
+
+	// Agent is the most urgent @vigil_agent across all the session's panes,
+	// not just the preferred one: a second agent in a split counts too.
+	Agent session.AgentState
 }
+
+// ListPanesFormat is the list-panes format ListSessions parses. The trailing
+// flags are read from the end, so a pipe in the path cannot shift them.
+const ListPanesFormat = "#{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}|#{@vigil_agent}"
+
+// BellFormat is the list-windows format BellFlags parses.
+const BellFormat = "#{session_name}|#{window_bell_flag}"
 
 // Pane preference for representing a session's working directory. Lower wins.
 //
@@ -55,8 +68,7 @@ func panePreference(isClaude, isPanel, isActive bool) int {
 // ListSessions returns tmux sessions sorted by creation time, deduplicated by
 // name, each carrying the path of the pane that best represents its work.
 func ListSessions(ctx context.Context, cmd Commander) ([]RawSession, error) {
-	out, err := cmd.Run(ctx, "", "tmux", "list-panes", "-a",
-		"-F", "#{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}")
+	out, err := cmd.Run(ctx, "", "tmux", "list-panes", "-a", "-F", ListPanesFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -78,22 +90,25 @@ func ListSessions(ctx context.Context, cmd Commander) ([]RawSession, error) {
 			continue
 		}
 		name := parts[2]
-		// Flags are the last three fields; the path is everything between the
+		// Flags are the last four fields; the path is everything between the
 		// name and them, rejoined, so a pipe in a path cannot shift them.
-		flagStart := len(parts) - 3
+		flagStart := len(parts) - 4
 		var path string
 		var isActive, isClaude, isPanel bool
+		var agent session.AgentState
 		if flagStart > 3 {
 			path = strings.Join(parts[3:flagStart], "|")
 			isActive = parts[flagStart] == "1"
 			isClaude = parts[flagStart+1] == "1"
 			isPanel = parts[flagStart+2] == "1"
+			agent = session.MoreUrgent(session.AgentNone, session.AgentState(parts[flagStart+3]))
 		} else {
 			path = strings.Join(parts[3:], "|")
 		}
 
 		pref := panePreference(isClaude, isPanel, isActive)
 		if i, seen := index[name]; seen {
+			sessions[i].Agent = session.MoreUrgent(sessions[i].Agent, agent)
 			if pref < prefs[name] {
 				sessions[i].PanePath = path
 				prefs[name] = pref
@@ -109,6 +124,7 @@ func ListSessions(ctx context.Context, cmd Commander) ([]RawSession, error) {
 			PanePath: path,
 			Created:  created,
 			ID:       id,
+			Agent:    agent,
 		})
 	}
 	return sessions, nil
@@ -219,8 +235,7 @@ func AttachedSessions(ctx context.Context, cmd Commander) (map[string]bool, erro
 
 // BellFlags returns a map of session names that have bell flags active.
 func BellFlags(ctx context.Context, cmd Commander) map[string]bool {
-	out, err := cmd.Run(ctx, "", "tmux", "list-windows", "-a",
-		"-F", "#{session_name}|#{window_bell_flag}")
+	out, err := cmd.Run(ctx, "", "tmux", "list-windows", "-a", "-F", BellFormat)
 	if err != nil {
 		return nil
 	}

@@ -27,19 +27,29 @@ func styledFaint(bg *lipgloss.Color) lipgloss.Style {
 
 // Indicator returns the session indicator column (3 chars wide).
 func Indicator(s *session.Session, selected bool) string {
-	return IndicatorWithBg(s, selected, nil)
+	return IndicatorWithBg(s, selected, nil, 0)
 }
 
-func IndicatorWithBg(s *session.Session, selected bool, bg *lipgloss.Color) string {
-	// Left char: selection or bell
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func spinnerFrame(frame int) string {
+	return spinnerFrames[frame%len(spinnerFrames)]
+}
+
+func IndicatorWithBg(s *session.Session, selected bool, bg *lipgloss.Color, spinFrame int) string {
+	// Left char: selection, then whichever of bell or agent decides State
 	left := " "
 	var leftStyle *lipgloss.Color
-	if selected {
+	switch {
+	case selected:
 		left = "◆"
 		leftStyle = &BrightCyan
-	} else if s.HasBell {
+	case s.Agent == session.AgentNone && s.HasBell:
 		left = "*"
 		leftStyle = &BrightYellow
+	case s.Agent == session.AgentWorking:
+		left = spinnerFrame(spinFrame)
+		leftStyle = &BrightBlue
 	}
 
 	// Right char: current/last session
@@ -65,9 +75,19 @@ func StateIndicator(s *session.Session) string {
 	return StateIndicatorWithBg(s, nil)
 }
 
+// Dot is the state's dot, except that an agent asking for input shows a
+// question mark where a bell shows the plain Attention dot.
+func Dot(s *session.Session) string {
+	state := s.State()
+	if state == session.Attention && s.Agent == session.AgentNeedsInput {
+		return "?"
+	}
+	return StateDot[state]
+}
+
 func StateIndicatorWithBg(s *session.Session, bg *lipgloss.Color) string {
 	state := s.State()
-	dot := StateDot[state]
+	dot := Dot(s)
 	color := StateColor[state]
 	if state == session.Done || state == session.Idle {
 		return styledFaint(bg).Render(dot)

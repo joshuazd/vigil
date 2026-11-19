@@ -24,12 +24,13 @@ type cacheFile struct {
 }
 
 type cacheSession struct {
-	Name     string            `json:"name"`
-	PanePath string            `json:"pane_path"`
-	Created  int64             `json:"created"`
-	HasBell  bool              `json:"has_bell"`
-	Git      cacheGit          `json:"git"`
-	PR       *session.PRStatus `json:"pr,omitempty"`
+	Name     string             `json:"name"`
+	PanePath string             `json:"pane_path"`
+	Created  int64              `json:"created"`
+	HasBell  bool               `json:"has_bell"`
+	Agent    session.AgentState `json:"agent,omitempty"`
+	Git      cacheGit           `json:"git"`
+	PR       *session.PRStatus  `json:"pr,omitempty"`
 }
 
 type cacheGit struct {
@@ -55,6 +56,7 @@ func Save(path string, sessions []*session.Session) error {
 			PanePath: s.PanePath,
 			Created:  s.Created,
 			HasBell:  s.HasBell,
+			Agent:    s.Agent,
 			Git: cacheGit{
 				Branch:        s.Git.Branch,
 				GitRoot:       s.Git.GitRoot,
@@ -123,6 +125,7 @@ func Load(path string, cacheTTL time.Duration) []*session.Session {
 			PanePath: cs.PanePath,
 			Created:  cs.Created,
 			HasBell:  cs.HasBell,
+			Agent:    cs.Agent,
 			Git: session.GitStatus{
 				Branch:        cs.Git.Branch,
 				GitRoot:       cs.Git.GitRoot,

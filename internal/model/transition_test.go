@@ -59,6 +59,12 @@ func doneSession(name string) *session.Session {
 	return s
 }
 
+func waitingSession(name string) *session.Session {
+	s := idleSession(name)
+	s.Agent = session.AgentDone
+	return s
+}
+
 func transitionModel() Model {
 	m := newTestModel()
 	m.cfg = &config.Config{Settings: map[string]any{"notifications_enabled": "true"}}
@@ -189,6 +195,7 @@ func TestTransitionNotificationSeverityMatchesTargetState(t *testing.T) {
 		{"blocked", blockedSession, "error"},
 		{"mergeable", mergeableSession, "info"},
 		{"done", doneSession, "info"},
+		{"waiting", waitingSession, "info"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,6 +233,22 @@ func TestCheckStateTransitionsAutoFocusesTheMostUrgentSession(t *testing.T) {
 
 	if m.cursor != 1 {
 		t.Errorf("got cursor %d, want 1 (auto-focus on the blocked session)", m.cursor)
+	}
+}
+
+func TestAutoFocusLandsOnAWaitingAgent(t *testing.T) {
+	m := transitionModel()
+	m.cfg = &config.Config{Settings: map[string]any{
+		"notifications_enabled": "true",
+		"auto_focus":            "true",
+	}}
+	m.sessions = []*session.Session{idleSession("alpha"), waitingSession("beta")}
+	m.cursor = 0
+
+	m.checkStateTransitions()
+
+	if m.cursor != 1 {
+		t.Errorf("got cursor %d, want 1 (auto-focus on the waiting agent)", m.cursor)
 	}
 }
 

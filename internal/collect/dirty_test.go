@@ -24,9 +24,9 @@ func countStatusCalls(cmd *fetch.MockCommander) int {
 // two.
 func twoSessionsOneRootCommander() *fetch.MockCommander {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|alpha|/repo/shared\n1700000001|$2|beta|/repo/shared/sub", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
 		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
 			return "/repo/shared", nil
@@ -359,9 +359,9 @@ func TestSnapshotAndRefreshDirtyAreRaceFree(t *testing.T) {
 func TestDirtyPassReportsItsSlowestRoot(t *testing.T) {
 	const delay = 60 * time.Millisecond
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|fast|/tmp/fast\n1700000001|$2|slow|/tmp/slow", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
 		"git rev-parse --show-toplevel": func(_ context.Context, dir string, _ []string) (string, error) {
 			return dir, nil
@@ -424,9 +424,9 @@ func TestDirtyStatsAreZeroWhenNothingWasDue(t *testing.T) {
 // empty, the shape of a detached HEAD (an in-progress rebase).
 func branchlessCommander() *fetch.MockCommander {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|alpha|/repo/alpha", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "alpha|0", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
 		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
 			return "/repo/alpha", nil

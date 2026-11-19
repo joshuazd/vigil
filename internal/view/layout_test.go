@@ -190,7 +190,7 @@ func TestRenderedRowsAreValidUTF8(t *testing.T) {
 	}
 	for name, sessions := range fixtures {
 		for width := 1; width <= 220; width++ {
-			out := RenderTable(sessions, 0, map[string]bool{}, 86400, width, 2, "")
+			out := RenderTable(sessions, 0, map[string]bool{}, 86400, width, 2, "", 0)
 			if !utf8.ValidString(out) {
 				t.Fatalf("%s width %d: rendered invalid UTF-8\n%q", name, width, out)
 			}
@@ -236,7 +236,7 @@ func TestTotalMatchesWhatTheRowActuallyRenders(t *testing.T) {
 	}
 	for _, width := range []int{200, 104, 80, 60, 41, 40, 28, 20, 15, 8, 4, 1} {
 		layout := LayoutForWidth(width)
-		row := renderRow(s, 3, false, 86400, width, false, layout)
+		row := renderRow(s, 3, false, 86400, width, false, layout, 0)
 		if got := VisibleWidth(row); got != layout.Total() {
 			t.Errorf("width %d: row renders %d columns, Total() claims %d", width, got, layout.Total())
 		}

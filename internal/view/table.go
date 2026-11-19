@@ -42,7 +42,7 @@ func TableWindow(cursor, count, height int) int {
 }
 
 // RenderTable renders the session table rows, dropping columns to fit width.
-func RenderTable(sessions []*session.Session, cursor int, selected map[string]bool, staleThreshold int, width, height int, notification string) string {
+func RenderTable(sessions []*session.Session, cursor int, selected map[string]bool, staleThreshold int, width, height int, notification string, spinFrame int) string {
 	if len(sessions) == 0 {
 		return DimStyle.Render("  No sessions")
 	}
@@ -61,7 +61,7 @@ func RenderTable(sessions []*session.Session, cursor int, selected map[string]bo
 			break
 		}
 		isCursor := i == cursor
-		line := renderRow(s, i, selected[s.Name], staleThreshold, width, isCursor, layout)
+		line := renderRow(s, i, selected[s.Name], staleThreshold, width, isCursor, layout, spinFrame)
 		if rendered > 0 {
 			b.WriteString("\n")
 		}
@@ -80,7 +80,7 @@ func RenderTable(sessions []*session.Session, cursor int, selected map[string]bo
 	return b.String()
 }
 
-func renderRow(s *session.Session, index int, selected bool, staleThreshold int, width int, isCursor bool, layout TableLayout) string {
+func renderRow(s *session.Session, index int, selected bool, staleThreshold int, width int, isCursor bool, layout TableLayout, spinFrame int) string {
 	var bg *lipgloss.Color
 	if isCursor {
 		bg = &BarBg
@@ -90,7 +90,7 @@ func renderRow(s *session.Session, index int, selected bool, staleThreshold int,
 
 	var cells []string
 	if layout.Indicator {
-		cells = append(cells, IndicatorWithBg(s, selected, bg))
+		cells = append(cells, IndicatorWithBg(s, selected, bg, spinFrame))
 	}
 	if layout.Index {
 		cells = append(cells, indexCol(index, bg))

@@ -8,15 +8,16 @@ import (
 
 	"github.com/jzinkduda/vigil/internal/config"
 	"github.com/jzinkduda/vigil/internal/fetch"
+	"github.com/jzinkduda/vigil/internal/session"
 )
 
 // Snapshot must carry the id through from RawSession, or SortSessions has
 // nothing to break ties with and the fix is inert on the real path.
 func TestSnapshotCarriesTheSessionID(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$5|alpha|/tmp/alpha", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "", nil)
 	cmd.On("git", "", nil)
 
 	c := New(&config.Config{}, cmd)
@@ -32,11 +33,28 @@ func TestSnapshotCarriesTheSessionID(t *testing.T) {
 	}
 }
 
+func TestSnapshotCarriesTheAgentState(t *testing.T) {
+	cmd := fetch.NewMockCommander()
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
+		"1700000000|$5|alpha|/tmp/alpha|1|1||needs_input", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "", nil)
+	cmd.On("git", "", nil)
+
+	c := New(&config.Config{}, cmd)
+	sessions, err := c.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessions[0].Agent != session.AgentNeedsInput {
+		t.Errorf("got agent %q, want needs_input", sessions[0].Agent)
+	}
+}
+
 func TestSnapshotPopulatesSessionsWithGitState(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|alpha|/tmp/alpha\n1700000001|$2|beta|/tmp/beta", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}",
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat,
 		"alpha|1\nbeta|0", nil)
 
 	cmd.HandlerFuncs = make(map[string]func(ctx context.Context, dir string, args []string) (string, error))
@@ -107,8 +125,8 @@ func TestSnapshotReturnsErrorWhenTmuxFails(t *testing.T) {
 
 func TestSnapshotWithNoSessionsReturnsEmpty(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}", "", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat, "", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "", nil)
 
 	c := New(&config.Config{}, cmd)
 	sessions, err := c.Snapshot(context.Background())
@@ -138,9 +156,9 @@ func TestNewDefaultsPRInterval(t *testing.T) {
 
 func TestSnapshotDeduplicatesPRFetchesByBranchAndGitRoot(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|alpha|/repo/alpha\n1700000001|$2|beta|/repo/alpha", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}",
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat,
 		"alpha|0\nbeta|0", nil)
 
 	cmd.HandlerFuncs = make(map[string]func(ctx context.Context, dir string, args []string) (string, error))
@@ -191,9 +209,9 @@ func TestSnapshotDeduplicatesPRFetchesByBranchAndGitRoot(t *testing.T) {
 // leaving the gh response to the caller.
 func singleBranchCommander() *fetch.MockCommander {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|alpha|/repo/alpha", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "alpha|0", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
 		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
 			return "/repo/alpha", nil
@@ -621,9 +639,9 @@ func TestAResolvedBranchWithNoPRIsNotPending(t *testing.T) {
 // life of the process.
 func TestASessionWithNoGitRootIsNeverPending(t *testing.T) {
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|alpha|/tmp/alpha", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "alpha|0", nil)
 	cmd.On("git", "", nil)
 
 	c := New(&config.Config{}, cmd)
@@ -642,9 +660,9 @@ func TestASessionWithNoGitRootIsNeverPending(t *testing.T) {
 func TestPassEvictsABranchThatLeftTheWorkingSet(t *testing.T) {
 	branch := "feature"
 	cmd := fetch.NewMockCommander()
-	cmd.OnArgs("tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}",
+	cmd.OnArgs("tmux list-panes -a -F "+fetch.ListPanesFormat,
 		"1700000000|$1|alpha|/repo/alpha", nil)
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "alpha|0", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "alpha|0", nil)
 	cmd.HandlerFuncs = map[string]func(ctx context.Context, dir string, args []string) (string, error){
 		"git rev-parse --show-toplevel": func(context.Context, string, []string) (string, error) {
 			return "/repo/alpha", nil

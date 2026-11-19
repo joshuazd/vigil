@@ -267,6 +267,7 @@ func (c *Collector) Snapshot(ctx context.Context) ([]*session.Session, error) {
 			Created:  r.Created,
 			ID:       r.ID,
 			HasBell:  bells[r.Name],
+			Agent:    r.Agent,
 		}
 	}
 

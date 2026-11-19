@@ -106,7 +106,7 @@ func TestTableNeverExceedsItsWidth(t *testing.T) {
 	const height = 2
 	for _, fx := range tableTestFixtures() {
 		for _, width := range []int{12, 20, 26, 30, 40, 43, 50, 62, 80, 104, 200} {
-			out := RenderTable(fx.sessions, 0, map[string]bool{}, 86400, width, height, "")
+			out := RenderTable(fx.sessions, 0, map[string]bool{}, 86400, width, height, "", 0)
 			lines := strings.Split(out, "\n")
 			if len(lines) != height {
 				t.Errorf("%s width %d: got %d lines, want %d (a wrapped row inflates this)", fx.name, width, len(lines), height)
@@ -136,7 +136,7 @@ func TestTableKeepsNameColumnPinnedAtFullWidth(t *testing.T) {
 	// indicator 3, index 1, state dot 1, name 52, one separator after each.
 	const wantOffset = 3 + 1 + 1 + 1 + 1 + 1 + 52 + 1 // 61
 	for _, width := range []int{104, 200} {
-		out := RenderTable(tableFixture(), 1, map[string]bool{}, 86400, width, 2, "")
+		out := RenderTable(tableFixture(), 1, map[string]bool{}, 86400, width, 2, "", 0)
 		row := StripANSI(strings.Split(out, "\n")[0])
 		gitAt := strings.Index(row, "~3")
 		if gitAt < 0 {
@@ -149,7 +149,7 @@ func TestTableKeepsNameColumnPinnedAtFullWidth(t *testing.T) {
 }
 
 func TestTableDropsGitInAPanelWidthRow(t *testing.T) {
-	out := RenderTable(tableFixture(), 1, map[string]bool{}, 86400, 40, 2, "")
+	out := RenderTable(tableFixture(), 1, map[string]bool{}, 86400, 40, 2, "", 0)
 	if strings.Contains(StripANSI(out), "~3") {
 		t.Error("git data rendered at width 40, where the git column is dropped")
 	}
@@ -168,7 +168,7 @@ func TestTableRendersCursorRowWithinWidth(t *testing.T) {
 	const height = 2
 	for _, fx := range tableTestFixtures() {
 		for _, width := range []int{20, 40, 104} {
-			out := RenderTable(fx.sessions, 0, map[string]bool{}, 86400, width, height, "")
+			out := RenderTable(fx.sessions, 0, map[string]bool{}, 86400, width, height, "", 0)
 			lines := strings.Split(out, "\n")
 			if len(lines) != height {
 				t.Errorf("%s width %d: got %d lines, want %d (the cursor row wrapped)", fx.name, width, len(lines), height)

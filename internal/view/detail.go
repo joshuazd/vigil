@@ -93,7 +93,7 @@ func renderDetailHeader(b *strings.Builder, s *session.Session, mode DetailMode,
 
 	// State dot
 	state := s.State()
-	dot := StateDot[state]
+	dot := Dot(s)
 	color := StateColor[state]
 	b.WriteString("  ")
 	b.WriteString(lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%s %s", dot, state)))

@@ -16,7 +16,7 @@ import (
 	"github.com/jzinkduda/vigil/internal/fetch"
 )
 
-const listPanesKey = "tmux list-panes -a -F #{session_created}|#{session_id}|#{session_name}|#{pane_current_path}|#{pane_active}|#{@vigil_claude}|#{@vigil_panel}"
+const listPanesKey = "tmux list-panes -a -F " + fetch.ListPanesFormat
 
 // droppedServer builds a Server whose session list is whatever lines() returns
 // at the moment of the call, so one test can poll twice with different sets.
@@ -34,7 +34,7 @@ func droppedServerErr(t *testing.T, buf *bytes.Buffer, lines func() (string, err
 	cmd.HandlerFuncs[listPanesKey] = func(ctx context.Context, dir string, args []string) (string, error) {
 		return lines()
 	}
-	cmd.OnArgs("tmux list-windows -a -F #{session_name}|#{window_bell_flag}", "", nil)
+	cmd.OnArgs("tmux list-windows -a -F "+fetch.BellFormat, "", nil)
 	cmd.On("git", "", nil)
 
 	return &Server{
