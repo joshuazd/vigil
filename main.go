@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -180,7 +181,27 @@ func runConfigGet(args []string, stdout, stderr io.Writer) int {
 func runDaemon(cfg *config.Config, cmd fetch.Commander) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return daemon.New(cfg, cmd).Run(ctx)
+	return reexecOnRestart(daemon.New(cfg, cmd).Run(ctx))
+}
+
+// reexecOnRestart replaces the daemon with the image now on disk once Run has
+// fully shut down for a restart. Exec keeps the pid, the session and the log
+// file on stdout and stderr; the flock and the listener are close-on-exec and
+// were released by Run anyway. If a client spawned a daemon in the gap, the
+// re-exec'd one loses the lock and exits, and either way the new image runs.
+func reexecOnRestart(err error) error {
+	if !errors.Is(err, daemon.ErrRestart) {
+		return err
+	}
+	return reexec()
+}
+
+func reexec() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return execSelf(exe, append([]string{exe}, os.Args[1:]...), os.Environ())
 }
 
 // restartIfRequested replaces this process with the newer image on disk. It
@@ -192,11 +213,7 @@ func restartIfRequested(final tea.Model) error {
 	if !ok || !m.RestartRequested() {
 		return nil
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	return execSelf(exe, append([]string{exe}, os.Args[1:]...), os.Environ())
+	return reexec()
 }
 
 func runTUI(cfg *config.Config, cmd fetch.Commander) error {

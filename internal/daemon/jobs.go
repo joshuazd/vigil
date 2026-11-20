@@ -195,6 +195,19 @@ func (j *jobs) inFlightInputLocked(input string) bool {
 	return false
 }
 
+// active reports whether any job is queued or running. A queued job counts:
+// it is accepted work that a shutdown would silently drop.
+func (j *jobs) active() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for _, job := range j.byID {
+		if job.State == protocol.JobQueued || job.State == protocol.JobRunning {
+			return true
+		}
+	}
+	return false
+}
+
 // work runs queued jobs one at a time until ctx ends.
 func (j *jobs) work(ctx context.Context) {
 	for {

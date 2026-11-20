@@ -180,6 +180,12 @@ survivable and diagnosable.
 
 ## Part C: a daemon that is visibly, not silently, old
 
+> **Superseded 2026-11-19.** The daemon now re-execs itself once idle; see CLAUDE.md's
+> "The daemon restarts itself" bullet. The stutter argument below assumed panels stay
+> connected across an install, but Part B re-execs every panel on the same install, so the
+> daemon's restart adds at most one 2s reconnect probe. The `daemon outdated` marker stays
+> and now covers the window up to the restart.
+
 **The daemon is not restarted, not re-exec'd, and not touched.**
 
 The rejected alternative and why it is rejected is worth recording, because it was the

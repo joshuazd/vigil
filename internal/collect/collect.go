@@ -141,6 +141,12 @@ func (c *Collector) DirtyStats() DirtyStats {
 	return c.dirty.stats
 }
 
+// Warming reports whether a cold worktree's cache warm is in flight. Safe from
+// any goroutine.
+func (c *Collector) Warming() bool {
+	return c.dirty.warming.Load() > 0
+}
+
 func New(cfg *config.Config, cmd fetch.Commander) *Collector {
 	workers := cfg.GetSettingInt("git_workers")
 	if workers <= 0 {

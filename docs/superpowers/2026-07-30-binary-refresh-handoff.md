@@ -73,6 +73,9 @@ the returned model after `p.Run()` returns and `syscall.Exec`s the same path wit
 without a second copy of the binary. The exec cannot happen inside `Update`: Bubble Tea owns
 raw mode and the alt screen there.
 
+**Superseded 2026-11-19: the daemon now restarts itself once idle** (CLAUDE.md, "The daemon
+restarts itself"). The paragraph below is the original reasoning.
+
 **The daemon publishes its own binary stamp, and does not restart itself.** `Snapshot.DaemonBin`
 carries the stamp the daemon recorded at its own startup. A client compares that against its
 own cached on-disk stamp (no extra stat - Part B already has one) and `Model.daemonHealth()`

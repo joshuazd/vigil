@@ -35,16 +35,6 @@ const autoFocusCooldown = 15 * time.Second
 // daemon.
 const spawnCooldown = 15 * time.Second
 
-// binCheckInterval is how often a client stats its own binary. A stat is
-// cheap; doing it on every 1s tick would still be pointless.
-const binCheckInterval = 10 * time.Second
-
-// binRestartFloor is the anti-loop guard. A re-exec'd process stamps at its
-// own startup, so a stable binary never fires twice - that is the structural
-// defence. This bounds the damage if a stat is somehow nondeterministic: one
-// exec per floor rather than a hot spin that makes a panel unusable.
-const binRestartFloor = 30 * time.Second
-
 type Model struct {
 	// Data
 	sessions []*session.Session
@@ -152,17 +142,8 @@ type Model struct {
 	// lastSpawn is when this panel last tried to start a daemon.
 	lastSpawn time.Time
 
-	// binProber stats this process's own image. Zero value is the real one.
-	binProber    selfbin.Prober
-	binAtStart   selfbin.Stamp
-	binOnDisk    selfbin.Stamp
-	lastBinCheck time.Time
-	startedAt    time.Time
-
-	// binPending is a changed stamp seen once and not yet confirmed by a
-	// second check. `make build` writes ./vigil in place, so a stat can land
-	// mid-write and report a short size; exec'ing that file kills the pane.
-	binPending selfbin.Stamp
+	// bin watches this process's own image for a `make install`.
+	bin selfbin.Watcher
 
 	// restartRequested asks the caller to re-exec after the program exits.
 	// The exec cannot happen here: Bubble Tea owns raw mode and the alt
@@ -225,11 +206,6 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 
 	insideTmux := os.Getenv("TMUX") != ""
 
-	// A failed probe leaves the zero Stamp, which means "unknown" everywhere
-	// it is read: checkBinary adopts the first stamp it can get as the
-	// baseline and daemonHealth stays quiet until then.
-	startStamp, _ := selfbin.Prober{}.Current()
-
 	m := Model{
 		currentSessionName: currentSession,
 		prCache:            make(map[string]*session.PRStatus),
@@ -248,9 +224,7 @@ func newModel(cfg *config.Config, cmd fetch.Commander, panel bool) Model {
 		cancel:    cancel,
 		collector: collect.New(cfg, cmd),
 
-		startedAt:  time.Now(),
-		binAtStart: startStamp,
-		binOnDisk:  startStamp,
+		bin: selfbin.NewWatcher(selfbin.Prober{}, time.Now()),
 
 		dispatchInput: ti,
 		help:          help.New(),
@@ -1219,35 +1193,7 @@ func (m *Model) checkBinary(now time.Time) bool {
 	if m.restartRequested {
 		return true
 	}
-	if !m.lastBinCheck.IsZero() && now.Sub(m.lastBinCheck) < binCheckInterval {
-		return false
-	}
-	m.lastBinCheck = now
-
-	stamp, ok := m.binProber.Current()
-	if !ok {
-		return false
-	}
-	m.binOnDisk = stamp
-	// A startup probe that failed left binAtStart zero, which is "unknown"
-	// rather than a real prior value: comparing against it would restart a
-	// binary that never changed. The first stamp this process can actually
-	// get is its baseline.
-	if m.binAtStart.Zero() {
-		m.binAtStart = stamp
-	}
-	if stamp == m.binAtStart {
-		m.binPending = selfbin.Stamp{}
-		return false
-	}
-	// The same changed stamp has to survive two checks a binCheckInterval
-	// apart. A file still being written grows between them, so a torn read is
-	// never what triggers the exec.
-	if stamp != m.binPending {
-		m.binPending = stamp
-		return false
-	}
-	if now.Sub(m.startedAt) < binRestartFloor {
+	if !m.bin.Replaced(now) {
 		return false
 	}
 	// Unsaved user intent. All three are states the user is actively in and
@@ -1280,7 +1226,7 @@ func (m Model) daemonHealth() string {
 	// Lowest precedence: a daemon that is behind is still feeding correct
 	// data, it is just missing whatever the newer image adds. An absent stamp
 	// counts, because a daemon too old to send the field is too old.
-	if !m.binOnDisk.Zero() && m.daemonBin != m.binOnDisk {
+	if onDisk := m.bin.OnDisk(); !onDisk.Zero() && m.daemonBin != onDisk {
 		return "daemon outdated"
 	}
 	return ""

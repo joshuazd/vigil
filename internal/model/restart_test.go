@@ -33,19 +33,21 @@ func proberReturning(size int64, err error) selfbin.Prober {
 	}
 }
 
-// binModel returns a model that has been running long enough to be past the
-// startup floor, stamped at size 100.
+// watcherAt is a watcher that started long enough ago to be past the restart
+// floor, stamped at size. A size of 0 stamps nothing, as a failed probe does.
+func watcherAt(size int64) selfbin.Watcher {
+	var err error
+	if size == 0 {
+		err = errors.New("boom")
+	}
+	return selfbin.NewWatcher(proberReturning(size, err), time.Now().Add(-time.Hour))
+}
+
+// binModel returns a model past the restart floor, stamped at size 100.
 func binModel(t *testing.T) Model {
 	t.Helper()
 	m := newTestModel()
-	m.startedAt = time.Now().Add(-time.Hour)
-	m.binProber = proberReturning(100, nil)
-	stamp, ok := m.binProber.Current()
-	if !ok {
-		t.Fatal("the stub prober failed")
-	}
-	m.binAtStart = stamp
-	m.binOnDisk = stamp
+	m.bin = watcherAt(100)
 	return m
 }
 
@@ -53,12 +55,12 @@ func binModel(t *testing.T) Model {
 // restart, an interval apart so the second is not rate-limited away.
 func checkTwice(m *Model, start time.Time) {
 	m.checkBinary(start)
-	m.checkBinary(start.Add(binCheckInterval + time.Second))
+	m.checkBinary(start.Add(selfbin.CheckInterval + time.Second))
 }
 
 func TestAnUnchangedBinaryDoesNotRequestARestart(t *testing.T) {
 	m := binModel(t)
-	m.checkBinary(time.Now())
+	checkTwice(&m, time.Now())
 	if m.restartRequested {
 		t.Fatal("restart requested for an unchanged binary")
 	}
@@ -66,94 +68,10 @@ func TestAnUnchangedBinaryDoesNotRequestARestart(t *testing.T) {
 
 func TestAChangedBinaryRequestsARestart(t *testing.T) {
 	m := binModel(t)
-	m.binProber = proberReturning(200, nil)
+	m.bin.Prober = proberReturning(200, nil)
 	checkTwice(&m, time.Now())
 	if !m.restartRequested {
 		t.Fatal("no restart requested after the binary changed")
-	}
-	if m.binOnDisk.Size != 200 {
-		t.Fatalf("binOnDisk.Size = %d, want 200", m.binOnDisk.Size)
-	}
-}
-
-// `make build` writes ./vigil in place, so a stat can land mid-write and see a
-// new mtime with a short size. Exec'ing that kills the pane.
-func TestAChangedStampSeenOnceDoesNotRestart(t *testing.T) {
-	m := binModel(t)
-	m.binProber = proberReturning(200, nil)
-	m.checkBinary(time.Now())
-	if m.restartRequested {
-		t.Fatal("restarted on a single observation; a torn read would exec a truncated binary")
-	}
-}
-
-// A file still being written grows between checks, so the pair never matches.
-func TestAStampThatKeepsChangingNeverConfirms(t *testing.T) {
-	m := binModel(t)
-	now := time.Now()
-	m.binProber = proberReturning(200, nil)
-	m.checkBinary(now)
-	m.binProber = proberReturning(300, nil)
-	m.checkBinary(now.Add(binCheckInterval + time.Second))
-	if m.restartRequested {
-		t.Fatal("two different changed stamps confirmed each other")
-	}
-	m.checkBinary(now.Add(2*binCheckInterval + 2*time.Second))
-	if !m.restartRequested {
-		t.Fatal("a stamp that then held steady for two checks never restarted")
-	}
-}
-
-// A startup probe that failed leaves binAtStart zero. Zero is "unknown", not a
-// prior value: comparing a later successful stamp against it would restart a
-// binary that never changed.
-func TestAFailedStartupStampIsAdoptedRatherThanTreatedAsAChange(t *testing.T) {
-	m := binModel(t)
-	m.binAtStart = selfbin.Stamp{}
-	m.binOnDisk = selfbin.Stamp{}
-	checkTwice(&m, time.Now())
-	if m.restartRequested {
-		t.Fatal("a failed startup stamp was read as a changed binary")
-	}
-	if m.binAtStart.Size != 100 {
-		t.Fatalf("binAtStart = %+v, want the first stamp the process could get", m.binAtStart)
-	}
-}
-
-func TestAFailedStatIsReadAsUnchanged(t *testing.T) {
-	m := binModel(t)
-	m.binProber = proberReturning(0, errors.New("boom"))
-	m.checkBinary(time.Now())
-	if m.restartRequested {
-		t.Fatal("a stat failure requested a restart; it must fail closed")
-	}
-	if m.binOnDisk.Size != 100 {
-		t.Fatal("a stat failure overwrote the last good on-disk stamp")
-	}
-}
-
-func TestTheCheckIsRateLimited(t *testing.T) {
-	m := binModel(t)
-	now := time.Now()
-	m.checkBinary(now)
-	m.binProber = proberReturning(200, nil)
-	m.checkBinary(now.Add(time.Second))
-	if !m.binPending.Zero() {
-		t.Fatal("the check ran again within the rate limit window")
-	}
-	checkTwice(&m, now.Add(binCheckInterval+time.Second))
-	if !m.restartRequested {
-		t.Fatal("the check never ran again after the rate limit window")
-	}
-}
-
-func TestAFreshlyStartedProcessDoesNotRestart(t *testing.T) {
-	m := binModel(t)
-	m.startedAt = time.Now()
-	m.binProber = proberReturning(200, nil)
-	checkTwice(&m, time.Now())
-	if m.restartRequested {
-		t.Fatal("a process restarted within the startup floor; a bad stamp would spin")
 	}
 }
 
@@ -169,7 +87,7 @@ func TestARestartWaitsForAnOpenPrompt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := binModel(t)
 			tc.apply(&m)
-			m.binProber = proberReturning(200, nil)
+			m.bin.Prober = proberReturning(200, nil)
 			checkTwice(&m, time.Now())
 			if m.restartRequested {
 				t.Fatalf("restarted with a %s open, losing unsaved intent", tc.name)
@@ -190,16 +108,15 @@ func TestRestartRequestedIsReadable(t *testing.T) {
 }
 
 // restartingModel is one check away from asking to be restarted: the changed
-// stamp has already been seen once, so the next check confirms it.
+// stamp has already been seen once, a full interval ago, so the next check
+// confirms it.
 func restartingModel(t *testing.T) Model {
 	t.Helper()
 	m := binModel(t)
-	m.binProber = proberReturning(200, nil)
-	stamp, ok := m.binProber.Current()
-	if !ok {
-		t.Fatal("the stub prober failed")
+	m.bin.Prober = proberReturning(200, nil)
+	if m.bin.Replaced(time.Now().Add(-time.Minute)) {
+		t.Fatal("a single observation confirmed a change")
 	}
-	m.binPending = stamp
 	return m
 }
 
@@ -232,9 +149,10 @@ func TestADaemonFedTickQuitsWhenTheBinaryChanged(t *testing.T) {
 	}
 }
 
-func outdatedModel(t *testing.T) Model {
+func outdatedModel(t *testing.T, onDisk int64) Model {
 	t.Helper()
-	m := binModel(t)
+	m := newTestModel()
+	m.bin = watcherAt(onDisk)
 	m.daemonConn = &net.TCPConn{}
 	m.daemonReady = true
 	m.lastSnapshot = time.Now()
@@ -243,18 +161,17 @@ func outdatedModel(t *testing.T) Model {
 }
 
 func TestDaemonHealthReportsAnOutdatedDaemon(t *testing.T) {
-	m := outdatedModel(t)
-	m.binOnDisk = selfbin.Stamp{Size: 200}
-	m.daemonBin = selfbin.Stamp{Size: 100}
+	m := outdatedModel(t, 200)
+	m.daemonBin = m.bin.OnDisk()
+	m.daemonBin.Size = 100
 	if got := m.daemonHealth(); got != "daemon outdated" {
 		t.Fatalf("daemonHealth = %q, want %q", got, "daemon outdated")
 	}
 }
 
 func TestDaemonHealthSaysNothingWhenTheDaemonMatchesDisk(t *testing.T) {
-	m := outdatedModel(t)
-	m.binOnDisk = selfbin.Stamp{Size: 200}
-	m.daemonBin = selfbin.Stamp{Size: 200}
+	m := outdatedModel(t, 200)
+	m.daemonBin = m.bin.OnDisk()
 	if got := m.daemonHealth(); got != "" {
 		t.Fatalf("daemonHealth = %q, want empty", got)
 	}
@@ -262,8 +179,7 @@ func TestDaemonHealthSaysNothingWhenTheDaemonMatchesDisk(t *testing.T) {
 
 // A daemon too old to send the field is too old. Absent reads as outdated.
 func TestAnAbsentStampReadsAsOutdated(t *testing.T) {
-	m := outdatedModel(t)
-	m.binOnDisk = selfbin.Stamp{Size: 200}
+	m := outdatedModel(t, 200)
 	m.daemonBin = selfbin.Stamp{}
 	if got := m.daemonHealth(); got != "daemon outdated" {
 		t.Fatalf("daemonHealth = %q, want %q", got, "daemon outdated")
@@ -272,8 +188,7 @@ func TestAnAbsentStampReadsAsOutdated(t *testing.T) {
 
 // The client's own probe failing must not accuse the daemon.
 func TestAnUnknownOnDiskStampSaysNothing(t *testing.T) {
-	m := outdatedModel(t)
-	m.binOnDisk = selfbin.Stamp{}
+	m := outdatedModel(t, 0)
 	m.daemonBin = selfbin.Stamp{Size: 100}
 	if got := m.daemonHealth(); got != "" {
 		t.Fatalf("daemonHealth = %q, want empty", got)
@@ -281,8 +196,7 @@ func TestAnUnknownOnDiskStampSaysNothing(t *testing.T) {
 }
 
 func TestStalenessOutranksOutdatedness(t *testing.T) {
-	m := outdatedModel(t)
-	m.binOnDisk = selfbin.Stamp{Size: 200}
+	m := outdatedModel(t, 200)
 	m.daemonBin = selfbin.Stamp{Size: 100}
 	m.lastSnapshot = time.Now().Add(-time.Hour)
 	if got := m.daemonHealth(); !strings.HasPrefix(got, "daemon stale") {

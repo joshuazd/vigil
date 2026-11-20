@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jzinkduda/vigil/internal/config"
+	"github.com/jzinkduda/vigil/internal/daemon"
 	"github.com/jzinkduda/vigil/internal/model"
 )
 
@@ -331,6 +334,48 @@ func TestRestartIfRequestedIgnoresANonModel(t *testing.T) {
 	}
 	if err := restartIfRequested(nil); err != nil {
 		t.Fatalf("restartIfRequested: %v", err)
+	}
+}
+
+func TestADaemonRestartExecsTheSamePathAndArgv(t *testing.T) {
+	original := execSelf
+	t.Cleanup(func() { execSelf = original })
+	var gotPath string
+	var gotArgv []string
+	execSelf = func(path string, argv []string, _ []string) error {
+		gotPath, gotArgv = path, argv
+		return nil
+	}
+
+	if err := reexecOnRestart(fmt.Errorf("run: %w", daemon.ErrRestart)); err != nil {
+		t.Fatalf("reexecOnRestart: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip("no executable path on this platform")
+	}
+	if gotPath != exe {
+		t.Fatalf("exec path = %q, want %q", gotPath, exe)
+	}
+	if !reflect.DeepEqual(gotArgv, append([]string{exe}, os.Args[1:]...)) {
+		t.Fatalf("argv = %v, want the executable and this process's own arguments", gotArgv)
+	}
+}
+
+func TestADaemonThatDidNotAskToRestartIsNotExecd(t *testing.T) {
+	original := execSelf
+	t.Cleanup(func() { execSelf = original })
+	execSelf = func(string, []string, []string) error {
+		t.Fatal("exec'd a daemon that did not ask to restart")
+		return nil
+	}
+	if err := reexecOnRestart(nil); err != nil {
+		t.Fatalf("reexecOnRestart(nil) = %v, want nil", err)
+	}
+	boom := errors.New("boom")
+	if err := reexecOnRestart(boom); !errors.Is(err, boom) {
+		t.Fatalf("reexecOnRestart(boom) = %v, want boom passed through", err)
 	}
 }
 

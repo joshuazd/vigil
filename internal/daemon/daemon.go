@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -39,11 +40,15 @@ type Server struct {
 	Log        *log.Logger
 
 	// BinStamp identifies the image this daemon is running. Published in every
-	// snapshot so a client - which stats the same path for its own restart
-	// check - can tell the user the daemon is behind. The daemon never acts on
-	// it: restarting itself would drop every client connection, so every panel
-	// would bounce through daemon-lost on every install.
+	// snapshot so a client can tell the user the daemon is behind, which it
+	// is between an install and the restart bin triggers, and for as long as
+	// that restart is deferred by work in flight.
 	BinStamp selfbin.Stamp
+
+	// bin watches this daemon's own image. Owned by Run's goroutine. The zero
+	// value stats the real executable and adopts its first stamp, so a Server
+	// literal in a test never restarts unless its prober is swapped.
+	bin selfbin.Watcher
 
 	// Detector and Effects fire state-transition side effects once per event.
 	// Clients render their own toasts from their own detectors; only this
@@ -71,6 +76,11 @@ type Server struct {
 	// pendingEffects tracks in-flight effect goroutines so shutdown waits for
 	// them before Run returns.
 	pendingEffects sync.WaitGroup
+
+	// effectsRunning counts transition effects only. pendingEffects cannot
+	// answer "is an effect running", because the job worker holds it for the
+	// daemon's whole life.
+	effectsRunning atomic.Int32
 
 	// effectsMu guards inFlightEffects, which serializes only the effect that
 	// is actually destructive: a bell flip on a merged session yields two
@@ -131,11 +141,11 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 	// Publishing a zero stamp is the correct fail-safe - every client then
 	// reads this daemon as outdated - but silently accusing itself is not
 	// diagnosable, so say it once here.
-	stamp, ok := selfbin.Prober{}.Current()
-	if !ok {
+	srv.bin = selfbin.NewWatcher(selfbin.Prober{}, time.Now())
+	srv.BinStamp = srv.bin.AtStart()
+	if srv.BinStamp.Zero() {
 		logger.Printf("cannot stamp own binary; clients will report this daemon as outdated")
 	}
-	srv.BinStamp = stamp
 	// The job table exists even when the commander cannot stream. It refuses
 	// every submission in that case, which is the point: a nil table left the
 	// request read off the wire and dropped with nothing registered, and a
@@ -147,7 +157,14 @@ func New(cfg *config.Config, cmd fetch.Commander) *Server {
 	return srv
 }
 
-func (s *Server) Run(ctx context.Context) error {
+// Run serves until ctx ends, returning nil, or until the binary it was launched
+// from is replaced on disk, returning ErrRestart. Both exits run the same full
+// shutdown, so by the time ErrRestart reaches the caller the socket is
+// unlinked and the flock released, and a re-exec'd image can take both.
+func (s *Server) Run(parent context.Context) error {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+
 	if err := os.MkdirAll(filepath.Dir(s.SocketPath), 0o700); err != nil {
 		return err
 	}
@@ -193,18 +210,22 @@ func (s *Server) Run(ctx context.Context) error {
 	ticker := time.NewTicker(s.Interval)
 	defer ticker.Stop()
 
+	shutdown := func() {
+		// Closing the listener is what unblocks accept out of Accept.
+		_ = listener.Close()
+		accepted.Wait()
+		s.closeClients()
+		s.pendingEffects.Wait()
+		// Returning here releases the flock and unlinks the socket, so it
+		// must not happen while a poller still has a gh child running.
+		s.Collector.Wait()
+	}
+
 	s.poll(ctx)
 	for {
 		select {
 		case <-ctx.Done():
-			// Closing the listener is what unblocks accept out of Accept.
-			_ = listener.Close()
-			accepted.Wait()
-			s.closeClients()
-			s.pendingEffects.Wait()
-			// Returning here releases the flock and unlinks the socket, so it
-			// must not happen while a poller still has a gh child running.
-			s.Collector.Wait()
+			shutdown()
 			return nil
 		case conn := <-incoming:
 			s.addClient(ctx, conn)
@@ -212,8 +233,46 @@ func (s *Server) Run(ctx context.Context) error {
 			s.handleRequest(req)
 		case <-ticker.C:
 			s.poll(ctx)
+			// Straight into shutdown rather than back round the select: with
+			// ctx cancelled, another iteration could still pick a request and
+			// accept a job that no worker will ever run.
+			if s.restartDue(s.now()) {
+				s.logf("binary replaced on disk, restarting")
+				cancel()
+				shutdown()
+				return ErrRestart
+			}
 		}
 	}
+}
+
+// ErrRestart is Run's report that its binary was replaced and it has shut
+// down so the caller can re-exec it.
+var ErrRestart = errors.New("daemon binary replaced on disk")
+
+// restartDue reports whether the image on disk has changed and nothing is in
+// flight that a shutdown would destroy. Each busy reason defers the restart to
+// a later check rather than cancelling the work:
+//
+//   - a queued or running dispatch job, which a shutdown drops or kills
+//     mid-`git worktree add`;
+//   - a transition effect, which may be a cleanup mid-`git worktree remove`;
+//   - a cache warm, the one git call vigil makes holding the index lock,
+//     which cancellation SIGKILLs and leaves index.lock behind;
+//   - a request read off a socket and not yet handled, which would be lost.
+//
+// Run's goroutine is the only caller and the only place jobs are submitted
+// and effects started, so nothing it checks can start between this returning
+// true and Run cancelling. A warm can, since the local worker starts it; that
+// window is the microseconds between the check and the cancel.
+func (s *Server) restartDue(now time.Time) bool {
+	if !s.bin.Replaced(now) {
+		return false
+	}
+	if s.jobs != nil && s.jobs.active() {
+		return false
+	}
+	return s.effectsRunning.Load() == 0 && !s.Collector.Warming() && len(s.requests) == 0
 }
 
 // listenError translates a bind failure into ErrAlreadyRunning. clearStaleSocket
@@ -321,11 +380,7 @@ func (s *Server) poll(ctx context.Context) {
 			// Every other transition dispatches ungated: the notify hook
 			// must fire once per real transition, and only cleanup is
 			// destructive enough to need serializing.
-			s.pendingEffects.Add(1)
-			go func() {
-				defer s.pendingEffects.Done()
-				s.Effects.Run(ctx, ev)
-			}()
+			s.goEffect(func() { s.Effects.Run(ctx, ev) })
 			continue
 		}
 
@@ -341,15 +396,25 @@ func (s *Server) poll(ctx context.Context) {
 		s.inFlightEffects[ev.Session] = struct{}{}
 		s.effectsMu.Unlock()
 
-		s.pendingEffects.Add(1)
-		go func() {
-			defer s.pendingEffects.Done()
+		s.goEffect(func() {
 			s.Effects.Run(ctx, ev)
 			s.effectsMu.Lock()
 			delete(s.inFlightEffects, ev.Session)
 			s.effectsMu.Unlock()
-		}()
+		})
 	}
+}
+
+// goEffect runs one transition effect on its own goroutine, counted both for
+// shutdown to wait on and for restartDue to defer on.
+func (s *Server) goEffect(effect func()) {
+	s.pendingEffects.Add(1)
+	s.effectsRunning.Add(1)
+	go func() {
+		defer s.pendingEffects.Done()
+		defer s.effectsRunning.Add(-1)
+		effect()
+	}()
 }
 
 // publishJobs re-broadcasts the latest snapshot with jobs attached, off the

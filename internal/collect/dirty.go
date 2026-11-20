@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jzinkduda/vigil/internal/fetch"
@@ -50,6 +51,12 @@ type dirtyPoller struct {
 	// returns is warmed again - cheap, since by then it is warm and the call
 	// costs a fraction of a second.
 	warmed map[string]bool
+
+	// warming counts warms in flight. A warm is the one git call vigil makes
+	// that holds the index lock, and cancelling it means SIGKILL, which leaves
+	// index.lock behind in the user's worktree - so the daemon will not
+	// restart itself while this is non-zero.
+	warming atomic.Int32
 
 	// gen counts invalidations. A pass reads it alongside the working set and
 	// compares again at write-back: if it moved, an invalidate landed while the
@@ -204,9 +211,11 @@ func (p *dirtyPoller) pass(ctx context.Context) {
 				// Its own deadline: the commander's default 10s is shorter
 				// than a cold worktree's status and would kill exactly the
 				// call that makes every later one fast.
+				p.warming.Add(1)
 				warmCtx, cancel := context.WithTimeout(ctx, warmTimeout)
 				fetch.WarmDirtyCache(warmCtx, p.c.Cmd, d.root)
 				cancel()
+				p.warming.Add(-1)
 			}
 			fetchStart := time.Now()
 			d.counts.modified, d.counts.added, d.counts.deleted = fetch.FetchDirtyCounts(ctx, p.c.Cmd, d.root)
